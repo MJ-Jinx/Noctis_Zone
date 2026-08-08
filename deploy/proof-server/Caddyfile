@@ -1,0 +1,15 @@
+
+# Replace with the real subdomain before deploying, e.g. proof.noctis.zone
+# Caddy auto-provisions and renews a Let's Encrypt cert for whatever domain
+# is listed here — DNS A/AAAA record must already point at this host's IP
+# before startup, or the ACME challenge fails.
+proof.noctis.zone {
+	reverse_proxy proof-server:6300
+
+	# The proof server itself has no rate limiting or auth (no such
+	# requirement recorded — every DarkVeil user needs unauthenticated
+	# access to /prove). Caddy's own request size limits are left at
+	# default; the proof server's --job-capacity flag is the real
+	# backpressure mechanism (returns 429 once the queue is full).
+	encode gzip
+}

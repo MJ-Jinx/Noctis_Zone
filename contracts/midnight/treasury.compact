@@ -1,0 +1,261 @@
+pragma language_version >= 0.16 && <= 0.23;
+
+import CompactStandardLibrary;
+
+// ============================================================================
+// TREASURY PSM — Noctis Protocol
+// ============================================================================
+//
+// Accumulates platform fees (0.6% of each trade) and manages conversion
+// to stablecoins. For Tier A/B: fees arrive in ADA, swapped on Cardano DEXes.
+// For Tier C: fees arrive in NIGHT, accumulated and converted monthly.
+//
+// This PSM is intentionally simple — it's a fee accumulator.
+// The actual DEX swaps happen off-chain via the ops team.
+//
+// IMPORTANT (found 2026-07-12): `depositFees` here is real, tested,
+// and correctly gated — but nothing in the current architecture actually
+// calls it for either tier. Tier B's treasury share accrues directly on
+// the Cardano curve contract (`bonding_curve_tier_b.ak`), and
+// Tier C's `bonding_curve.compact` accrues its own inline `treasuryFees`
+// instead (and couldn't call this PSM even if it wanted to — Compact has
+// no cross-contract call mechanism). Same class of gap as
+// `creator_escrow.compact`'s `depositFees` — see that file's header and
+// internal tracking. Do not assume a real deposit ever reaches
+// this contract without checking the current curve-contract wiring first.
+//
+// Compiler: compactc v0.31.1
+//
+// Fix (2026-07-10): two real gaps closed while implementing the treasury
+// floor check (CLAUDE.md's 10,000 ADA-equivalent hard floor pausing
+// new Tier B/C launches, 25,000 ADA-equivalent warning threshold):
+//
+// 1. `treasuryBalance` previously summed ADA-denominated and NIGHT-
+//    denominated deposits into ONE combined Uint<128> with no unit
+//    conversion — 1000 lovelace + 1000 NIGHT atomic units became "2000,"
+//    a number with no real meaning. A floor check needs an ADA-equivalent
+//    total, which is impossible to compute from an already-mixed figure.
+//    Split into `adaBalance`/`nightBalance` (and their lifetime-counter
+//    equivalents) so each currency's real value is tracked separately —
+//    `withdrawFees` now also takes a `currency` argument for the same
+//    reason (it previously withdrew from one undifferentiated pool with
+//    no way to know which currency was actually meant).
+//
+// 2. `withdrawFees` decremented the ledger balance but never actually paid
+//    the governor anything for NIGHT withdrawals — same "claim decremented,
+//    no real value moved" gap flagged repeatedly elsewhere this session.
+//    Fixed via `sendUnshielded`, same pattern as
+//    every other real NIGHT payout in this codebase. ADA withdrawals stay
+//    bookkeeping-only — ADA isn't a Midnight-native unshielded token, same
+//    accepted limitation as `depositFees`'s ADA path and the Tier B curve
+//    migration's ADA gaps elsewhere; the real ADA lives in a Cardano wallet the ops team
+//    already controls, this ledger entry just tracks it.
+//
+// `checkFloor`-family circuits deliberately avoid on-chain division (see
+// reference_compact_language_facts: Compact can't divide in-circuit) by
+// taking the NIGHT price ALREADY expressed as lovelace-per-atomic-NIGHT-
+// unit — the off-chain caller does that conversion once from the existing
+// Oracle Strategy (CLAUDE.md: median(Orcfax NIGHT/USD, Minswap TWAP × Orcfax
+// ADA/USD)) before calling in, so only multiplication is needed here.
+//
+// These circuits are read-only queries, not launch-blocking gates — this
+// PSM has no concept of "launch creation" to attach an on-chain block to
+// (deployment of a new launch's PSMs happens off-chain via the SDK/ops
+// flow, not through a circuit here), and Compact still has no working
+// cross-contract call mechanism that would let a bonding curve's
+// own constructor call into this shared treasury even if the concept
+// existed. Same "off-chain enforcement, on-chain source of truth" pattern
+// this file's header already describes for DEX swaps. The off-chain
+// launch-creation flow is expected to call `isBelowFloor`/`isBelowWarning`
+// before proceeding — see integration/midnight-client.ts's
+// `checkTreasuryHealth()` helper.
+// ============================================================================
+
+export struct UserSecretKey { bytes: Bytes<32>; }
+
+// Treasury is a single shared pool across ALL launches and BOTH currencies
+// (Tier A/B fees arrive in ADA, Tier C fees arrive in NIGHT — see the file
+// header), unlike bonding_curve.compact/creator_escrow.compact which are
+// per-launch and therefore single-currency for their whole lifetime. So
+// currency has to be a depositFees()/withdrawFees() call argument here,
+// not a sealed ledger field set once at construction.
+export enum Currency { Ada, Night }
+
+// Note (2026-07-21, Low): unused by any circuit — this PSM is a
+// single shared deployment across ALL launches (see file header), so a
+// per-launch launchId doesn't fit its actual role and nothing here reads
+// it. Kept for now; removing it would change the constructor signature.
+sealed ledger launchId: Bytes<32>;
+export ledger adaBalance: Uint<128>;
+export ledger nightBalance: Uint<128>;
+export ledger totalAdaFeesCollected: Uint<128>;
+export ledger totalNightFeesCollected: Uint<128>;
+sealed ledger governorKey: Bytes<32>;
+export ledger withdrawalCount: Counter;
+
+// Floor/warning thresholds, expressed in lovelace (ADA-equivalent) —
+// fixed at deploy, same "platform-wide constant, adjustable only by
+// redeploying" status as bonding_curve.ak's max_curve_duration.
+sealed ledger floorLovelace: Uint<128>;
+sealed ledger warningLovelace: Uint<128>;
+
+witness getGovernorSecret(): UserSecretKey;
+
+pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:treasury:governor:pk:v1"), sk.bytes]);
+}
+
+// No on-chain division, only multiplication (see file header).
+// `nightPriceLovelacePerAtomicUnit` is how many lovelace one atomic unit
+// of NIGHT is currently worth, computed off-chain. Non-Field multiplication
+// has an undocumented 124-bit ceiling on the SUM of the two operands'
+// declared widths (confirmed empirically elsewhere in this codebase — see
+// bonding_curve.compact's verifyPrice comment) — nightBal is bounded to
+// Uint<80> (~1.2e24, astronomically more than any realistic lifetime NIGHT
+// total) and price to Uint<44> (~1.76e13, same generous bound bonding_curve
+// uses for claimedPrice), 80+44=124, exactly at the ceiling, same pattern
+// as verifyPrice's price * supply^2.
+// Phase 5 hygiene fix (2026-07-12): marked pure — depends only on its own
+// parameters, no ledger or witness access.
+// Finding (2026-07-21, Medium — documented, not fully closeable
+// here): `nightPriceLovelacePerAtomicUnit` is an unconstrained
+// caller-supplied value with no on-chain oracle to check it against (see
+// ORACLE STRATEGY in CLAUDE.md — no real NIGHT/USD or NIGHT/ADA feed exists
+// on Midnight mainnet today; this is the same "off-chain computed, no
+// cross-chain read possible" trust model already used throughout this
+// codebase, e.g. the DarkVeil eligibility checks). A caller can choose
+// this price to make getAdaEquivalentBalance/isBelowFloor/isBelowWarning
+// report whatever they want — but per this file's own header, these
+// circuits are explicitly ADVISORY (no on-chain gate reads them; the
+// off-chain launch-creation flow is expected to call them with a real,
+// independently-sourced price before proceeding). No on-chain lower bound
+// is enforced deliberately: a legitimate zero-NIGHT-balance treasury calls
+// this with price irrelevant (often 0, see tests), and a floor/adversarial
+// analysis found no direction where a caller-chosen price helps an
+// attacker BYPASS the pause gate (understating price only makes the floor
+// check MORE conservative, not less) — the real risk is a compromised
+// off-chain caller misreporting health entirely, which no in-circuit bound
+// on this parameter can close. Revisit if/when a real on-chain NIGHT price
+// oracle exists on Midnight to bind against.
+pure circuit computeAdaEquivalent(
+  adaBal: Uint<128>,
+  nightBal: Uint<128>,
+  nightPriceLovelacePerAtomicUnit: Uint<128>,
+): Uint<128> {
+  assert(disclose(nightBal <= 1208925819614629174706175), "nightBal exceeds safe range"); // 2^80 - 1
+  assert(disclose(nightPriceLovelacePerAtomicUnit <= 17592186044415), "nightPrice exceeds safe range"); // 2^44 - 1
+
+  const nightBalN = nightBal as Uint<80>;
+  const priceN = nightPriceLovelacePerAtomicUnit as Uint<44>;
+  const nightValueInLovelace = ((nightBalN * priceN) as Uint<124>) as Uint<128>;
+
+  return (adaBal + nightValueInLovelace) as Uint<128>;
+}
+
+constructor(launchId_: Bytes<32>, floorLovelace_: Uint<128>, warningLovelace_: Uint<128>) {
+  launchId = disclose(launchId_);
+  adaBalance = 0;
+  nightBalance = 0;
+  totalAdaFeesCollected = 0;
+  totalNightFeesCollected = 0;
+  floorLovelace = disclose(floorLovelace_);
+  warningLovelace = disclose(warningLovelace_);
+  const govSecret = getGovernorSecret();
+  governorKey = disclose(deriveGovernorKey(govSecret));
+}
+
+// Deposit fees.
+// Phase 4 note (2026-07-12): this can only ever be called as a separate,
+// deliberately-submitted transaction — Compact has no cross-contract call
+// mechanism, so the bonding curve can never invoke this directly.
+// In the CURRENT architecture, neither tier's bonding curve deposits here:
+// Tier B's treasury share accrues on the Cardano curve contract, and
+// Tier C's bonding_curve.compact accrues its own inline treasuryFees
+// instead of calling out to this PSM. Same class of gap as
+// creator_escrow.compact's depositFees — tracked together (see FLAGGED_
+// ISSUES.md for the CTO/treasury fee-redirect investigation this surfaced).
+export circuit depositFees(amount: Uint<128>, currency: Currency): [] {
+  // Fix (2026-07-09): this circuit had NO access control and NO
+  // payment check at all — it could be called with an arbitrary amount
+  // and inflate the treasury's claimable balance for free. For NIGHT
+  // deposits (Tier C), require the deposit to actually be paid:
+  // receiveUnshielded adds a ledger-enforced constraint that this
+  // transaction includes a matching unshielded NIGHT input of exactly
+  // `amount`. ADA deposits (Tier A/B) remain self-reported here — ADA
+  // isn't a Midnight-native unshielded token, and how it's represented
+  // on-chain is still open.
+  //
+  // Fix (2026-07-21, High): the ADA branch below was left with
+  // the earlier access-control gap — self-reported bookkeeping is unavoidable
+  // (ADA can't be receiveUnshielded'd), but it still had ZERO access
+  // control, so ANY caller could inflate adaBalance arbitrarily
+  // (depositFees(2^127, Currency.Ada)), permanently defeating the
+  // isBelowFloor/isBelowWarning launch-pause safety gate and risking a
+  // Uint<128> overflow DoS on the health-check circuits. Gated with the
+  // same governor-derive-and-compare pattern withdrawFees already uses —
+  // only the trusted governor may record an ADA deposit, matching the fact
+  // that this branch is unpaid bookkeeping, not a verifiable payment.
+  if (disclose(currency == Currency.Night)) {
+    receiveUnshielded(nativeToken(), disclose(amount));
+    nightBalance = disclose((nightBalance + amount) as Uint<128>);
+    totalNightFeesCollected = disclose((totalNightFeesCollected + amount) as Uint<128>);
+  } else {
+    const govSecret = getGovernorSecret();
+    const govKey = deriveGovernorKey(govSecret);
+    assert(disclose(govKey == governorKey), "Only governor can record an ADA deposit");
+    adaBalance = disclose((adaBalance + amount) as Uint<128>);
+    totalAdaFeesCollected = disclose((totalAdaFeesCollected + amount) as Uint<128>);
+  }
+}
+
+// Withdraw fees for stablecoin conversion (governor only). Now takes a
+// `currency` so it's clear which balance is being drawn down — previously
+// withdrew from one undifferentiated pool. NIGHT withdrawals actually pay
+// out via sendUnshielded (previously ledger-only, see file header); ADA
+// withdrawals stay bookkeeping-only (ADA isn't Midnight-native).
+export circuit withdrawFees(amount: Uint<128>, currency: Currency, recipientAddr: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can withdraw");
+  // Phase 5 hygiene fix (2026-07-12): sanity-check the caller-supplied
+  // payout destination isn't the empty/all-zero address — guards against a
+  // fat-fingered recipientAddr silently burning withdrawn treasury funds.
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  if (disclose(currency == Currency.Night)) {
+    assert(disclose(amount <= nightBalance), "Insufficient NIGHT treasury balance");
+    nightBalance = disclose((nightBalance - amount) as Uint<128>);
+    const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+    sendUnshielded(nativeToken(), disclose(amount), dest);
+  } else {
+    assert(disclose(amount <= adaBalance), "Insufficient ADA treasury balance");
+    adaBalance = disclose((adaBalance - amount) as Uint<128>);
+  }
+  withdrawalCount.increment(1);
+}
+
+// Get treasury balances (per currency — see file header on why these can't
+// be meaningfully combined into one number without an oracle price).
+export circuit getAdaBalance(): Uint<128> {
+  return adaBalance;
+}
+
+export circuit getNightBalance(): Uint<128> {
+  return nightBalance;
+}
+
+// Mark-to-market ADA-equivalent total (adaBalance + nightBalance
+// converted at the given rate). Read-only — see file header on why this
+// can't gate anything on-chain and is meant to be checked off-chain before
+// a new Tier B/C launch is created.
+export circuit getAdaEquivalentBalance(nightPriceLovelacePerAtomicUnit: Uint<128>): Uint<128> {
+  return computeAdaEquivalent(adaBalance, nightBalance, nightPriceLovelacePerAtomicUnit);
+}
+
+export circuit isBelowFloor(nightPriceLovelacePerAtomicUnit: Uint<128>): Boolean {
+  return computeAdaEquivalent(adaBalance, nightBalance, nightPriceLovelacePerAtomicUnit) < floorLovelace;
+}
+
+export circuit isBelowWarning(nightPriceLovelacePerAtomicUnit: Uint<128>): Boolean {
+  return computeAdaEquivalent(adaBalance, nightBalance, nightPriceLovelacePerAtomicUnit) < warningLovelace;
+}

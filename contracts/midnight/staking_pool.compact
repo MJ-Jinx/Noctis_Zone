@@ -1,0 +1,552 @@
+pragma language_version >= 0.16 && <= 0.23;
+
+import CompactStandardLibrary;
+
+// ============================================================================
+// STAKING REWARDS POOL PSM — Noctis Protocol (Tier C only) — 2026-07-14
+// ============================================================================
+//
+// Optional per-launch feature: a creator allocates STAKING_ALLOC_PCT (25%,
+// fixed) of total supply into a rewards pool. Holders who manually stake on
+// Noctis earn a daily pro-rata share, paid out over a creator-chosen 3-5
+// year runway, claimable from their token profile for a flat $1 fee (NIGHT,
+// this tier). See CLAUDE.md's "STAKING REWARDS (OPTIONAL)" section.
+//
+// REWARD ACCOUNTING DESIGN — same governor-Merkle-snapshot pattern already
+// shipped elsewhere in this codebase (cto_governance.compact's
+// balanceSnapshotRoot, eligibility_gate.compact's allowlistRoot): Compact
+// cannot divide in-circuit and has no reward-per-share accumulator
+// primitive, so the daily pro-rata math is computed off-chain by the
+// governor from real, public on-chain stake/unstake events and published as
+// a Merkle root (rewardRoot) over (stakerKey, cumulativeRewardAmount)
+// leaves. claimRewards proves ZK membership of the caller's own leaf — not
+// a re-derivation of the reward math itself, which stays a governor
+// commitment, auditable the same way every other governor-published root on
+// this platform already is.
+//
+// TOKEN CUSTODY — READ BEFORE MODIFYING (architectural caveat):
+// bonding_curve.compact (Tier C's merged eligibility/DarkVeil/bonding-curve
+// PSM) never mints the Tier C launch token as a real Midnight coin — it
+// tracks ownership purely as an internal ledger `balances: Map<Bytes<32>,
+// Uint<128>>`. Compact has no cross-contract call mechanism (verified
+// repeatedly this session — "every call form tested fails with
+// 'contract types are not yet implemented'"), so this contract has no way
+// to read or debit that map. Two consequences, both deliberate, both
+// user-confirmed (2026-07-14) over the alternative of merging staking
+// circuits directly into bonding_curve.compact (which would have given
+// real on-chain custody but risked destabilizing that already-audited
+// 1801-line/46-test file for one optional feature):
+//
+//   1. STAKING itself is NOT custodied on-chain by this contract. "Staked
+//      amount" per wallet is governor-attested off-chain from
+//      bonding_curve.compact's own real, public ledger events and
+//      published here as stakeSnapshotRoot — the same trust model this
+//      platform already uses for allowlist membership and CTO voting
+//      weight (governor computes off-chain, publishes a root, ZK-proves
+//      membership only — never independently re-verified in-circuit).
+//   2. REWARD PAYOUT is a genuinely NEW, separate Midnight-native coin,
+//      minted directly to the claiming staker via the stdlib's
+//      mintUnshieldedToken (confirmed real and tested against
+//      LFDT-Minokawa/compact@main, 2026-07-14 — see
+//      compiler/standard-library.compact and test-center/compact/
+//      unshielded-tokens.compact in that repo). It is NOT literally the
+//      same fungible unit as bonding_curve.compact's internal launch-token
+//      balances, because that contract never minted a real coin for
+//      stakers to deposit in the first place. Rewards are minted on
+//      demand at claim time (poolBalance is an authorized-mint budget, not
+//      pre-funded custody) — this sidesteps needing this contract to hold
+//      and later re-spend its own minted coins.
+//
+// This is building ahead of Tier C's own token foundation, same as the
+// rest of Tier C (still design-complete/build-blocked per CLAUDE.md's open
+// issues) — flagged explicitly here rather than hidden.
+//
+// NO ON-CHAIN DURATION OR EMISSION RATE — same "self-limiting depletion"
+// design as the Cardano sibling (contracts/cardano/staking_pool.ak): the
+// only real invariant enforced here is "cumulative minted rewards never
+// exceed poolBalance." The 3-5 year runway is a pure off-chain governor
+// commitment (dailyEmission = poolBalance / durationDays, publicly
+// auditable via the published root sequence over time), not a stored
+// on-chain field. TopUpPool therefore just increases poolBalance — no rate
+// recalculation needed anywhere.
+//
+// Compiler: compactc v0.31.1
+// ============================================================================
+
+export struct UserSecretKey { bytes: Bytes<32>; }
+export struct UserPublicKey { bytes: Bytes<32>; }
+
+// One level of a Merkle inclusion proof — sibling hash + which side the
+// folding node is on. Same shape as cto_governance.compact/
+// eligibility_gate.compact's MerkleProofEntry.
+struct MerkleProofEntry {
+  sibling: Bytes<32>;
+  goesLeft: Boolean;
+}
+
+// Domain-separated leaf for the stake-snapshot tree — binds a staked
+// amount to the staker's own derived identity (same anti-leaf-borrowing
+// discipline as cto_governance.compact's BalanceLeafInput, design requirement
+// lineage).
+struct StakeLeafInput {
+  domain: Bytes<32>;
+  stakerKey: Bytes<32>;
+  stakedAmount: Uint<128>;
+}
+
+struct StakeNodeInput {
+  domain: Bytes<32>;
+  left: Bytes<32>;
+  right: Bytes<32>;
+}
+
+// Domain-separated leaf for the reward tree — the CUMULATIVE amount a
+// staker has earned as of this published root (not a per-period delta).
+// claimRewards pays out (thisAmount - claimedRewards[staker]).
+struct RewardLeafInput {
+  domain: Bytes<32>;
+  stakerKey: Bytes<32>;
+  cumulativeAmount: Uint<128>;
+}
+
+struct RewardNodeInput {
+  domain: Bytes<32>;
+  left: Bytes<32>;
+  right: Bytes<32>;
+}
+
+// ============================================================================
+// LEDGER STATE
+// ============================================================================
+
+sealed ledger launchId: Bytes<32>;
+sealed ledger governorKey: Bytes<32>;
+sealed ledger creatorKey: Bytes<32>;
+// One platform wallet: the treasury/ops pair is gone, so the claim fee has
+// a single destination and no share to verify.
+sealed ledger platformAddr: Bytes<32>;
+
+// Domain separator for this launch's reward coin. Every mintUnshieldedToken
+// call in this contract uses this same value, so every minted reward coin
+// shares one consistent color (tokenType(rewardDomainSep, thisContract)) —
+// see file header's TOKEN CUSTODY note for why this is a separate coin from
+// bonding_curve.compact's internal launch-token ledger.
+sealed ledger rewardDomainSep: Bytes<32>;
+
+// Authorized-to-mint budget. topUpPool increases it; claimRewards decreases
+// it by the exact amount freshly minted. This is the entire "runway"
+// invariant — see file header.
+export ledger poolBalance: Uint<128>;
+
+// Fix (2026-07-30): topUpPool previously accepted any amount > 0 from
+// the creator with no ceiling and no relationship to totalSupply /
+// STAKING_ALLOC_PCT (25%, CLAUDE.md) anywhere in this contract — creator +
+// governor together could mint unlimited real, transferable reward coins,
+// with the tokenomics' 25%-of-supply cap enforced nowhere on-chain.
+// maxPoolBudget pins totalSupply * 25 / 100, computed off-chain (Compact
+// can't divide in-circuit — same convention as eligibility_gate.compact's
+// walletCap) and passed in at deploy. totalToppedUp is the cumulative,
+// monotonic total ever authorized (distinct from poolBalance, which
+// decreases on every claim) — topUpPool checks THIS against the budget,
+// not the currently-available poolBalance.
+sealed ledger maxPoolBudget: Uint<128>;
+export ledger totalToppedUp: Uint<128>;
+
+// Governor-published root over (stakerKey, stakedAmount) leaves — the
+// on-chain transparency anchor for real stake/unstake activity observed
+// off-chain on bonding_curve.compact. See file header's TOKEN CUSTODY note.
+export ledger stakeSnapshotRoot: Bytes<32>;
+
+// Governor-published root over (stakerKey, cumulativeRewardAmount) leaves.
+export ledger rewardRoot: Bytes<32>;
+
+// Cumulative amount already minted/paid to each staker — prevents
+// re-claiming the same delta twice; claimRewards pays the difference
+// between the newly-proven cumulative amount and this stored value.
+export ledger claimedRewards: Map<Bytes<32>, Uint<128>>;
+
+// Current $1-equivalent NIGHT claim fee (STAKING_CLAIM_FEE_USD) — set at
+// deploy from an off-chain oracle read (Orcfax/Minswap median, same as
+// everywhere else on this platform), governor-updatable afterward via
+// updateClaimFee to stay roughly pegged over the pool's 3-5 year life —
+// same "fixed-then-governor-updatable" convention as eligibility_gate.
+// compact's bondAmount/allowlistRoot.
+export ledger claimFeeNightAmount: Uint<128>;
+
+// ============================================================================
+// WITNESSES
+// ============================================================================
+
+witness getUserSecret(): UserSecretKey;
+witness getGovernorSecret(): UserSecretKey;
+witness getCreatorSecret(): UserSecretKey;
+
+// Fixed-depth Merkle proofs — same depth-20 convention as
+// eligibility_gate.compact's getMerkleProof (2^20 registrants is far
+// beyond any realistic per-launch staker count, for materially cheaper
+// proving than a deeper tree).
+witness getStakeProof(): Vector<20, MerkleProofEntry>;
+witness getStakeLeafAmount(): Uint<128>;
+witness getRewardProof(): Vector<20, MerkleProofEntry>;
+witness getRewardLeafAmount(): Uint<128>;
+
+// ============================================================================
+// HELPER CIRCUITS
+// ============================================================================
+
+pure circuit deriveUserPublicKey(sk: UserSecretKey): UserPublicKey {
+  return UserPublicKey {
+    bytes: persistentHash<Vector<2, Bytes<32>>>([
+      pad(32, "noctis:staking:user:pk:v1"),
+      sk.bytes
+    ])
+  };
+}
+
+pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "noctis:staking:governor:pk:v1"),
+    sk.bytes
+  ]);
+}
+
+pure circuit deriveCreatorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "noctis:staking:creator:pk:v1"),
+    sk.bytes
+  ]);
+}
+
+pure circuit isKeyZero(key: UserPublicKey): Boolean {
+  return key == default<UserPublicKey>;
+}
+
+// Verify a claimed fee slice is the FLOOR of grossAmount * bps / 10000 —
+// same cross-multiplication pattern as eligibility_gate.compact/
+// bonding_curve.compact's copies. No in-circuit division.
+pure circuit verifyFeeSlice(
+  grossAmount: Uint<128>,
+  bps: Uint<16>,
+  claimedFee: Uint<128>
+): Boolean {
+  assert(disclose(grossAmount <= 19342813113834066795298815), "grossAmount exceeds safe range"); // 2^84 - 1
+  assert(disclose(claimedFee <= 19342813113834066795298815), "claimedFee exceeds safe range"); // 2^84 - 1
+
+  const grossN = grossAmount as Uint<84>;
+  const claimedFeeN = claimedFee as Uint<84>;
+
+  const product = ((grossN as Uint<100>) * (bps as Uint<100>)) as Uint<100>;
+  const claimedTimesDenom = ((claimedFeeN as Uint<98>) * (10000 as Uint<98>)) as Uint<98>;
+  const nextClaimedTimesDenom = ((claimedTimesDenom as Uint<100>) + (10000 as Uint<100>)) as Uint<100>;
+
+  return disclose(
+    (claimedTimesDenom as Uint<100>) <= product && product < nextClaimedTimesDenom
+  );
+}
+
+// Verify a fixed-depth Merkle proof of (stakerKey, stakedAmount) membership
+// against stakeSnapshotRoot. Returns the proven staked amount. Not gated
+// behind claimRewards (see claimRewards' comment for why) — exposed
+// standalone via proveStake for transparency/UI display.
+circuit verifyStakeMembership(caller: Bytes<32>): Uint<128> {
+  const amount = getStakeLeafAmount();
+  const leaf = persistentHash<StakeLeafInput>(StakeLeafInput {
+    domain: pad(32, "noctis:staking:stake:leaf:v1"),
+    stakerKey: caller,
+    stakedAmount: amount
+  });
+  const proof = getStakeProof();
+  const recomputedRoot = fold(
+    (acc: Bytes<32>, entry: MerkleProofEntry): Bytes<32> => {
+      const left = disclose(entry.goesLeft) ? acc : entry.sibling;
+      const right = disclose(entry.goesLeft) ? entry.sibling : acc;
+      return persistentHash<StakeNodeInput>(StakeNodeInput {
+        domain: pad(32, "noctis:staking:stake:node:v1"),
+        left: left,
+        right: right
+      });
+    },
+    leaf,
+    proof
+  );
+  assert(disclose(recomputedRoot == stakeSnapshotRoot), "Invalid stake proof");
+  return disclose(amount);
+}
+
+// Verify a fixed-depth Merkle proof of (stakerKey, cumulativeAmount)
+// membership against rewardRoot. Returns the proven cumulative amount.
+circuit verifyRewardMembership(caller: Bytes<32>): Uint<128> {
+  const amount = getRewardLeafAmount();
+  const leaf = persistentHash<RewardLeafInput>(RewardLeafInput {
+    domain: pad(32, "noctis:staking:reward:leaf:v1"),
+    stakerKey: caller,
+    cumulativeAmount: amount
+  });
+  const proof = getRewardProof();
+  const recomputedRoot = fold(
+    (acc: Bytes<32>, entry: MerkleProofEntry): Bytes<32> => {
+      const left = disclose(entry.goesLeft) ? acc : entry.sibling;
+      const right = disclose(entry.goesLeft) ? entry.sibling : acc;
+      return persistentHash<RewardNodeInput>(RewardNodeInput {
+        domain: pad(32, "noctis:staking:reward:node:v1"),
+        left: left,
+        right: right
+      });
+    },
+    leaf,
+    proof
+  );
+  assert(disclose(recomputedRoot == rewardRoot), "Invalid reward proof");
+  return disclose(amount);
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+// Note (2026-07-21, Low — documentation only): unlike governorKey
+// below (derived in-circuit from the deployer's own secret via
+// deriveGovernorKey), `creatorPubKey_` is passed in as raw already-derived
+// bytes. If the deployer supplies the wrong value (e.g. a raw address
+// instead of deriveCreatorKey(secret)), topUpPool control silently belongs
+// to whoever holds the matching secret, not the intended creator — same
+// footgun class as lp_escrow.compact/creator_escrow.compact's
+// communityWalletAddr. Off-chain deploy tooling must pass the real
+// deriveCreatorKey(creatorSecret) output here, not a bare address.
+constructor(
+  launchId_: Bytes<32>,
+  creatorPubKey_: Bytes<32>,
+  platformAddr_: Bytes<32>,
+  initialClaimFeeNightAmount_: Uint<128>,
+  maxPoolBudget_: Uint<128>
+) {
+  launchId = disclose(launchId_);
+  creatorKey = disclose(creatorPubKey_);
+  platformAddr = disclose(platformAddr_);
+  assert(disclose(initialClaimFeeNightAmount_ > 0), "Initial claim fee must be positive");
+  claimFeeNightAmount = disclose(initialClaimFeeNightAmount_);
+
+  // Fix (2026-07-30): maxPoolBudget MUST equal totalSupply *
+  // STAKING_ALLOC_PCT / 100, computed off-chain (Compact can't divide) and
+  // passed in directly — deploy-time callers must compute this themselves:
+  //   maxPoolBudget = totalSupply * 25 / 100
+  assert(disclose(maxPoolBudget_ > 0), "maxPoolBudget must be positive");
+  maxPoolBudget = disclose(maxPoolBudget_);
+  totalToppedUp = 0;
+
+  const govSecret = getGovernorSecret();
+  governorKey = disclose(deriveGovernorKey(govSecret));
+
+  // Per-launch domain separation so two launches' staking pools never mint
+  // colliding token colors, even deployed from identical bytecode.
+  rewardDomainSep = disclose(persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "noctis:staking:reward:coin:v1"),
+    launchId_
+  ]));
+
+  poolBalance = 0;
+  stakeSnapshotRoot = disclose(pad(32, ""));
+  rewardRoot = disclose(pad(32, ""));
+}
+
+// ============================================================================
+// CIRCUITS — CREATOR / GOVERNOR ADMIN
+// ============================================================================
+
+// Creator adds more tokens to the pool's authorized-mint budget. See file
+// header — this doesn't move any pre-existing coins (there are none to
+// move; rewards mint on demand at claim time), it authorizes more minting.
+export circuit topUpPool(amount: Uint<128>): [] {
+  const creatorSecret = getCreatorSecret();
+  const callerKey = deriveCreatorKey(creatorSecret);
+  assert(disclose(callerKey == creatorKey), "Only creator can top up the pool");
+  assert(disclose(amount > 0), "Top-up amount must be positive");
+  // Fix (2026-07-30): checked against totalToppedUp (cumulative,
+  // monotonic) rather than poolBalance (which decreases on every claim) —
+  // see maxPoolBudget/totalToppedUp's own declaration comments.
+  const newTotalToppedUp = (totalToppedUp + amount) as Uint<128>;
+  assert(disclose(newTotalToppedUp <= maxPoolBudget), "Top-up would exceed the pool's authorized budget");
+  totalToppedUp = disclose(newTotalToppedUp);
+  poolBalance = disclose((poolBalance + amount) as Uint<128>);
+}
+
+// Governor publishes a fresh stake-snapshot root, reflecting real
+// stake/unstake activity observed off-chain on bonding_curve.compact.
+export circuit publishStakeSnapshot(newRoot: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can publish stake snapshot");
+  stakeSnapshotRoot = disclose(newRoot);
+}
+
+// Governor publishes a fresh reward root, reflecting the latest off-chain
+// pro-rata accrual computation.
+// Finding (2026-07-21, Medium — documented, not fixed here): a
+// single governor key can mint the entire poolBalance to arbitrary
+// addresses via a crafted rewardRoot. Since claimRewards mints real,
+// transferable tokens based purely on membership in whatever root is
+// published here, the reward root is a trusted governor input: it is
+// derived from public on-chain events and is independently re-derivable,
+// but its publication is a trusted step. This is the same
+// accepted governor-trust model as every other governor-published root on
+// this platform (allowlist, CTO balance snapshot) — but the blast radius
+// is higher here specifically because this root mints liquid tokens
+// rather than only affecting governance tallies or eligibility. Given real
+// value is at stake, a production deployment should consider hardening
+// this key to an M-of-N multisig-derived key, or adding a per-root
+// emission-rate ceiling / timelock so a single bad root can't instantly
+// drain the pool — not attempted here since it changes the deploy-time key
+// model, a decision for whoever operates this contract in production, not
+// a code-only fix.
+export circuit publishRewardRoot(newRoot: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can publish reward root");
+  rewardRoot = disclose(newRoot);
+}
+
+// Governor re-pegs the $1-equivalent NIGHT claim fee as the oracle price
+// moves over the pool's multi-year life.
+// Note (2026-07-21, Low — documented, not fixed here): claimRewards
+// reads claimFeeNightAmount from ledger state at call time. If the
+// governor updates it between when a user builds their claim transaction
+// and when it actually lands on-chain, the disclosed fee the user signed
+// no longer matches, and the claim fails — a liveness griefing vector
+// (governor-controlled, no fund loss). A fix would have claimRewards accept
+// a caller-supplied maxFee and assert claimFeeNightAmount <= maxFee, so a
+// fee update within the user's own tolerance doesn't invalidate their tx —
+// not implemented here since it changes claimRewards' external signature.
+export circuit updateClaimFee(newAmount: Uint<128>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can update claim fee");
+  assert(disclose(newAmount > 0), "Claim fee must be positive");
+  claimFeeNightAmount = disclose(newAmount);
+}
+
+// ============================================================================
+// CIRCUITS — STAKER
+// ============================================================================
+
+// Prove and return the caller's own currently-attested staked amount.
+// Read-only / informational (UI display, or independent verification of
+// the governor's published snapshot) — NOT required by claimRewards below.
+export circuit proveStake(): Uint<128> {
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+  return verifyStakeMembership(caller.bytes);
+}
+
+// Claim accrued staking rewards. Deliberately does NOT require a stake
+// proof for the CURRENT stakeSnapshotRoot: rewardRoot already encodes
+// cumulative earned amount as computed off-chain from real stake history,
+// and a staker who has since unstaked must still be able to claim rewards
+// already earned while staked — same "past accrual survives a later state
+// change" principle as vesting.compact's claimVested.
+//
+// Max mint per call is bounded by mintUnshieldedToken's Uint<64> amount
+// parameter (stdlib signature, confirmed 2026-07-14) — enforced explicitly
+// below rather than silently truncating.
+// Note (2026-07-21, Low — documented, not fixed here): because
+// claimedRewards only advances on a successful claim, a staker whose
+// accrued delta (cumulativeEarned - alreadyClaimed) legitimately exceeds
+// 2^64-1 in a single call can never claim it — not even partially, since
+// there's no way to advance claimedRewards by less than the full delta.
+// Unlikely at realistic NIGHT decimal scales, but a real stuck-funds edge
+// case. A fix would let the caller pass a claimAmount <= payout and
+// advance claimedRewards by that amount instead of always by the full
+// delta — not implemented here since it changes this circuit's signature.
+export circuit claimRewards(recipientAddr: Bytes<32>): [] {
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  const cumulativeEarned = verifyRewardMembership(caller.bytes);
+  const alreadyClaimed = claimedRewards.member(disclose(caller.bytes))
+    ? claimedRewards.lookup(disclose(caller.bytes))
+    : 0;
+  assert(disclose(cumulativeEarned > alreadyClaimed), "Nothing new to claim");
+  const payout = (cumulativeEarned - alreadyClaimed) as Uint<128>;
+  assert(disclose(payout <= poolBalance), "Pool balance exhausted");
+  assert(disclose(payout <= 18446744073709551615), "Payout exceeds max mintable per claim"); // 2^64 - 1
+
+  // Checks-effects-interactions: update ledger before minting/paying out.
+  claimedRewards.insert(disclose(caller.bytes), disclose(cumulativeEarned));
+  poolBalance = disclose((poolBalance - payout) as Uint<128>);
+
+  // Mint the reward payout directly to the staker as a real Midnight-native
+  // coin — see file header's TOKEN CUSTODY note for why this is a separate
+  // coin color from bonding_curve.compact's internal launch-token ledger.
+  const payoutU64 = disclose(payout) as Uint<64>;
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+  mintUnshieldedToken(disclose(rewardDomainSep), payoutU64, dest);
+
+  // Flat $1-equivalent NIGHT claim fee (STAKING_CLAIM_FEE_USD), paid by the
+  // caller in the same transaction and passed whole to the platform. One
+  // wallet, so there is no share for the caller to claim and none to verify.
+  receiveUnshielded(nativeToken(), disclose(claimFeeNightAmount));
+  const platformDest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: platformAddr }));
+  sendUnshielded(nativeToken(), disclose(claimFeeNightAmount), platformDest);
+}
+
+// ============================================================================
+// PRIVACY ANALYSIS
+// ============================================================================
+//
+// What goes ON-CHAIN (public ledger):
+//   - launchId, governorKey, creatorKey (derived, not raw secrets)
+//   - platformAddr (real unshielded address, fixed at deploy)
+//   - rewardDomainSep (derived from launchId, not secret)
+//   - poolBalance, claimFeeNightAmount (aggregate/public by design)
+//   - stakeSnapshotRoot, rewardRoot (Merkle roots, not the underlying leaves)
+//   - claimedRewards (keyed by UserPublicKey, not real identity)
+//
+// What stays PRIVATE (never leaves the prover):
+//   - User's secret key (getUserSecret witness)
+//   - Governor's / creator's secret key (getGovernorSecret/getCreatorSecret)
+//   - Stake and reward Merkle proofs (getStakeProof/getRewardProof)
+//   - The full set of leaves behind stakeSnapshotRoot/rewardRoot — only the
+//     caller's own leaf is ever proven, never the whole roster
+//
+// Privacy guarantees:
+//   - Stake and reward membership are proven via ZK without revealing
+//     which leaf, bound to the caller's own derived identity (same
+//     leaf-binding discipline as eligibility_gate.compact's design requirement) so
+//     a proof can't be borrowed from another staker's leaf.
+//   - UserPublicKey is a domain-separated hash of the user's secret — not
+//     linkable to real-world identity or to other launches/contracts (a
+//     fresh domain string is used here, distinct from every other
+//     contract's UserPublicKey derivation on this platform) AGAINST THE
+//     PUBLIC. Correction (2026-07-21, Medium): this guarantee does
+//     NOT hold against the governor, who is a mandatory party for both
+//     trees. To place a staker into stakeSnapshotRoot/rewardRoot at all,
+//     the governor must learn that staker's UserPublicKey off-chain and
+//     bind it to their real, public stake/unstake activity on
+//     bonding_curve.compact (which uses a DIFFERENT identity derivation) —
+//     the governor therefore necessarily learns the full
+//     realStaker <-> UserPublicKey <-> rewardAmount mapping by
+//     construction. Treat "not linkable to real-world identity" above as
+//     "not linkable to the PUBLIC" — the governor is a second, narrower
+//     trust boundary, same category as every other governor-published-root
+//     mechanism on this platform (allowlist, CTO balance snapshot), just
+//     not previously stated explicitly for this contract. The specific
+//     off-chain key-registration step (how a user's staking UserPublicKey
+//     gets bound to their real bonding_curve.compact stake activity) is an
+//     unstated integration dependency — if the keys don't line up, claims
+//     simply fail Merkle membership (a liveness failure, not a fund-safety
+//     issue).
+//   - claimRewards must disclose recipientAddr and the minted amount to
+//     pay out for real — same unavoidable disclosure every other real
+//     payout circuit on this platform already makes (claimBondRefund,
+//     claimVested, ClaimCreatorFees, etc.). The mapping from UserPublicKey
+//     to real-world identity stays unknown regardless.
+//   - Reward accounting itself (who earned how much and why) is a
+//     governor off-chain computation, independently re-derivable by
+//     anyone from bonding_curve.compact's real public stake/unstake
+//     events — not a black box, but also not verified in-circuit (see
+//     file header's TOKEN CUSTODY note for why that's currently
+//     unavoidable, same root cause as everywhere else on Tier C).
+//
+// ============================================================================

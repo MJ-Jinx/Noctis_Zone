@@ -1,0 +1,17 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"strict": true,
+		"declaration": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"outDir": "dist"
+	},
+	// cli/ is included deliberately: those entry points are what WordPress
+	// actually executes, and while they were excluded a submitter's API could
+	// change without anything flagging the CLI calling the old one. esbuild
+	// bundles without type-checking, so this is the only thing that catches it.
+	"include": ["*.ts", "cli/*.ts"]
+}

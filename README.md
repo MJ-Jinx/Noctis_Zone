@@ -1,0 +1,130 @@
+# Noctis Protocol
+
+**They can't front-run what they can't see.**
+
+A three-tier token launchpad built on Cardano L1 and Midnight Network. Private buying phases powered by zero-knowledge proofs, identity-verified whale caps, permanent LP lock, and community rescue mechanics.
+
+---
+
+## Table of Contents
+
+- [Three launch options](#three-launch-options)
+- [Architecture](#architecture)
+- [Tech stack](#tech-stack)
+- [What's built](#whats-built)
+- [What's next](#whats-next)
+- [Protocol constants (key figures)](#protocol-constants-key-figures)
+- [Domain + social](#domain--social)
+- [License](#license)
+
+---
+
+## Three launch options
+
+| | Tier A | Tier B | Tier C |
+|---|---|---|---|
+| **Name** | Cardano Only | Cardano + DarkVeil | Midnight + DarkVeil |
+| **Token lives on** | Cardano L1 | Cardano L1 | Midnight Network |
+| **DarkVeil phase** | No | Yes | Yes |
+| **Trade currency** | ADA | ADA | NIGHT |
+| **Privacy level** | None | High | Maximum |
+
+**Tier A** — standard public bonding curve on Cardano. Linear curve, 5% cumulative per-wallet-key cap (soft — a second wallet is cheap on this tier).
+
+**Tier B** — DarkVeil private pre-sale on Midnight, followed by a quadratic public bonding curve. 5% cap enforced by ZK identity (stake key + graph checks). Token and LP graduate to a Cardano DEX.
+
+**Tier C** — fully Midnight-native. Token, bonding curve, DarkVeil phase, and LP all live on Midnight. Cardano is only used for the ZK Fair Launch Certificate anchor. Priced in NIGHT. Maximum privacy. *(Build-blocked — see internal tracking)*
+
+---
+
+## Architecture
+
+System overview and Midnight PSM flow diagrams, plus a full contract-to-tier reference table.
+
+**[See ARCHITECTURE.md](ARCHITECTURE.md)**
+
+---
+
+## Tech stack
+
+### Public site (noctis.zone)
+- **WordPress** — PHP 8.x, custom theme, vanilla JS, no build step
+- **No Next.js, no React, no npm** — by design
+
+### Cardano L1 (smart contracts)
+- **Language:** Aiken
+- **Indexer:** Blockfrost (primary), Maestro / Koios (fallback)
+- **Price oracle:** Orcfax (primary), Minswap TWAP (secondary)
+- **Graduation DEX:** CSwap (default), Minswap / Splash / Spectrum (whitelist)
+
+### Midnight Network (PSM contracts)
+- **Language:** Compact
+- **SDK:** Midnight SDK
+- **ZK proofs:** Client-side via Midnight proof generation libraries
+
+---
+
+## What's built
+
+- [x] Full WordPress frontend — home, launches index, launch detail pages, DarkVeil registration, How It Works, Transparency, Create Launch wizard *(lives outside this repo — see note below)*
+- [x] All 9 Cardano/Aiken validators (bonding curve, LP escrow, CTO governance + sybil-challenge, vesting, ZK anchor, N-hop challenge, staking) — compile clean, fully tested
+- [x] All 8 Midnight/Compact PSMs (bonding curve, eligibility gate, creator escrow, treasury, vesting, LP escrow, CTO governance, staking) — compile clean with full ZK proving keys, fully tested
+- [x] Integration layer — Blockfrost client, off-chain DarkVeil eligibility checks, Midnight SDK wrapper, wallet connection, ZK cert relayer, price oracles
+- [x] **Tier A proven end-to-end on real Cardano Preprod** — mint → buy → graduate → LP lock → creator vesting claim → stall/expire/buyback, every step a real, explorer-verifiable transaction
+- [x] Multiple full adversarial security review passes across both chains — every finding resolved or explicitly accepted, all covered by regression tests. Posture summary in `docs/SECURITY_MODEL.md`
+- [x] Staking Rewards Pool — optional per-launch feature, all 3 tiers, with a real browser-wallet-signed stake/unstake/claim UI (Tier A/B)
+- [x] CTO Governance — both chains' contracts complete and audited, with an extensive off-chain backend (voter identity, balance-snapshot, relay, sybil-challenge). Vote-casting UI is the one piece still unbuilt — see What's next
+
+> The WordPress theme/plugins that power the live site are not tracked in this repository — a deliberate convention, not a missing checkout. They live alongside their own changelog outside this repo.
+
+## What's next
+
+See [ROADMAP.md](ROADMAP.md) for the full current status — this is a snapshot, not a substitute.
+
+1. CTO Governance vote-casting UI (propose/vote/execute)
+2. LP trading-fee harvest UI
+3. Real Preprod verification of the Staking UI, end-to-end
+4. WordPress frontend: final polish + production deployment
+5. Preprod deployment + real DUST (Midnight gas) cost measurement
+6. Independent professional security audit
+7. Tier C blockers: a ratified Midnight fungible token standard, a graduation-target DEX
+8. Mainnet launch
+
+---
+
+## Protocol constants (key figures)
+
+| Constant | Value | Notes |
+|---|---|---|
+| Total supply | 1,000,000,000 | Hard cap, fixed by a one-shot minting policy |
+| Launch fee | **$10 USD** | Flat across all three tiers, paid in ADA or NIGHT at the market rate |
+| LP reserve | **20%** | Locked at graduation, never withdrawable |
+| Graduation | **75,000 ADA** market cap | Default; the creator sets the curve prices that determine it |
+| DV allocation | 10–20% (default 15%) | Creator-adjustable |
+| Wallet cap | 5% | Cumulative across DV + public |
+| NIGHT bond | $50 USD | Required for DV registration |
+| Curve trade fee | 1.5% + batcher | 0.5% creator / 1.0% platform — one wallet, no split |
+| Post-graduation fee | 1.2% + batcher | 1.0% creator / 0.1% platform / 0.1% compounded into the pool |
+| LP lock | 365 days | No withdraw ever |
+| Creator vesting | 90–365 days | No default — forced active selection |
+
+Full constants in [CLAUDE.md](CLAUDE.md).
+
+---
+
+## Domain + social
+
+- **Website:** [noctis.zone](https://noctis.zone) 
+- **GitHub:** [github.com/MrJustJinx/Noctis_Zone](https://github.com/MrJustJinx/Noctis_Zone)
+- **Twitter/X:** [@Noctis_Zone](https://x.com/Noctis_Zone)
+- **Discord:** Coming Soon
+
+---
+
+## License
+
+Private. Internal use only.
+
+---
+
+*Built on Cardano + Midnight because privacy should be a default, not a feature.*

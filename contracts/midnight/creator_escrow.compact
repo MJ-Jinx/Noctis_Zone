@@ -1,0 +1,527 @@
+pragma language_version >= 0.16 && <= 0.23;
+
+import CompactStandardLibrary;
+
+// ============================================================================
+// CREATOR ESCROW PSM — Noctis Protocol (v3 — vesting split out)
+// ============================================================================
+//
+// Holds "Stream A" — the creator's bonding curve fee escrow (1.0% of trade
+// volume, accrued pre-graduation, monthly manual claim). This is a simple
+// accrue-and-claim pool with NO vesting curve: CLAUDE.md's "Fee Distribution"
+// section describes it as "fixed at graduation... Payment: Monthly manual
+// claim" — there's no day-based release schedule for fee income anywhere
+// in the spec, only for the creator's TOKEN allocation.
+//
+// "Stream B" — LP Trading Fees (post-graduation, ongoing DEX pool fees) —
+// is paid directly to fee_recipient per CLAUDE.md, not routed through this
+// escrow at all. Never conflate the two ("Two income streams for creators
+// are distinct... never show them as one number").
+//
+// Fixed 2026-07-09: this file used to also own the creator's TOKEN vesting
+// (90-365 day linear release) via a `claimVested` circuit that applied a
+// day-based vesting *curve* directly to `escrowAmount` — the same ledger
+// value `depositFees` was simultaneously growing with new trade-fee income.
+// That's a real bug, not just mislabeling: the vesting formula
+// `claimAmount * vestDays == escrowAmount * elapsedDays` assumes a fixed
+// total, but `escrowAmount` kept changing underneath an in-progress claim
+// schedule every time a new fee arrived mid-vest. Token vesting now lives
+// in its own contract, vesting.compact, vesting a `tokenAllocation` value
+// that's fixed at deploy and never touched by fee deposits.
+//
+// CTO (Community Takeover Opportunity) — Jinx's vision:
+//   If creator goes MIA for 90+ days (no claim + no social post), the
+//   community can vote via cto_governance PSM to trigger a CTO. After CTO:
+//     - Future creator fees redirect to a community wallet
+//     - Community can claim accumulated fees for project continuation
+//     - If creator returns, CTO can be dissolved (via governance vote)
+//   This is NOT a kill switch — it's a recovery mechanism that keeps
+//   the project alive when the creator disappears.
+//
+// IMPORTANT (found 2026-07-12): despite the description above, this
+// PSM does not actually hold real fees for EITHER tier in the current
+// architecture. Tier B's bonding-curve trade fee accrues directly on the
+// Cardano curve contract (`bonding_curve_tier_b.ak`), and Tier
+// C's `bonding_curve.compact` accrues its own inline `creatorFees` instead
+// of calling `depositFees` here (and couldn't call it even if it wanted to
+// — Compact has no cross-contract call mechanism). `depositFees`
+// is real, tested, and correctly gated — it's just never invoked by
+// anything in the current design. The CTO-redirect behavior described
+// above for "future creator fees" is instead implemented directly on each
+// tier's own bonding curve contract (`triggerCTO`/`dissolveCTO`, mirroring
+// `lp_escrow.ak`'s equivalent pattern) — see internal tracking. Do
+// not assume a real deposit ever reaches this contract without checking
+// the current curve-contract wiring first.
+//
+// Compiler: compactc v0.31.1
+// ============================================================================
+
+export enum EscrowState { Active, Closed, FullyClaimed, CTORedirected, Cancelled }
+
+// Which currency this escrow's fees arrive in — matches the launch's own
+// bonding_curve.compact instance's currency (Ada for Tier B, Night for Tier
+// C; one escrow per launch, so exactly one currency for its whole lifetime,
+// unlike treasury.compact which is a single shared pool across all launches
+// and both currencies). See bonding_curve.compact's Currency enum comment.
+export enum Currency { Ada, Night }
+
+export struct UserSecretKey { bytes: Bytes<32>; }
+export struct UserPublicKey { bytes: Bytes<32>; }
+
+sealed ledger launchId: Bytes<32>;
+sealed ledger creatorKey: Bytes<32>;
+sealed ledger currency: Currency;
+export ledger escrowAmount: Uint<128>;
+export ledger escrowState: EscrowState;
+export ledger claimedAmount: Uint<128>;
+sealed ledger governorKey: Bytes<32>;
+
+// CTO state — tracks whether community has taken over this escrow
+export ledger ctoTriggered: Boolean;
+export ledger communityWallet: Bytes<32>;
+// Which ballot this contract's CTO state acts on, and every ballot already
+// spent here.
+//
+// A CTO trigger changes who receives money. Naming the proposal makes that
+// change a public, checkable claim: `ctoProposalId` is the ballot the CURRENT
+// state rests on, readable by anyone and matchable against cto_governance's
+// own `proposals` ledger, which records each proposal's votes, outcome and —
+// for a SilenceLockTrigger — the community wallet pinned at creation.
+//
+// `consumedProposals` makes a ballot single-use HERE. One passed vote
+// authorises one transition on this contract; re-presenting it does nothing,
+// so a trigger cannot be replayed after a dissolve to install a different
+// wallet under the authority of the same vote.
+export ledger ctoProposalId: Bytes<32>;
+export ledger consumedProposals: Set<Bytes<32>>;
+
+
+// Last time creator claimed funds (for silence-lock detection)
+export ledger lastClaimTimestamp: Uint<64>;
+
+// Fees accumulated AFTER CTO trigger (community-controlled)
+export ledger postCtoFees: Uint<128>;
+
+// Fees claimed by community after CTO
+export ledger communityClaimedAmount: Uint<128>;
+
+witness getCreatorSecret(): UserSecretKey;
+witness getGovernorSecret(): UserSecretKey;
+witness getCommunitySecret(): UserSecretKey;
+
+pure circuit deriveCreatorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:escrow:creator:pk:v1"), sk.bytes]);
+}
+pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:escrow:governor:pk:v1"), sk.bytes]);
+}
+pure circuit deriveCommunityKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:escrow:community:pk:v1"), sk.bytes]);
+}
+
+constructor(
+  launchId_: Bytes<32>,
+  currency_: Currency
+) {
+  launchId = disclose(launchId_);
+  currency = disclose(currency_);
+  // escrowAmount starts at zero and accrues via depositFees() as the
+  // bonding curve trades — there is no upfront amount and no vesting
+  // parameter here anymore; see vesting.compact for the creator's token
+  // release schedule.
+  escrowAmount = 0;
+
+  const govSecret = getGovernorSecret();
+  governorKey = disclose(deriveGovernorKey(govSecret));
+
+  const creatorSecret = getCreatorSecret();
+  creatorKey = disclose(deriveCreatorKey(creatorSecret));
+
+  escrowState = EscrowState.Active;
+  claimedAmount = 0;
+  ctoTriggered = disclose(false);
+  communityWallet = disclose(pad(32, ""));
+  lastClaimTimestamp = 0;
+  postCtoFees = 0;
+  communityClaimedAmount = 0;
+}
+
+// Close the escrow at graduation (governor only) — the bonding curve has
+// stopped trading, so no more depositFees() calls are expected. Fixes
+// escrowAmount at its final total and establishes the baseline timestamp
+// for the 90-day silence-lock clock (only starts once there's an
+// actual claimable balance, not from contract deploy).
+export circuit closeEscrowAtGraduation(graduationTimestamp: Uint<64>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can close escrow");
+  assert(disclose(escrowState == EscrowState.Active), "Escrow not active");
+  // Fix (2026-07-21, High): bind graduationTimestamp to real chain
+  // time — see claimFees's own comment for the full finding this closes
+  // (a forged lastClaimTimestamp defeats the silence-lock clock).
+  assert(blockTimeGte(disclose(graduationTimestamp)), "graduationTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((graduationTimestamp + 3600) as Uint<64>)),
+    "graduationTimestamp too far in the past"
+  );
+  escrowState = EscrowState.Closed;
+  lastClaimTimestamp = disclose(graduationTimestamp);
+}
+
+// Claim accrued fees (creator only). Simple accrue-and-claim — no vesting
+// curve. The creator can claim any amount up to the unclaimed balance,
+// any time after the escrow closes at graduation (CLAUDE.md: "Payment:
+// Monthly manual claim, ADA").
+//
+// Design requirement: this must never only decrement
+// claimedAmount with a comment deferring to "the Zswap layer" — a
+// mechanism that does not exist — so a Tier C (NIGHT) creator's fees had
+// no way out of this contract. Now pays out for real via sendUnshielded
+// when currency == Night. Tier B (Ada) launches remain ledger-only here —
+// ADA isn't a Midnight-native unshielded token, same open question as
+// depositFees's Ada branch and darkveil.compact's payment gap; this
+// is not a new gap introduced by this fix, just not one this fix can close.
+// Fix (2026-07-21, High): every timestamp in this file used to be a
+// free caller-supplied parameter with zero blockTime* binding —
+// claimFees/closeEscrowAtGraduation wrote lastClaimTimestamp directly from
+// a parameter, and checkCreatorSilence computed elapsed purely from caller
+// input. A creator could reset the silence clock for free via a
+// zero-value claimFees(0, futureTimestamp, ownAddr) call, or set
+// lastClaimTimestamp to a far-future value to permanently underflow-abort
+// checkCreatorSilence for all future callers (DoS on the community-recovery
+// trust anchor). Fixed by binding every supplied timestamp to a real
+// [now-3600, now] band (same blockTimeGte/blockTimeLte idiom used
+// throughout this codebase) plus an explicit non-underflowing guard in
+// checkCreatorSilence itself (see that circuit).
+export circuit claimFees(
+  claimAmount: Uint<128>,
+  currentTimestamp: Uint<64>,
+  recipientAddr: Bytes<32>
+): [] {
+  assert(disclose(escrowState == EscrowState.Closed), "Escrow not closed yet — wait for graduation");
+  assert(disclose(!ctoTriggered), "CTO active — use claimByCommunity");
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  const creatorSecret = getCreatorSecret();
+  const creator = deriveCreatorKey(creatorSecret);
+  assert(disclose(creator == creatorKey), "Only creator can claim");
+  // Phase 5 hygiene fix (2026-07-12): sanity-check the caller-supplied
+  // payout destination isn't the empty/all-zero address — guards against a
+  // fat-fingered recipientAddr silently burning the claim.
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  const totalClaimed = (claimedAmount + claimAmount) as Uint<128>;
+  assert(disclose(totalClaimed <= escrowAmount), "Claim exceeds escrow balance");
+
+  claimedAmount = disclose(totalClaimed);
+  lastClaimTimestamp = disclose(currentTimestamp);
+
+  if (disclose(totalClaimed == escrowAmount)) {
+    escrowState = EscrowState.FullyClaimed;
+  }
+
+  if (disclose(currency == Currency.Night)) {
+    const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+    sendUnshielded(nativeToken(), disclose(claimAmount), dest);
+  }
+}
+
+// ============================================================================
+// CTO CIRCUITS — Community Takeover Opportunity
+// ============================================================================
+
+// Trigger CTO — called by the governor in a separate transaction after a
+// SilenceLockTrigger proposal passes on cto_governance PSM and is executed.
+// Compact has no cross-contract call mechanism (confirmed) — this is
+// NOT an atomic "transaction merging" call; the platform's off-chain
+// orchestration layer sequences the two transactions.
+//
+// Note (2026-07-21, Low — documentation only): same
+// derived-key-vs-raw-address footgun as lp_escrow.compact's triggerCTO —
+// `communityWalletAddr` must be the community's DERIVED public key
+// (deriveCommunityKey(communitySecret)), not a raw wallet address.
+// claimByCommunity/claimRemainingEscrowByCommunity both re-derive
+// deriveCommunityKey(getCommunitySecret()) and compare against this stored
+// value; passing a real address here silently and permanently bricks
+// community claiming — no assert catches the mismatch, only the (separate)
+// empty-address guard below.
+export circuit triggerCTO(proposalId: Bytes<32>, communityWalletAddr: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can trigger CTO");
+  assert(disclose(!ctoTriggered), "CTO already triggered");
+  // The ballot must be named, and must not already have been spent here.
+  assert(disclose(proposalId != pad(32, "")), "CTO trigger must name the proposal that authorised it");
+  assert(disclose(!consumedProposals.member(disclose(proposalId))), "This proposal has already been acted on here");
+  assert(disclose(escrowState != EscrowState.FullyClaimed), "Escrow fully claimed");
+  // Phase 5 hygiene fix (2026-07-12): same empty-address guard as
+  // bonding_curve.compact's triggerCTO — an empty communityWalletAddr would
+  // silently make every future community claim un-routable.
+  assert(disclose(communityWalletAddr != pad(32, "")), "Community wallet address cannot be empty");
+
+  consumedProposals.insert(disclose(proposalId));
+  ctoProposalId = disclose(proposalId);
+  ctoTriggered = disclose(true);
+  communityWallet = disclose(communityWalletAddr);
+  escrowState = EscrowState.CTORedirected;
+}
+
+// Dissolve CTO — called by the governor in a separate transaction after a
+// DissolveCTO proposal passes on cto_governance PSM (creator returned and is
+// active). Same off-chain-sequenced pattern as triggerCTO above — no
+// atomic cross-contract call exists between the two PSMs.
+export circuit dissolveCTO(proposalId: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can dissolve CTO");
+  assert(disclose(ctoTriggered), "CTO not triggered");
+  // Same binding as triggerCTO: a dissolve is a governance outcome too.
+  assert(disclose(proposalId != pad(32, "")), "CTO dissolve must name the proposal that authorised it");
+  assert(disclose(!consumedProposals.member(disclose(proposalId))), "This proposal has already been acted on here");
+
+  consumedProposals.insert(disclose(proposalId));
+  ctoProposalId = disclose(proposalId);
+  ctoTriggered = disclose(false);
+  communityWallet = disclose(pad(32, ""));
+
+  // Fix (2026-07-21, Medium): sweep any unclaimed post-CTO
+  // community fees back into the creator-claimable escrowAmount. Without
+  // this, postCtoFees accrued but never claimed by the community during
+  // the CTO window became permanently stranded once dissolveCTO fires —
+  // claimByCommunity/claimRemainingEscrowByCommunity both require
+  // ctoTriggered == true, and claimFees (creator-side) never reads
+  // postCtoFees at all. Setting postCtoFees = communityClaimedAmount (not
+  // 0) keeps the communityClaimedAmount <= postCtoFees invariant intact
+  // for any future CTO cycle's claim math, since both accumulators are
+  // cumulative for the escrow's whole lifetime, not per-cycle.
+  const unclaimedPostCto = (postCtoFees - communityClaimedAmount) as Uint<128>;
+  escrowAmount = disclose((escrowAmount + unclaimedPostCto) as Uint<128>);
+  postCtoFees = disclose(communityClaimedAmount);
+
+  // Return to Closed (claimable) state if there are still unclaimed funds.
+  // Simplification: assumes CTO was triggered post-graduation, the common
+  // case in practice — if triggerCTO ever fires pre-graduation (escrowState
+  // was Active, not Closed), dissolving still routes to Closed rather than
+  // back to Active. Revisit if a pre-graduation CTO trigger path is needed.
+  if (disclose(claimedAmount < escrowAmount)) {
+    escrowState = EscrowState.Closed;
+  }
+}
+
+// Deposit fees into escrow. After CTO, fees go to the post-CTO accumulator
+// (community-controlled).
+// Phase 4 note (2026-07-12): this can only ever be called as a separate,
+// deliberately-submitted transaction — Compact has no cross-contract call
+// mechanism, so the bonding curve can never invoke this directly.
+// In the CURRENT architecture, neither tier's bonding curve deposits here at
+// all: Tier B's fees accrue on the Cardano curve contract, and Tier
+// C's bonding_curve.compact accrues its own inline `creatorFees` instead of
+// calling out to this PSM. See the CTO fee-redirect gap this surfaced,
+// tracked separately.
+export circuit depositFees(amount: Uint<128>): [] {
+  // Fix (2026-07-09): this circuit had NO access control and NO
+  // payment check at all — it could be called with an arbitrary amount
+  // and inflate the creator's (or, post-CTO, the community's) claimable
+  // balance for free. For Night-currency launches (Tier C), require the
+  // deposit to actually be paid: receiveUnshielded adds a ledger-enforced
+  // constraint that this transaction includes a matching unshielded NIGHT
+  // input of exactly `amount`. Ada-currency launches (Tier B) remain
+  // self-reported here — ADA isn't a Midnight-native unshielded token, and
+  // how it's represented on-chain is still open.
+  //
+  // Fix (2026-07-21, Medium): no escrowState guard existed — a
+  // deposit after FullyClaimed or Cancelled was silently accepted into
+  // escrowAmount/postCtoFees with no remaining way to ever claim it
+  // (FullyClaimed has no further claim path by design, and Cancelled
+  // launches don't claim fees at all), a latent fund-lock footgun for
+  // whatever off-chain caller eventually deposits here for real.
+  //
+  // Fix (2026-07-30): the Ada branch had the earlier payment-check gap
+  // fixed but never got the access-control half — unlike treasury.compact
+  // (fixed 2026-07-21), which closed the identical hole with a
+  // governor-derive-and-compare gate, this file's Ada branch was left with
+  // no gate at all, letting any caller inflate escrowAmount/postCtoFees
+  // arbitrarily. Ported treasury.compact's fix verbatim, adapted for this
+  // file's ledger-level `currency` (set once at deploy) rather than a
+  // per-call argument.
+  assert(
+    disclose(escrowState != EscrowState.FullyClaimed && escrowState != EscrowState.Cancelled),
+    "Escrow is in a terminal state — deposit would be unclaimable"
+  );
+  if (disclose(currency == Currency.Night)) {
+    receiveUnshielded(nativeToken(), disclose(amount));
+  } else {
+    const govSecret = getGovernorSecret();
+    const govKey = deriveGovernorKey(govSecret);
+    assert(disclose(govKey == governorKey), "Only governor can record an ADA deposit");
+  }
+
+  if (disclose(ctoTriggered)) {
+    postCtoFees = disclose((postCtoFees + amount) as Uint<128>);
+  } else {
+    // Pre-CTO: fees go to creator's escrow amount
+    escrowAmount = disclose((escrowAmount + amount) as Uint<128>);
+  }
+}
+
+// Community claims accumulated post-CTO fees
+// The community wallet key holder can claim funds for project continuation
+// Design requirement: same missing-payout gap as claimFees —
+// see that circuit's comment.
+export circuit claimByCommunity(
+  claimAmount: Uint<128>,
+  currentTimestamp: Uint<64>,
+  recipientAddr: Bytes<32>
+): [] {
+  assert(disclose(ctoTriggered), "CTO not triggered");
+  // Fix (2026-07-21, High): same currentTimestamp binding as
+  // claimFees — see that circuit's comment.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  // Verify caller is the community wallet holder
+  const communitySecret = getCommunitySecret();
+  const communityKey = deriveCommunityKey(communitySecret);
+  assert(disclose(communityKey == communityWallet), "Only community wallet can claim");
+  // Phase 5 hygiene fix: same empty-recipient guard as claimFees above.
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  // Verify claim doesn't exceed post-CTO fees
+  const totalCommunityClaimed = (communityClaimedAmount + claimAmount) as Uint<128>;
+  assert(disclose(totalCommunityClaimed <= postCtoFees), "Claim exceeds community funds");
+
+  communityClaimedAmount = disclose(totalCommunityClaimed);
+  lastClaimTimestamp = disclose(currentTimestamp);
+
+  if (disclose(currency == Currency.Night)) {
+    const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+    sendUnshielded(nativeToken(), disclose(claimAmount), dest);
+  }
+}
+
+// Community can also claim the remaining unclaimed fee escrow after CTO —
+// the community gets access to the creator's unclaimed fee balance to
+// keep the project alive
+// Design requirement: same missing-payout gap as claimFees —
+// see that circuit's comment.
+// Fix (2026-07-21, Low): now takes currentTimestamp and updates
+// lastClaimTimestamp, same as claimFees/claimByCommunity — previously this
+// circuit was the one claim path that never touched the silence-lock
+// clock at all, letting a community claim happen without resetting it
+// (inconsistent with every other claim path on this contract, though not
+// itself abusable — the silence clock exists to protect the COMMUNITY
+// makes the community's own claim resetting it a minor, not a security,
+// inconsistency).
+export circuit claimRemainingEscrowByCommunity(
+  claimAmount: Uint<128>,
+  currentTimestamp: Uint<64>,
+  recipientAddr: Bytes<32>
+): [] {
+  assert(disclose(ctoTriggered), "CTO not triggered");
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  // Verify caller is the community wallet holder
+  const communitySecret = getCommunitySecret();
+  const communityKey = deriveCommunityKey(communitySecret);
+  assert(disclose(communityKey == communityWallet), "Only community wallet can claim");
+  // Phase 5 hygiene fix: same empty-recipient guard as claimFees above.
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  // Community can claim the remaining unclaimed escrow
+  const remaining = (escrowAmount - claimedAmount) as Uint<128>;
+  assert(disclose(claimAmount <= remaining), "Claim exceeds remaining escrow");
+
+  const totalClaimed = (claimedAmount + claimAmount) as Uint<128>;
+  claimedAmount = disclose(totalClaimed);
+  lastClaimTimestamp = disclose(currentTimestamp);
+
+  if (disclose(totalClaimed == escrowAmount)) {
+    escrowState = EscrowState.FullyClaimed;
+  }
+
+  if (disclose(currency == Currency.Night)) {
+    const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+    sendUnshielded(nativeToken(), disclose(claimAmount), dest);
+  }
+}
+
+// Check if creator has been silent (no claim for 90 days).
+// Read by the platform's off-chain silence-monitoring flow, which feeds a
+// SilenceLockTrigger proposal into cto_governance PSM as a separate,
+// individually-submitted transaction — not an atomic cross-contract call
+// (none exists in Compact, confirmed).
+export circuit checkCreatorSilence(currentTimestamp: Uint<64>): Boolean {
+  // Fix (2026-07-21, High): bind currentTimestamp to real chain
+  // time (see claimFees's comment for the full finding), and guard the
+  // subtraction explicitly instead of letting it underflow-abort — a
+  // forged-far-future lastClaimTimestamp (from before this fix) or any
+  // future drift must degrade to "not silent" rather than permanently
+  // aborting every future caller of this circuit.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  if (disclose(currentTimestamp <= lastClaimTimestamp)) {
+    return false;
+  }
+  const elapsed = (currentTimestamp - lastClaimTimestamp) as Uint<64>;
+  return disclose(elapsed >= 7776000); // 90 days
+}
+
+// Cancel launch — called as a separate transaction, sequenced off-chain by
+// the platform's orchestration layer, when the bonding curve expires.
+// No further fee deposits expected; escrow frozen at whatever it accrued.
+// (Creator token handling on cancellation is vesting.compact's concern.)
+//
+// GitHub #68 fix (2026-07-14): this circuit had NO identity check at all —
+// every other state-changing circuit in this file (closeEscrow, triggerCTO,
+// dissolveCTO) checks the governor key first. As written, anyone able to
+// submit a transaction could permanently cancel an active fee escrow.
+// Fixed to match the same governor-key pattern.
+export circuit cancelLaunch(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can cancel launch");
+  assert(
+    disclose(escrowState != EscrowState.Cancelled),
+    "Already cancelled"
+  );
+  escrowState = EscrowState.Cancelled;
+}
+
+// Get escrow info
+export circuit getEscrowInfo(): EscrowState {
+  return escrowState;
+}
+
+// Get CTO status
+export circuit getCtoStatus(): Boolean {
+  return ctoTriggered;
+}
+
+// Get community wallet
+export circuit getCommunityWallet(): Bytes<32> {
+  return communityWallet;
+}
+
+// Get post-CTO fee balance
+export circuit getPostCtoFees(): Uint<128> {
+  return postCtoFees;
+}
+
+// Get last claim timestamp (for silence-lock monitoring)
+export circuit getLastClaimTimestamp(): Uint<64> {
+  return lastClaimTimestamp;
+}

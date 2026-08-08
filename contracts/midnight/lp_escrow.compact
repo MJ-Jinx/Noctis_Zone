@@ -1,0 +1,338 @@
+pragma language_version >= 0.16 && <= 0.23;
+
+import CompactStandardLibrary;
+
+// ============================================================================
+// LP ESCROW PSM — Noctis Protocol (v2 with CTO support, Midnight Tier C)
+// ============================================================================
+//
+// Holds LP tokens after graduation with a 365-day lock.
+// No withdraw() exists — by design.
+// After lock expiry, migrate() moves LP to a whitelisted DEX.
+//
+// CTO (Community Takeover Opportunity) — Jinx's vision:
+//   After a CTO is triggered (creator MIA 90+ days, community vote passes):
+//     - Community wallet can migrate LP (not just governor)
+//     - Community wallet can manage DEX whitelist (add/remove DEXes)
+//     - This lets the community keep the project's liquidity alive
+//       even if the creator disappears
+//   If creator returns and CTO is dissolved, control reverts to governor.
+//
+// Invariants (same as Cardano LP Escrow):
+//   1. 365-day lock from graduation timestamp
+//   2. No withdraw() function — EVER
+//   3. migrate() requires: lock expired + (governor OR community wallet) + whitelist member
+//   4. DEX whitelist is updatable by governor OR community wallet (post-CTO)
+//
+// Finding (2026-07-21, High — documented, not independently
+// fixable here, tied to Tier C's open token-layer/DEX-availability blockers): this contract has ZERO real on-chain
+// token custody. No receiveShielded/receiveUnshielded/sendShielded/
+// sendUnshielded call exists anywhere in this file — migrateLp only flips
+// `lpState`, with the actual LP token movement explicitly deferred to "the
+// Zswap layer" per that circuit's own comment. The 365-day lock and
+// no-withdraw invariants above have NO on-chain enforcement today —
+// whatever off-chain code eventually builds the real Zswap migration
+// transaction is the true trust anchor, not this contract. This isn't an
+// oversight fixable by adding a missing assert: it's a direct consequence
+// of Tier C's token-layer and DEX-availability blockers (no confirmed
+// Midnight fungible-token standard; no established Midnight DEX to
+// migrate to; this PSM's own design is explicitly provisional pending
+// both). Revisit once those resolve and a real Zswap/DEX integration
+// exists to wire receiveUnshielded/sendUnshielded against.
+//
+// Compiler: compactc v0.31.1
+// ============================================================================
+
+export enum LpState { Locked, Migrated, Cancelled }
+
+export struct UserSecretKey { bytes: Bytes<32>; }
+
+sealed ledger launchId: Bytes<32>;
+export ledger lpState: LpState;
+export ledger lockTimestamp: Uint<64>;
+sealed ledger lockDuration: Uint<64>;
+export ledger dexWhitelist: Set<Bytes<32>>;
+sealed ledger governorKey: Bytes<32>;
+
+// CTO state — community takeover support
+export ledger ctoTriggered: Boolean;
+export ledger communityWallet: Bytes<32>;
+// Which ballot this contract's CTO state acts on, and every ballot already
+// spent here.
+//
+// A CTO trigger changes who receives money. Naming the proposal makes that
+// change a public, checkable claim: `ctoProposalId` is the ballot the CURRENT
+// state rests on, readable by anyone and matchable against cto_governance's
+// own `proposals` ledger, which records each proposal's votes, outcome and —
+// for a SilenceLockTrigger — the community wallet pinned at creation.
+//
+// `consumedProposals` makes a ballot single-use HERE. One passed vote
+// authorises one transition on this contract; re-presenting it does nothing,
+// so a trigger cannot be replayed after a dissolve to install a different
+// wallet under the authority of the same vote.
+export ledger ctoProposalId: Bytes<32>;
+export ledger consumedProposals: Set<Bytes<32>>;
+
+
+witness getGovernorSecret(): UserSecretKey;
+witness getCommunitySecret(): UserSecretKey;
+
+pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:lp:governor:pk:v1"), sk.bytes]);
+}
+
+pure circuit deriveCommunityKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:lp:community:pk:v1"), sk.bytes]);
+}
+
+constructor(launchId_: Bytes<32>, lockDuration_: Uint<64>) {
+  launchId = disclose(launchId_);
+  lockDuration = disclose(lockDuration_);
+  // Enforce 365-day minimum lock
+  assert(disclose(lockDuration_ >= 31536000), "Lock must be at least 365 days");
+  lpState = LpState.Locked;
+  lockTimestamp = 0;
+  const govSecret = getGovernorSecret();
+  governorKey = disclose(deriveGovernorKey(govSecret));
+  ctoTriggered = disclose(false);
+  communityWallet = disclose(pad(32, ""));
+}
+
+// Set lock timestamp (called by governor when LP is seeded)
+//
+// Chain-time binding: the seal timestamp is bound to real chain time, not
+// taken as a trusted caller value. migrateLp's expiry is
+// lockTimestamp + lockDuration, so binding lockTimestamp is what keeps the
+// 365-day lock
+// reachable immediately, defeating its entire purpose. Bound against real
+// chain time on both sides, same idiom as vesting.compact's startVesting
+// (see that fix for the "why not exact equality" reasoning) — a 1-hour
+// window, not exact match.
+export circuit sealLock(timestamp: Uint<64>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can seal lock");
+  assert(disclose(lpState == LpState.Locked), "LP not in locked state");
+  assert(disclose(lockTimestamp == 0), "Lock already sealed");
+  assert(blockTimeGte(disclose(timestamp)), "timestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((timestamp + 3600) as Uint<64>)),
+    "timestamp too far in the past"
+  );
+  lockTimestamp = disclose(timestamp);
+}
+
+// ============================================================================
+// CTO CIRCUITS — Community Takeover Opportunity
+// ============================================================================
+
+// Trigger CTO — called by the governor in a separate transaction after a
+// SilenceLockTrigger proposal passes on cto_governance PSM. Compact has no
+// cross-contract call mechanism (confirmed) — the platform's
+// off-chain orchestration layer sequences the two transactions.
+//
+// Note (2026-07-21, Medium — documentation only, no behavior
+// change): despite its name, `communityWalletAddr` must be the community's
+// DERIVED public key — deriveCommunityKey(communitySecret) — NOT a raw
+// Cardano/Midnight wallet address. addDexToWhitelist/migrateLp/dissolveCTO
+// all re-derive deriveCommunityKey(getCommunitySecret()) and compare it
+// against this stored value; passing a real address here (an easy mistake
+// given the parameter's name) silently and permanently bricks community
+// control post-CTO — no assert catches the mismatch, since any non-empty
+// value passes the check below. Off-chain orchestration MUST pass the
+// derived key, matching how CREATOR_KEY/creatorPubKey are handled
+// elsewhere in this codebase.
+export circuit triggerCTO(proposalId: Bytes<32>, communityWalletAddr: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can trigger CTO");
+  assert(disclose(!ctoTriggered), "CTO already triggered");
+  // The ballot must be named, and must not already have been spent here.
+  assert(disclose(proposalId != pad(32, "")), "CTO trigger must name the proposal that authorised it");
+  assert(disclose(!consumedProposals.member(disclose(proposalId))), "This proposal has already been acted on here");
+  // Phase 5 hygiene fix (2026-07-12): same empty-address guard as
+  // bonding_curve.compact's triggerCTO — an empty communityWalletAddr would
+  // silently make community migration/whitelist control un-routable.
+  assert(disclose(communityWalletAddr != pad(32, "")), "Community wallet address cannot be empty");
+  consumedProposals.insert(disclose(proposalId));
+  ctoProposalId = disclose(proposalId);
+  ctoTriggered = disclose(true);
+  communityWallet = disclose(communityWalletAddr);
+}
+
+// Dissolve CTO — called by the governor in a separate transaction after a
+// DissolveCTO proposal passes on cto_governance PSM. Same off-chain-
+// sequenced pattern as triggerCTO above.
+export circuit dissolveCTO(proposalId: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can dissolve CTO");
+  assert(disclose(ctoTriggered), "CTO not triggered");
+  // Same binding as triggerCTO: a dissolve is a governance outcome too.
+  assert(disclose(proposalId != pad(32, "")), "CTO dissolve must name the proposal that authorised it");
+  assert(disclose(!consumedProposals.member(disclose(proposalId))), "This proposal has already been acted on here");
+  consumedProposals.insert(disclose(proposalId));
+  ctoProposalId = disclose(proposalId);
+  ctoTriggered = disclose(false);
+  communityWallet = disclose(pad(32, ""));
+}
+
+// Add DEX to whitelist (governor OR community wallet after CTO)
+// Note (2026-07-21, Low — documentation only): no lpState guard —
+// callable even after Migrated/Cancelled. Harmless in practice (a
+// whitelist update to a terminal-state escrow has nothing left to act on:
+// migrateLp/dissolveCTO both already gate on lpState themselves), but
+// worth knowing this isn't itself state-gated if extending this circuit
+// later. Same note applies to removeDexFromWhitelist below.
+export circuit addDexToWhitelist(dexAddr: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  const isGovernor = disclose(govKey == governorKey);
+
+  if (disclose(ctoTriggered)) {
+    // After CTO, community wallet can also update whitelist
+    const communitySecret = getCommunitySecret();
+    const communityKey = deriveCommunityKey(communitySecret);
+    const isCommunity = disclose(communityKey == communityWallet);
+    assert(disclose(isGovernor || isCommunity), "Only governor or community wallet can update whitelist");
+  } else {
+    assert(disclose(isGovernor), "Only governor can update whitelist");
+  }
+
+  dexWhitelist.insert(disclose(dexAddr));
+}
+
+// Remove DEX from whitelist (governor OR community wallet after CTO)
+export circuit removeDexFromWhitelist(dexAddr: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  const isGovernor = disclose(govKey == governorKey);
+
+  if (disclose(ctoTriggered)) {
+    const communitySecret = getCommunitySecret();
+    const communityKey = deriveCommunityKey(communitySecret);
+    const isCommunity = disclose(communityKey == communityWallet);
+    assert(disclose(isGovernor || isCommunity), "Only governor or community wallet can update whitelist");
+  } else {
+    assert(disclose(isGovernor), "Only governor can update whitelist");
+  }
+
+  dexWhitelist.remove(disclose(dexAddr));
+}
+
+// Migrate LP to a whitelisted DEX (after lock expiry)
+// NO withdraw() exists. This is the only way to move LP.
+// After CTO, community wallet can also migrate (not just governor)
+//
+// Notes (2026-07-21, Low — documentation only):
+//   - Every governor/community-gated circuit in this file (isGovernor vs
+//     isCommunity, checked via disclose()) publicly reveals WHICH of the
+//     two actor roles performed the call, even though the underlying
+//     secret stays hidden — a minor privacy leak for Tier C specifically
+//     (the platform generally isn't privacy-sensitive about WHO the
+//     governor/community actor is, but it's worth naming explicitly).
+//   - migrateLp is terminal (LpState.Migrated) with no repeated-migration
+//     path or 90-day cooldown model, unlike the Cardano LP Escrow twin
+//     (lp_escrow.ak) which supports multiple migrations with a cooldown.
+//     This may be an intentional Tier-C simplification (this
+//     PSM's design is provisional pending the token-layer/DEX blockers) rather than an
+//     oversight, but it was never stated explicitly; flagging so a future
+//     multi-migration requirement isn't assumed already supported.
+//
+// Chain-time binding: this circuit used to take
+// a caller-supplied currentTimestamp and check it against expiry directly —
+// meaning ANY caller could claim the lock had expired by simply lying about
+// the current time, regardless of whether real chain time had actually
+// passed expiry. Removed the parameter entirely and gated on blockTimeGte
+// against the ledger-derived expiry instead — same idiom as bonding_curve.
+// compact's expireCurve (no caller-supplied "now" needed when the check is
+// a pure threshold comparison, not a value used in arithmetic).
+export circuit migrateLp(dexAddr: Bytes<32>): [] {
+  // Must be locked
+  assert(disclose(lpState == LpState.Locked), "LP not locked");
+
+  // Fix (2026-07-21, High): lockTimestamp defaults to 0 at
+  // construction (see the constructor) and is only ever set for real by
+  // sealLock. Before this fix, a NEVER-SEALED lock was treated as already
+  // EXPIRED — expiry = 0 + lockDuration evaluates to a real past date, so
+  // blockTimeGte(expiry) trivially passed and a governor could migrate
+  // before sealLock was ever called, bypassing the 365-day lock entirely.
+  assert(disclose(lockTimestamp != 0), "Lock not sealed");
+
+  // Lock must be expired
+  const expiry = (lockTimestamp + lockDuration) as Uint<64>;
+  assert(disclose(blockTimeGte(expiry)), "Lock not expired");
+
+  // Check authorization: governor OR community wallet (after CTO)
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  const isGovernor = disclose(govKey == governorKey);
+
+  if (disclose(ctoTriggered)) {
+    // After CTO, community wallet can also migrate
+    const communitySecret = getCommunitySecret();
+    const communityKey = deriveCommunityKey(communitySecret);
+    const isCommunity = disclose(communityKey == communityWallet);
+    assert(disclose(isGovernor || isCommunity), "Only governor or community wallet can migrate");
+  } else {
+    assert(disclose(isGovernor), "Only governor can migrate");
+  }
+
+  // DEX must be whitelisted
+  assert(
+    disclose(dexWhitelist.member(disclose(dexAddr))),
+    "DEX not in whitelist"
+  );
+
+  // Transition to migrated
+  lpState = LpState.Migrated;
+
+  // Actual LP token movement happens at Zswap layer
+}
+
+// Cancel launch — called as a separate transaction, sequenced off-chain by
+// the platform's orchestration layer, when the bonding curve expires.
+// No migration possible after cancellation
+//
+// GitHub #68 fix (2026-07-14): this circuit had NO identity check at all —
+// every other state-changing circuit in this file (sealLock, triggerCTO,
+// dissolveCTO) checks the governor key first. As written, anyone able to
+// submit a transaction could permanently cancel an active LP escrow.
+// Fixed to match the same governor-key pattern.
+export circuit cancelLaunch(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can cancel launch");
+  assert(disclose(lpState == LpState.Locked), "LP not in lockable state");
+  lpState = LpState.Cancelled;
+}
+
+// Check if lock has expired — reads real chain time, matching migrateLp's
+// own gate exactly (Phase 3 fix, 2026-07-12; previously took a
+// caller-supplied currentTimestamp, which could misreport expiry status).
+export circuit isLockExpired(): Boolean {
+  // Fix (2026-07-21, Medium): same unsealed-lock bug as migrateLp
+  // above — an unsealed lock (lockTimestamp == 0) must never report
+  // "expired" to an off-chain consumer, even though 0 + lockDuration is
+  // technically already in the past.
+  if (disclose(lockTimestamp == 0)) {
+    return false;
+  }
+  const expiry = (lockTimestamp + lockDuration) as Uint<64>;
+  return blockTimeGte(expiry);
+}
+
+// Get LP state
+export circuit getLpState(): LpState {
+  return lpState;
+}
+
+// Get CTO status
+export circuit getCtoStatus(): Boolean {
+  return ctoTriggered;
+}
+
+// Get community wallet
+export circuit getCommunityWallet(): Bytes<32> {
+  return communityWallet;
+}

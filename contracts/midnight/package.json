@@ -1,0 +1,25 @@
+{
+  "name": "@noctis/midnight-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Noctis Protocol Midnight PSM contracts and simulation tests",
+  "type": "module",
+  "scripts": {
+    "compile": "node scripts/run-compile.mjs",
+    "test": "npx vitest run",
+    "test:coverage": "npx vitest run --coverage",
+    "typecheck": "npm run compile && tsc --noEmit -p tsconfig.json",
+    "lint": "biome check .",
+    "lint:fix": "biome check . --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0"
+  }
+}

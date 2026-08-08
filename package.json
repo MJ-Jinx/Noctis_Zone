@@ -1,0 +1,15 @@
+{
+  "name": "noctis-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Noctis Protocol — token launchpad monorepo (Cardano L1 + Midnight Network)",
+  "scripts": {
+    "prepare": "git config core.hooksPath .githooks"
+  },
+  "workspaces": [
+    "contracts/midnight",
+    "integration",
+    "packages/types",
+    "packages/zk-proofs"
+  ]
+}

@@ -1,0 +1,1741 @@
+pragma language_version >= 0.16 && <= 0.23;
+
+import CompactStandardLibrary;
+
+// ============================================================================
+// ELIGIBILITY GATE + DARKVEIL PSM (merged) — Noctis Protocol, Tier B
+// ============================================================================
+//
+// This is Tier B's merged DarkVeil contract — eligibility_gate.compact
+// (allowlist, cumulative cap, NIGHT bond lock/refund) folded together with
+// darkveil.compact (private commit/reveal buying, ZK Fair Launch Cert).
+// Tier B's public bonding curve moved to Cardano/Aiken (resolved,
+// contracts/cardano/bonding_curve_tier_b.ak) — this contract only ever
+// covers the private DarkVeil pre-sale phase, never the public phase.
+//
+// MERGED (Phase 2 security-audit fix, 2026-07-11), mirroring the exact
+// reasoning already established for Tier C's bonding_curve.compact:
+// Compact has no working cross-contract call mechanism (verified against
+// the real compiler — every call form fails with "contract types are not
+// yet implemented"), so a Tier B registrant's real per-registrant
+// DarkVeil purchase total (needed for a ratio-based partial bond refund)
+// couldn't be read by this file while it lived in a separate deployed
+// darkveil.compact. Folding both into one deployed contract with one
+// shared ledger is the only mechanism confirmed to work. This closes two
+// gaps in the same pass:
+//   1. Tier B previously had NO ratio-based partial bond refund at all —
+//      only the full-refund claimBondRefund (cancelled/failed launches).
+//      A registrant who bought less than their full allocation in a
+//      normally-closed DarkVeil had zero on-chain path to reclaim any
+//      bond portion. claimRatioBondRefund below ports Tier C's already-
+//      proven ratio-refund formula, now that dvTokensPurchased/baseSlot live
+//      in the same contract as lockedBonds.
+//   2. Bonus fix found in the same pass: revealBuyCommit never updated
+//      cumulativePurchases at all (checkAndUpdateCap was a standalone
+//      circuit nothing else in this file called) — the 5% cumulative cap
+//      had no enforced link to an actual DarkVeil purchase. Now wired in
+//      atomically, same pattern Tier C's merge already uses. That standalone
+//      checkAndUpdateCap circuit was later removed from this file entirely
+//      (2026-07-12) once nothing called it here either — see
+//      submitBuyCommit's own comment below for what replaced it.
+//
+// Standalone darkveil.compact is retired as of this merge — Tier B now
+// deploys only this one contract for the whole DarkVeil phase. See
+// internal tracking / commit history for the migration note.
+//
+// RESOLVED (2026-07-11): Tier B's DarkVeil buy is ADA-denominated,
+// and ADA isn't representable as a Midnight-native unshielded token, so
+// revealBuyCommit here was never going to be able to enforce payment
+// directly (and still doesn't — that's by design now, not a gap). Real
+// settlement (ADA payment + token delivery) moved entirely to Cardano's
+// `contracts/cardano/bonding_curve_tier_b.ak` via a new permissionless
+// `ClaimDarkVeilTokens` redeemer, using a privacy-preserving Merkle-root
+// claim (replacing an earlier plaintext cap pre-seed that had also leaked
+// individual buy amounts — both problems fixed together). revealBuyCommit
+// itself needed no change: it's correctly just a private commit/reveal of
+// intent, not where real ADA changes hands. See internal tracking's
+// entry for the full mechanism.
+//
+// RESOLVED (2026-07-12): submitBuyCommit also gained a required proof
+// of prior DarkVeil registration (a recomputed registration nullifier
+// checked against the already-public registrationNullifiers set) — before
+// this, any wallet could submit a buy commitment without ever registering,
+// bypassing the wallet-age/allowlist/NIGHT-bond eligibility gate entirely.
+//
+// Identity note: eligibility_gate.compact and darkveil.compact previously
+// derived the caller's UserPublicKey under TWO DIFFERENT domain-separated
+// hashes ("noctis:user:pk:v1" / "noctis:darkveil:user:pk:v1") — fine when
+// they were separate contracts, but would silently defeat the point of a
+// shared identity space if kept: a registrant's registration identity and
+// buy identity would never match as the same map key. This merge
+// standardizes on ONE identity derivation (eligibility_gate's original
+// "noctis:user:pk:v1"/"noctis:governor:pk:v1" domains) for everything in
+// this contract — lockedBonds, cumulativePurchases, registrationNullifiers,
+// commitments/buyNullifiers/dvTokensPurchased are all keyed by that same
+// identity now, not darkveil's old per-file one.
+//
+// Privacy model:
+//   - Users prove allowlist membership via a ZK witness without revealing
+//     which allowlist entry is theirs (Merkle proof pattern).
+//   - The user's identity is a witness-derived UserPublicKey (32-byte hash
+//     of a private secret), not a raw public key.
+//   - Cumulative purchase amounts are tracked on-chain by UserPublicKey,
+//     but the mapping from UserPublicKey to real-world identity is unknown.
+//   - DarkVeil buy amounts are committed privately; only the aggregate is
+//     public until reveal (see PRIVACY ANALYSIS section for the full
+//     data-lifecycle breakdown).
+//
+// Reuses patterns from:
+//   - midnight-modules/merkle-membership (allowlist gating)
+//   - midnight-modules/commitment-nullifier (double-registration / double-buy prevention)
+//   - midnight-modules/access-control (admin/governor pattern)
+//   - midnight-expert FungibleToken (witness-derived UserPublicKey)
+//   - SilentLedger/AssetVerification (composite key, expiry, replay prevention)
+//   - SilentLedger/SilentOrderbook (commitment-based orders, match lifecycle)
+//
+// Compiler: compactc v0.31.1
+// ============================================================================
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+export enum LaunchPhase { Pending, DarkVeil, Public, Graduated, Cancelled }
+
+// DarkVeil's own sub-phase within the overall LaunchPhase.DarkVeil period
+// (registration vs buying vs closed) — a finer-grained state machine than
+// LaunchPhase, tracked separately on purpose, same distinction
+// bonding_curve.compact's Tier C merge already uses.
+export enum DarkVeilState { Inactive, Registration, Buying, Closed, Cancelled }
+
+export enum CommitStatus { Open, Revealed, Cancelled }
+
+export struct UserSecretKey {
+  bytes: Bytes<32>;
+}
+
+export struct UserPublicKey {
+  bytes: Bytes<32>;
+}
+
+export struct AdminPublicKey {
+  bytes: Bytes<32>;
+}
+
+// Input for deriving a composite key (user + launch) to prevent cross-launch replay
+struct CompositeKeyInput {
+  userKey: Bytes<32>;
+  launchId: Bytes<32>;
+}
+
+// Input for computing a registration commitment from private data
+// Fix (2026-07-21, Medium): dropped the prover-chosen `nonce`
+// field — see computeRegistrationCommit's own comment for why.
+struct RegistrationCommitInput {
+  userKey: Bytes<32>;
+  launchId: Bytes<32>;
+  bondAmount: Uint<128>;
+}
+
+// One level of a Merkle inclusion proof — the sibling hash at that level,
+// and whether the node being folded up is the LEFT child (true) or RIGHT
+// child (false) of the pair being hashed. Fix (2026-07-09).
+struct MerkleProofEntry {
+  sibling: Bytes<32>;
+  goesLeft: Boolean;
+}
+
+// Input to a single Merkle tree node hash — domain-separated so this can
+// never collide with any other persistentHash use in this contract (or
+// elsewhere in the codebase) even if the byte shape happened to match.
+struct AllowlistNodeInput {
+  domain: Bytes<32>;
+  left: Bytes<32>;
+  right: Bytes<32>;
+}
+
+// Fix (2026-07-30): node-hash input for the REGISTRANT tree (see
+// verifyRegistrant's own comment for why this exists) — identical shape to
+// AllowlistNodeInput, kept as its own named struct so each Merkle tree in
+// this file has one clearly-named hash-domain use, matching this file's
+// existing convention (RegistrationCommitInput/BuyCommitInput/
+// NullifierInput/BuyNullifierInput are all separate structs too, even
+// where field shapes overlap).
+struct RegistrantNodeInput {
+  domain: Bytes<32>;
+  left: Bytes<32>;
+  right: Bytes<32>;
+}
+
+// --- from darkveil.compact ---
+
+// Private buy commitment — hides the purchase amount and buyer identity
+struct BuyCommit {
+  commitment: Bytes<32>;    // Hash of (buyerKey, amount, price, nonce)
+  nullifier: Bytes<32>;     // Unique per (buyerKey, launchId) — prevents double-buy
+  timestamp: Uint<64>;      // When the commitment was placed
+  status: CommitStatus;     // Open, Revealed, Cancelled
+}
+
+// Input for computing buy commitment from private data
+struct BuyCommitInput {
+  buyerKey: Bytes<32>;
+  launchId: Bytes<32>;
+  tokenAmount: Uint<128>;
+  pricePerToken: Uint<128>;
+  nonce: Bytes<32>;
+}
+
+// Input for computing the REAL buy nullifier (fix, 2026-07-21).
+struct BuyNullifierInput {
+  domain: Bytes<32>;
+  buyerSecret: Bytes<32>;
+  launchId: Bytes<32>;
+}
+
+// ZK Fair Launch Certificate data
+export struct FairLaunchCert {
+  launchId: Bytes<32>;
+  totalParticipants: Uint<64>;
+  totalTokensAllocated: Uint<128>;
+  totalRaised: Uint<128>;
+  participationRate: Uint<8>;   // Percentage of allowlist that participated
+  closeTimestamp: Uint<64>;
+  certHash: Bytes<32>;          // Unique certificate hash
+}
+
+// Input for certificate hash computation
+struct CertHashInput {
+  launchId: Bytes<32>;
+  totalParticipants: Uint<64>;
+  totalTokensAllocated: Uint<128>;
+  totalRaised: Uint<128>;
+  closeTimestamp: Uint<64>;
+}
+
+// ============================================================================
+// LEDGER STATE
+// ============================================================================
+
+// The launch identifier (set at deploy time, seals this gate to one launch)
+sealed ledger launchId: Bytes<32>;
+
+// Merkle root of the allowlist (governor-updatable for late additions)
+export ledger allowlistRoot: Bytes<32>;
+
+// Fix (2026-07-30): Merkle root of the REGISTRANT tree — every
+// wallet that successfully registered for DarkVeil, published once by the
+// governor at startBuying() (the registration freeze, where the
+// registrant set becomes fixed for the round). submitBuyCommit proves
+// membership against this root via a real Merkle proof (verifyRegistrant,
+// mirroring verifyAllowlist's own construction) instead of the old
+// registrationNullifiers-membership check, which was publicly
+// precomputable — caller.bytes is already disclosed via lockedBonds at
+// registration, and launchId/bondAmount are both public constants, so
+// anyone could recompute a registrant's expected nullifier value ahead of
+// time and match it against a later submitBuyCommit's disclosed nullifier,
+// de-anonymizing which registrant was buying. A ZK membership proof
+// reveals only "some leaf in the published tree matches," never which
+// one — closing the gap for real, not just changing the hash formula (see
+// this file's history / local/SECURITY_AUDIT.md's entry for the full
+// analysis of why a second nullifier alone would not have been sufficient).
+// Meaningless until startBuying sets it (mirrors baseSlot's own comment).
+export ledger registrantRoot: Bytes<32>;
+
+// Current phase of the launch
+export ledger phase: LaunchPhase;
+
+// Per-user cumulative purchase amount (in token units, across all phases).
+// Only the DarkVeil-phase portion is actually enforced here now (via
+// revealBuyCommit, wired in by this merge) — the public phase lives on
+// Cardano and enforces its own copy of the cap there, pre-seeded
+// from this map via the relayer/anchor mechanism (see CLAUDE.md's Tier B
+// cap description).
+export ledger cumulativePurchases: Map<Bytes<32>, Uint<128>>;
+
+// Total supply of the launch token (for 5% cap calculation)
+sealed ledger totalSupply: Uint<128>;
+
+// Maximum per-wallet percentage (5 = 5%)
+sealed ledger maxWalletPercent: Uint<8>;
+
+// NIGHT bond amount required for DarkVeil registration
+sealed ledger bondAmount: Uint<128>;
+
+// Track locked bonds by user (refundable on cancellation, or partially on
+// a normal DarkVeil close via claimRatioBondRefund)
+export ledger lockedBonds: Map<Bytes<32>, Uint<128>>;
+
+// Nullifier set — prevents double-registration (commitment-nullifier pattern)
+export ledger registrationNullifiers: Set<Bytes<32>>;
+
+// Admin/governor key (witness-derived, set at deploy time)
+sealed ledger governorKey: Bytes<32>;
+
+// Creator's identity, under the same UserPublicKey domain regular
+// registrants derive under. CLAUDE.md eligibility check #3
+// ("Registrant != creator fee-paying wallet address") — set once at
+// deploy from a key computed off-chain.
+sealed ledger creatorKey: Bytes<32>;
+
+// Total registrations count
+export ledger registrationCount: Counter;
+
+// Fix (2026-07-09): whether DarkVeil itself failed (<50%
+// participation). Independent of `phase` — under the DarkVeil-failure resolution, a
+// failed DarkVeil converts the launch to a public-only launch (phase
+// advances to Public, not Cancelled), so `claimBondRefund` can't gate on
+// `phase == Cancelled` alone or DV registrants on a converted launch would
+// have no way to reclaim their bond at all.
+export ledger dvFailed: Boolean;
+
+// Precomputed wallet cap (set at deploy time to avoid division in circuit —
+// see the constructor's comment for the 2026-07-09 fix history)
+sealed ledger walletCap: Uint<128>;
+
+// --- from darkveil.compact ---
+
+// DarkVeil's own sub-phase (registration/buying/closed) — see the
+// DarkVeilState enum's comment for how this differs from `phase`.
+export ledger dvState: DarkVeilState;
+
+// Buy commitments keyed by commitment hash
+export ledger commitments: Map<Bytes<32>, BuyCommit>;
+
+// Nullifier set — prevents double-buying during DarkVeil
+export ledger buyNullifiers: Set<Bytes<32>>;
+
+// Aggregate stats (public for transparency)
+export ledger dvTotalParticipants: Counter;
+export ledger totalTokensCommitted: Uint<128>;
+export ledger totalRaisedCommitted: Uint<128>;
+
+// DarkVeil allocation (how many tokens are available in this phase)
+sealed ledger dvAllocation: Uint<128>;
+
+// Price per token during DarkVeil (fixed price, not bonding curve;
+// ADA-denominated for Tier B)
+sealed ledger dvPrice: Uint<128>;
+
+// Allowlist size (for participation rate calculation)
+sealed ledger allowlistSize: Uint<64>;
+
+// ZK Fair Launch Certificate (set when DarkVeil closes)
+export ledger fairLaunchCert: FairLaunchCert;
+
+// Fix (2026-07-30): fixed platform-wide window (30 days) after
+// DarkVeil closes during which a buyer must reveal their commitment —
+// without this, an unrevealed Open commitment could sit in `commitments`
+// forever, unbounded storage growth with no expiry path. Hardcoded, not a
+// constructor argument — matches cooldownDuration's own hardcoded
+// convention in cto_governance.compact for a platform-wide policy
+// constant. See CLAUDE.md's DV_REVEAL_WINDOW_DAYS.
+sealed ledger revealWindowSeconds: Uint<64>;
+
+// Registration close timestamp — stored for off-chain/informational use
+// only (not read by any circuit's own logic; DarkVeil failure is a
+// governor-triggered call via markDarkVeilFailed, not an automatic
+// timeout check, same as before this merge).
+sealed ledger registrationCloseTime: Uint<64>;
+
+// Resolution (2026-07-13): minimum absolute registrant count required
+// before buying can open. Below this, startBuying() rejects and the
+// governor must call cancelDarkVeil() instead (the existing DarkVeil-failure
+// path, refundable via claimBondRefund). Defends against two griefing
+// vectors that a percentage-only participation check can't catch: (a) a
+// creator's associates registering as ghosts to dilute baseSlot for
+// legitimate buyers, and (b) an attacker cheaply registering >50% of a
+// tiny launch's participants purely to force DV to fail (bonds are
+// refunded on failure, so the only real cost is gas). CLAUDE.md:
+// MIN_DV_PARTICIPANTS = 15.
+sealed ledger minDvParticipants: Uint<64>;
+
+// Equivalent fix: per-registrant DarkVeil token allocation —
+// CLAUDE.md's `base_slot = dv_supply / registered_count`. This is a FLAT
+// per-capita split, the same value for every registrant, not a map — so
+// one ledger field is enough. Starts at 0 (meaningless until DV closes);
+// set exactly once by closeDarkVeil, computed off-chain (Compact can't
+// divide in-circuit) from `dvAllocation / registrationCount` at that
+// point, once the final registrant count is known.
+export ledger baseSlot: Uint<128>;
+
+// Cumulative tokens a buyer DECLARED (via revealBuyCommit) they purchased
+// DURING DarkVeil specifically. NOT payment-verified — Tier B's real ADA
+// payment happens on Cardano via ClaimDarkVeilTokens, and Compact has
+// no way to observe that from here. This map is therefore a self-reported
+// intent statistic only: used to bound the pool-wide/wallet-cap checks in
+// revealBuyCommit itself (which have no direct payout consequence), and for
+// display. It must NEVER be used to compute a real payout — see
+// settledDvPurchases below, which is what claimRatioBondRefund actually
+// reads.
+//
+// Fix (2026-07-30, security audit): this field used to be what
+// claimRatioBondRefund read to compute the NIGHT bond refund. Since
+// revealBuyCommit never charges anything, a registrant could declare
+// tokenAmount == baseSlot for free and claim a 100% bond refund with zero
+// real payment — the exact ghost-registrant forfeiture this bond
+// exists to enforce, bypassed for the cost of gas. Fixed by introducing a
+// SEPARATE, governor-attested ledger (settledDvPurchases) fed from real,
+// observed Cardano ClaimDarkVeilTokens settlements, and pointing the
+// refund math at that instead.
+export ledger dvTokensPurchased: Map<Bytes<32>, Uint<128>>;
+
+// Governor-attested count of tokens a buyer has REALLY settled for —
+// written only by recordDarkVeilSettlement, from real, observed Cardano
+// ClaimDarkVeilTokens transactions (that mechanism is what actually moves
+// ADA and delivers tokens for Tier B; this ledger is Midnight's mirror of
+// that real event, not a duplicate of the unpaid declaration above). This
+// is what claimRatioBondRefund uses to compute the real refund — same
+// governor-published-attestation trust model already used everywhere else
+// on this platform (allowlist root, CTO balance-snapshot root, staking
+// stake-snapshot root): trust the governor's off-chain computation from
+// real, independently-auditable on-chain data, not a caller's own claim.
+export ledger settledDvPurchases: Map<Bytes<32>, Uint<128>>;
+
+// The real unshielded address (not a derived identity) forfeited bond NIGHT
+// is paid to, set once at deploy.
+//
+// ONE address. The platform previously ran a treasury wallet and an ops
+// wallet and split every fee 60/40 between them; that split is gone
+// everywhere, so there is a single destination and no share arithmetic to
+// verify. A forfeited bond is paid here in full.
+sealed ledger platformAddr: Bytes<32>;
+
+// Set once by finalizeDvSettlement, after the Cardano claim window has closed
+// and every real settlement has been recorded. It is what separates "not
+// claimed yet" from "did not claim": before it, a bond may still be settled
+// against and must not be swept; after it, recordDarkVeilSettlement is
+// refused, so the record a sweep reads can no longer change underneath it.
+export ledger settlementFinalized: Boolean;
+
+// Registrants who have said, on chain, that they hold a bond with no path in
+// registrantRoot — mapped to the time from which they may take that bond back.
+// See the REGISTRANT EXCLUSION DISPUTE section for what this is for.
+export ledger disputedExclusions: Map<Bytes<32>, Uint<64>>;
+
+// Disputes answered by a real inclusion proof. Membership here is permanent
+// and is what separates a registrant the tree does contain — whose bond
+// forfeits on the ordinary terms — from one it does not. Kept as its own set
+// rather than by clearing the dispute, so an answered dispute cannot simply be
+// reopened and made to cost another answer.
+export ledger rebuttedExclusions: Set<Bytes<32>>;
+
+// How long an unanswered dispute must stand before the bond behind it can be
+// taken back: 72 hours, the same window a governance challenge already runs
+// for in cto_governance.compact. Hardcoded rather than a constructor argument,
+// matching revealWindowSeconds' own convention for a platform-wide policy
+// constant.
+sealed ledger exclusionDisputeWindow: Uint<64>;
+
+// ============================================================================
+// WITNESSES
+// ============================================================================
+
+// User's private secret key — never revealed on-chain
+witness getUserSecret(): UserSecretKey;
+
+// Merkle proof for allowlist membership — private, stays with prover.
+// Fix (2026-07-09): now carries a direction bit per level (needed to
+// know whether to hash(node, sibling) or hash(sibling, node) — the old
+// Vector<32, Bytes<32>> shape had no way to express this at all).
+// Depth reduced 32 -> 20 (2026-07-12): a fixed-depth proof always
+// walks every level regardless of real registrant count, so depth is a
+// direct proving-cost lever, not just a capacity ceiling. 2^20 (1,048,576)
+// registrants is far beyond any realistic DarkVeil round (bond + wallet-age
+// gated), for 37.5% fewer hash operations per proof than the original 32.
+witness getMerkleProof(): Vector<20, MerkleProofEntry>;
+
+// Fix (2026-07-30): Merkle proof for REGISTRANT tree membership —
+// private, stays with the prover. Same shape/depth as getMerkleProof
+// (MerkleProofEntry, 20 levels) but a distinct witness, since it proves
+// membership in a different tree (registrantRoot, not allowlistRoot) built
+// at a different time (registration freeze, not deploy) — see
+// verifyRegistrant's own comment.
+witness getRegistrantMerkleProof(): Vector<20, MerkleProofEntry>;
+
+// Fix (2026-07-30): getRegistrationNonce (a dead witness — nothing
+// in this file called it since the 2026-07-21 fix dropped the
+// nonce from computeRegistrationCommit) was removed here — a real footgun
+// for whoever wires the production PrivateStateProvider, since a declared
+// witness signals the contract genuinely needs that private input.
+
+// Governor's secret key (for admin circuits)
+witness getGovernorSecret(): UserSecretKey;
+
+// Random nonce for a DarkVeil buy commitment — private, prevents replay
+witness getBuyNonce(): Bytes<32>;
+
+// ============================================================================
+// HELPER CIRCUITS
+// ============================================================================
+
+// Derive user public key from secret (domain-separated, same pattern as
+// FungibleToken). ONE identity for this whole merged contract now — see
+// file header's identity note.
+pure circuit deriveUserPublicKey(sk: UserSecretKey): UserPublicKey {
+  return UserPublicKey {
+    bytes: persistentHash<Vector<2, Bytes<32>>>([
+      pad(32, "noctis:user:pk:v1"),
+      sk.bytes
+    ])
+  };
+}
+
+// Derive admin/governor public key from secret (domain-separated)
+pure circuit deriveGovernorKey(sk: UserSecretKey): AdminPublicKey {
+  return AdminPublicKey {
+    bytes: persistentHash<Vector<2, Bytes<32>>>([
+      pad(32, "noctis:governor:pk:v1"),
+      sk.bytes
+    ])
+  };
+}
+
+// Check if a user key is the zero key (invalid)
+pure circuit isKeyZero(key: UserPublicKey): Boolean {
+  return key == default<UserPublicKey>;
+}
+
+// Compute composite key for (user, launch) — prevents cross-launch replay
+pure circuit compositeKey(userKey: Bytes<32>, launch: Bytes<32>): Bytes<32> {
+  return persistentHash<CompositeKeyInput>(CompositeKeyInput {
+    userKey: userKey,
+    launchId: launch
+  });
+}
+
+// Compute registration commitment from private data
+// Fix (2026-07-21, Medium): previously took a prover-chosen
+// `nonce`, making re-registration possible — each call with a fresh nonce
+// produced a fresh nullifier that passed the "already registered" check,
+// and lockedBonds.insert overwrites (rather than accumulates) per-caller,
+// silently stranding every duplicate bond beyond the last one written.
+// Dropped the nonce entirely: this is now deterministic per (userKey,
+// launch, bond) — since bondAmount is a fixed platform constant for a
+// given launch, a single secret can only ever produce ONE registration
+// nullifier, closing the reuse path the same way computeBuyNullifier
+// closed the parallel buy-side bug.
+pure circuit computeRegistrationCommit(
+  userKey: Bytes<32>,
+  launch: Bytes<32>,
+  bond: Uint<128>
+): Bytes<32> {
+  return persistentHash<RegistrationCommitInput>(RegistrationCommitInput {
+    userKey: userKey,
+    launchId: launch,
+    bondAmount: bond
+  });
+}
+
+// --- from darkveil.compact (identity unified, see file header) ---
+
+// Compute buy commitment from private data
+pure circuit computeBuyCommit(
+  buyerKey: Bytes<32>,
+  launch: Bytes<32>,
+  tokenAmount: Uint<128>,
+  pricePerToken: Uint<128>,
+  nonce: Bytes<32>
+): Bytes<32> {
+  return persistentHash<BuyCommitInput>(BuyCommitInput {
+    buyerKey: buyerKey,
+    launchId: launch,
+    tokenAmount: tokenAmount,
+    pricePerToken: pricePerToken,
+    nonce: nonce
+  });
+}
+
+// Fix (2026-07-21, Compact security-review pass — High): the buy
+// nullifier used to be a free caller-supplied Bytes<32> parameter on
+// submitBuyCommit, checked only for prior use (!buyNullifiers.member) —
+// never verified to actually derive from the caller's own identity. That
+// let a single registrant submit unlimited buy commitments (a different
+// nullifier each call), capturing up to walletCap (5%) instead of their
+// fair per-registrant share. Separately, the original public-key-derived
+// nullifier formula (buyerKey + launchId, both public — buyerKey is
+// disclosed via lockedBonds/cumulativePurchases map keys, and launchId is
+// sealed/public) let anyone precompute any registrant's nullifier,
+// breaking the commitment-unlinkability this file's own PRIVACY ANALYSIS
+// claims. (Fix, 2026-07-30: that original formula, computeNullifier/
+// NullifierInput, was dead code by this point — kept only as a documented
+// hash helper — and has since been removed; this comment is preserved for
+// the historical reasoning, not a still-live reference.)
+// Fixed by deriving the buy nullifier from the caller's SECRET key bytes
+// (never disclosed anywhere in this contract) instead of their public
+// derived key: a single secret can only ever produce ONE nullifier value
+// per launch (closing the unlimited-resubmission bug — there is no
+// attacker-choosable nonce component to vary), and nobody without that
+// exact secret can precompute it (closing the precomputability leak).
+// Domain-separated from computeRegistrationCommit's own domain so a
+// registration nullifier and a buy nullifier for the same secret can
+// never collide.
+pure circuit computeBuyNullifier(
+  buyerSecret: Bytes<32>,
+  launch: Bytes<32>
+): Bytes<32> {
+  return persistentHash<BuyNullifierInput>(BuyNullifierInput {
+    domain: pad(32, "noctis:dv:buy:nullifier:v1"),
+    buyerSecret: buyerSecret,
+    launchId: launch
+  });
+}
+
+// Compute certificate hash
+pure circuit computeCertHash(
+  launch: Bytes<32>,
+  participants: Uint<64>,
+  tokensAllocated: Uint<128>,
+  raised: Uint<128>,
+  closeTime: Uint<64>
+): Bytes<32> {
+  return persistentHash<CertHashInput>(CertHashInput {
+    launchId: launch,
+    totalParticipants: participants,
+    totalTokensAllocated: tokensAllocated,
+    totalRaised: raised,
+    closeTimestamp: closeTime
+  });
+}
+
+// Verify a claimed fee slice is the FLOOR of grossAmount * bps / 10000 —
+// same pattern and safe-range bounds as bonding_curve.compact's copy.
+// Needed here for claimRatioBondRefund's forfeited-remainder split.
+// Phase 5 hygiene fix (2026-07-12): marked pure — depends only on its own
+// parameters, no ledger or witness access.
+pure circuit verifyFeeSlice(
+  grossAmount: Uint<128>,
+  bps: Uint<16>,
+  claimedFee: Uint<128>
+): Boolean {
+  assert(disclose(grossAmount <= 19342813113834066795298815), "grossAmount exceeds safe range"); // 2^84 - 1
+  assert(disclose(claimedFee <= 19342813113834066795298815), "claimedFee exceeds safe range"); // 2^84 - 1
+
+  const grossN = grossAmount as Uint<84>;
+  const claimedFeeN = claimedFee as Uint<84>;
+
+  const product = ((grossN as Uint<100>) * (bps as Uint<100>)) as Uint<100>;
+  const claimedTimesDenom = ((claimedFeeN as Uint<98>) * (10000 as Uint<98>)) as Uint<98>;
+  const nextClaimedTimesDenom = ((claimedTimesDenom as Uint<100>) + (10000 as Uint<100>)) as Uint<100>;
+
+  return disclose(
+    (claimedTimesDenom as Uint<100>) <= product && product < nextClaimedTimesDenom
+  );
+}
+
+// Verify a claimed ratio-based NIGHT bond refund is the FLOOR of
+// `bonded * purchased / allocated` — same formula and floor-rounding
+// double-inequality pattern as bonding_curve.compact's Tier C copy.
+// purchased == allocated -> refund == bonded (100% back); purchased == 0
+// -> refund == 0 (ghost, fully forfeited); anything between is the
+// proportional partial return.
+// Phase 5 hygiene fix (2026-07-12): marked pure — depends only on its own
+// parameters, no ledger or witness access.
+pure circuit verifyRatioRefund(
+  bonded: Uint<128>,
+  purchased: Uint<128>,
+  allocated: Uint<128>,
+  claimedRefund: Uint<128>
+): Boolean {
+  assert(disclose(allocated > 0), "allocated must be positive"); // baseSlot must have been set
+  assert(disclose(purchased <= allocated), "purchased cannot exceed allocated");
+  // Note (2026-07-21, Low): this 2^44-1 (~17.6 trillion atomic
+  // units) range cap is a real ceiling on `bonded` (NIGHT_BOND_USD's
+  // atomic-unit equivalent) — if `bondAmount` is ever configured above it
+  // at deploy, every claimRatioBondRefund call would abort here,
+  // permanently bricking bond refunds for that launch. Not expected in
+  // practice (bondAmount is a small, platform-controlled USD-equivalent
+  // constant, nowhere near this ceiling), but worth checking against
+  // whatever value is actually deployed if NIGHT_BOND_USD or its
+  // conversion rate ever changes materially.
+  assert(disclose(bonded <= 17592186044415), "bonded exceeds safe range"); // 2^44 - 1
+  assert(disclose(purchased <= 1099511627775), "purchased exceeds safe range"); // 2^40 - 1
+  assert(disclose(allocated <= 1099511627775), "allocated exceeds safe range"); // 2^40 - 1
+  assert(disclose(claimedRefund <= 17592186044415), "claimedRefund exceeds safe range"); // 2^44 - 1
+
+  const bondedN = bonded as Uint<44>;
+  const purchasedN = purchased as Uint<40>;
+  const allocatedN = allocated as Uint<40>;
+  const claimedRefundN = claimedRefund as Uint<44>;
+
+  const bondedTimesPurchased = ((bondedN as Uint<84>) * (purchasedN as Uint<84>)) as Uint<84>;
+  const claimedTimesAllocated = ((claimedRefundN as Uint<84>) * (allocatedN as Uint<84>)) as Uint<84>;
+  const nextClaimedTimesAllocated = ((claimedTimesAllocated as Uint<85>) + (allocatedN as Uint<85>)) as Uint<85>;
+
+  return disclose(
+    (claimedTimesAllocated as Uint<85>) <= (bondedTimesPurchased as Uint<85>)
+      && (bondedTimesPurchased as Uint<85>) < nextClaimedTimesAllocated
+  );
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+constructor(
+  launchId_: Bytes<32>,
+  allowlistRoot_: Bytes<32>,
+  totalSupply_: Uint<128>,
+  maxWalletPercent_: Uint<8>,
+  bondAmount_: Uint<128>,
+  walletCap_: Uint<128>,
+  dvAllocation_: Uint<128>,
+  dvPrice_: Uint<128>,
+  allowlistSize_: Uint<64>,
+  registrationCloseTime_: Uint<64>,
+  minDvParticipants_: Uint<64>,
+  creatorPubKey_: Bytes<32>,
+  platformAddr_: Bytes<32>
+) {
+  launchId = disclose(launchId_);
+  allowlistRoot = disclose(allowlistRoot_);
+  registrantRoot = disclose(pad(32, "")); // meaningless until startBuying sets it
+  totalSupply = disclose(totalSupply_);
+  maxWalletPercent = disclose(maxWalletPercent_);
+  // Fix (2026-07-30): verifyRatioRefund's own 2^44-1 ceiling on
+  // `bonded` would otherwise only ever be checked the first time
+  // claimRatioBondRefund runs — potentially long after registration,
+  // bonding, and buying are all already committed for this launch. Fail
+  // fast at deploy time instead: if bondAmount is ever configured above
+  // this ceiling, no bond refund could ever succeed for the whole launch.
+  assert(disclose(bondAmount_ <= 17592186044415), "bondAmount exceeds verifyRatioRefund's safe range"); // 2^44 - 1
+  bondAmount = disclose(bondAmount_);
+
+  // walletCap MUST equal totalSupply * maxWalletPercent / 100, computed
+  // off-chain (Compact circuits can't divide) and passed in directly.
+  // Deploy-time callers must compute this themselves:
+  //   walletCap = totalSupply * maxWalletPercent / 100
+  assert(disclose(walletCap_ > 0), "walletCap must be positive");
+  walletCap = disclose(walletCap_);
+
+  // Set governor from deployer's secret
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  governorKey = disclose(govKey.bytes);
+  creatorKey = disclose(creatorPubKey_);
+  assert(disclose(platformAddr_ != pad(32, "")), "platformAddr cannot be empty");
+  platformAddr = disclose(platformAddr_);
+  settlementFinalized = disclose(false);
+
+  phase = LaunchPhase.Pending;
+  dvFailed = disclose(false);
+
+  // --- from darkveil.compact ---
+  dvAllocation = disclose(dvAllocation_);
+  dvPrice = disclose(dvPrice_);
+  allowlistSize = disclose(allowlistSize_);
+  registrationCloseTime = disclose(registrationCloseTime_);
+  assert(disclose(minDvParticipants_ > 0), "minDvParticipants must be positive");
+  minDvParticipants = disclose(minDvParticipants_);
+  dvState = DarkVeilState.Inactive;
+  totalTokensCommitted = 0;
+  totalRaisedCommitted = 0;
+  baseSlot = 0; // meaningless until closeDarkVeil sets it
+  revealWindowSeconds = disclose(2592000); // 30 days — see ledger comment
+  exclusionDisputeWindow = disclose(259200); // 72 hours — see ledger comment
+
+  fairLaunchCert = disclose(FairLaunchCert {
+    launchId: launchId_,
+    totalParticipants: 0,
+    totalTokensAllocated: 0,
+    totalRaised: 0,
+    participationRate: 0,
+    closeTimestamp: 0,
+    certHash: pad(32, "")
+  });
+}
+
+// ============================================================================
+// CIRCUITS — ALLOWLIST VERIFICATION
+// ============================================================================
+
+// Verify allowlist membership via a real 20-level Merkle inclusion proof
+// (witness-based, privacy-preserving — only the root is public; a user's
+// own leaf and path are never revealed to anyone but the prover). Depth
+// reduced 32 -> 20, 2026-07-12 — see getMerkleProof's witness
+// declaration comment.
+//
+// Design requirement: the leaf is derived in-circuit from the
+// caller's own identity (persistentHash of a domain + caller bytes)
+// instead of a free witness value, so a valid proof can only be
+// constructed by whoever controls the secret behind `caller`.
+circuit verifyAllowlist(caller: Bytes<32>): [] {
+  const leaf = persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "noctis:allowlist:leaf:v1"),
+    caller
+  ]);
+  const proof = getMerkleProof();
+
+  const recomputedRoot = fold(
+    (acc: Bytes<32>, entry: MerkleProofEntry): Bytes<32> => {
+      const left = disclose(entry.goesLeft) ? acc : entry.sibling;
+      const right = disclose(entry.goesLeft) ? entry.sibling : acc;
+      return persistentHash<AllowlistNodeInput>(AllowlistNodeInput {
+        domain: pad(32, "noctis:allowlist:node:v1"),
+        left: left,
+        right: right
+      });
+    },
+    leaf,
+    proof
+  );
+
+  assert(disclose(recomputedRoot == allowlistRoot), "Invalid allowlist proof");
+}
+
+// Fix (2026-07-30): verify prior DarkVeil registration via a real
+// Merkle inclusion proof against registrantRoot — same construction as
+// verifyAllowlist above, different tree. Replaces the old
+// registrationNullifiers-membership check inside submitBuyCommit, which
+// disclosed a value (computeRegistrationCommit(caller.bytes, launchId,
+// bondAmount)) that anyone could precompute from already-public
+// information (caller.bytes is disclosed via lockedBonds at registration;
+// launchId/bondAmount are public constants) — letting an observer
+// pre-link a registrant's identity to whichever later submitBuyCommit
+// transaction discloses that same value. A ZK membership proof discloses
+// only that SOME leaf in the published tree matches, never which one,
+// closing the gap for real (see registrantRoot's own ledger comment for
+// the full analysis).
+circuit verifyRegistrant(caller: Bytes<32>): [] {
+  const leaf = persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "noctis:registrant:leaf:v1"),
+    caller
+  ]);
+  const proof = getRegistrantMerkleProof();
+
+  const recomputedRoot = fold(
+    (acc: Bytes<32>, entry: MerkleProofEntry): Bytes<32> => {
+      const left = disclose(entry.goesLeft) ? acc : entry.sibling;
+      const right = disclose(entry.goesLeft) ? entry.sibling : acc;
+      return persistentHash<RegistrantNodeInput>(RegistrantNodeInput {
+        domain: pad(32, "noctis:registrant:node:v1"),
+        left: left,
+        right: right
+      });
+    },
+    leaf,
+    proof
+  );
+
+  assert(disclose(recomputedRoot == registrantRoot), "Invalid registrant proof");
+}
+
+// ============================================================================
+// CIRCUITS — DARKVEIL REGISTRATION
+// ============================================================================
+
+// Register for DarkVeil phase
+// 1. Verify allowlist membership
+// 2. Verify NIGHT bond is provided
+// 3. Lock the bond (refundable on cancellation, or partially via
+//    claimRatioBondRefund after a normal close)
+// 4. Emit nullifier to prevent double-registration
+export circuit registerForDarkVeil(
+  bondCommitment: Bytes<32>
+): [] {
+  // Must be in DarkVeil phase
+  assert(disclose(phase == LaunchPhase.DarkVeil), "DarkVeil registration not active");
+  // Fix (2026-07-21, Medium): `phase` alone was checked, never
+  // `dvState` — registration stayed open through Buying/Closed (dvState is
+  // a separate sub-phase machine, see its own declaration comment), letting
+  // new registrants join after the registration freeze / base_slot
+  // computation, breaking the CLAUDE.md-documented fairness model (the
+  // registration-freeze invariant assumes the registrant set is fixed once
+  // Buying starts).
+  assert(disclose(dvState == DarkVeilState.Registration), "DarkVeil not in registration sub-phase");
+
+  // Derive caller identity (before verifyAllowlist — the design requirement needs the
+  // caller bytes to derive the allowlist leaf)
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+
+  // Verify allowlist membership, bound to this specific caller
+  verifyAllowlist(caller.bytes);
+
+  // CLAUDE.md eligibility check #3: registrant != creator
+  assert(disclose(caller.bytes != creatorKey), "Creator cannot register for DarkVeil");
+
+  // Compute registration commitment (nullifier) — fix (2026-07-21):
+  // no longer takes a nonce, see computeRegistrationCommit's own comment.
+  const nullifier = computeRegistrationCommit(
+    caller.bytes,
+    launchId,
+    bondAmount
+  );
+
+  // Prevent double-registration (commitment-nullifier pattern)
+  // disclose() must wrap the witness-derived argument at the point it
+  // reaches the ledger operation, not just the outer boolean expression.
+  assert(
+    !registrationNullifiers.member(disclose(nullifier)),
+    "Already registered for this launch"
+  );
+  registrationNullifiers.insert(disclose(nullifier));
+
+  // Fix: require the NIGHT bond to actually be paid. receiveUnshielded
+  // adds a ledger-enforced constraint that this transaction includes a
+  // matching unshielded NIGHT input of exactly bondAmount addressed to
+  // this contract.
+  receiveUnshielded(nativeToken(), disclose(bondAmount));
+
+  // Lock the NIGHT bond
+  lockedBonds.insert(disclose(caller.bytes), disclose(bondAmount));
+
+  // Track registration count
+  registrationCount.increment(1);
+}
+
+// ============================================================================
+// CIRCUITS — CUMULATIVE CAP TRACKING
+// ============================================================================
+
+// Phase 4 fix (2026-07-12): the standalone checkAndUpdateCap circuit that
+// used to live here was removed — nothing in this contract ever called it
+// (revealBuyCommit enforces the identical 5% cumulative wallet cap inline,
+// see its own "Bonus fix (this merge)" comment below), and no off-chain
+// caller invoked it either. Dead code duplicating the real enforcement
+// path, same class of cleanup as bonding_curve.compact's Tier C merge
+// . Test coverage for the cap boundary ported onto revealBuyCommit
+// directly — see eligibility_gate.test.ts's "wallet cap enforcement via
+// revealBuyCommit" describe block.
+
+// Check cap without updating (read-only, for UI queries)
+export circuit checkCap(callerKey: Bytes<32>): Uint<128> {
+  const current = cumulativePurchases.member(disclose(callerKey))
+    ? cumulativePurchases.lookup(disclose(callerKey))
+    : 0;
+  return disclose(current);
+}
+
+// ============================================================================
+// CIRCUITS — BOND REFUND (DarkVeil failure path)
+// ============================================================================
+
+// Claim a FULL NIGHT bond refund — launch was cancelled outright, OR
+// DarkVeil itself failed and the launch converted to public. For a
+// DarkVeil that closed NORMALLY (succeeded), see
+// claimRatioBondRefund below instead.
+//
+// Security-audit fix (Phase 2, 2026-07-11): this used to only clear the
+// ledger entry with a comment deferring to "the Zswap layer via
+// transaction merging" — a mechanism that doesn't exist. Now takes a
+// recipientAddr and pays out via sendUnshielded, mirroring
+// bonding_curve.compact's already-fixed Tier C copy of this exact circuit.
+export circuit claimBondRefund(recipientAddr: Bytes<32>): [] {
+  assert(
+    disclose(phase == LaunchPhase.Cancelled || dvFailed),
+    "Launch not cancelled and DarkVeil did not fail"
+  );
+
+  // Derive caller identity
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+  // Phase 5 hygiene fix (2026-07-12): sanity-check the caller-supplied
+  // payout destination isn't the empty/all-zero address — guards against a
+  // fat-fingered recipientAddr silently burning the refund.
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  // Check caller has a locked bond
+  assert(
+    lockedBonds.member(disclose(caller.bytes)),
+    "No locked bond found for caller"
+  );
+
+  const bond = lockedBonds.lookup(disclose(caller.bytes));
+  assert(disclose(bond > 0), "Bond already claimed");
+
+  // Clear the bond entry before paying out (checks-effects-interactions).
+  lockedBonds.insert(disclose(caller.bytes), disclose(0));
+
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+  sendUnshielded(nativeToken(), disclose(bond), dest);
+}
+
+// Claim a RATIO-BASED partial NIGHT bond refund — for a DarkVeil that
+// closed NORMALLY (succeeded, not cancelled, not marked failed). Phase 2
+// security-audit fix, 2026-07-11: Tier B had no equivalent of this circuit
+// at all before this merge (Tier C's bonding_curve.compact has had it
+// since its own ratio-refund fix) — a registrant who bought less than their full baseSlot
+// allocation had no on-chain path to reclaim any bond portion. Ported
+// verbatim from that already-proven implementation, now that
+// dvTokensPurchased/baseSlot live in the same contract as lockedBonds.
+// CLAUDE.md: `NIGHT_returned = NIGHT_bonded * tokens_purchased / tokens_allocated`.
+export circuit claimRatioBondRefund(
+  recipientAddr: Bytes<32>,
+  claimedRefund: Uint<128>
+): [] {
+  assert(
+    disclose(phase != LaunchPhase.Cancelled && !dvFailed && dvState == DarkVeilState.Closed),
+    "Only claimable after a normally-closed, non-cancelled, non-failed DarkVeil"
+  );
+
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+  // Phase 5 hygiene fix: same empty-recipient guard as claimBondRefund above.
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  assert(
+    lockedBonds.member(disclose(caller.bytes)),
+    "No locked bond found for caller"
+  );
+  const bond = lockedBonds.lookup(disclose(caller.bytes));
+  assert(disclose(bond > 0), "Bond already claimed");
+
+  // Fix (2026-07-30, security audit): reads the governor-attested
+  // REAL settlement, not the unpaid self-declaration revealBuyCommit
+  // writes to dvTokensPurchased — see that ledger's own comment and
+  // recordDarkVeilSettlement's comment for the full reasoning. A buyer who
+  // revealed a commitment but never actually settled on Cardano has no
+  // entry here, so `purchased` correctly floors at 0 (full forfeiture),
+  // matching the real economic outcome instead of trusting their own claim.
+  const purchased = settledDvPurchases.member(disclose(caller.bytes))
+    ? settledDvPurchases.lookup(disclose(caller.bytes))
+    : 0;
+
+  assert(
+    disclose(verifyRatioRefund(bond, purchased, baseSlot, claimedRefund)),
+    "Claimed refund does not match the ratio-based formula"
+  );
+
+  // Clear before paying out (checks-effects-interactions).
+  lockedBonds.insert(disclose(caller.bytes), disclose(0));
+
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+  sendUnshielded(nativeToken(), disclose(claimedRefund), dest);
+
+  // Route the forfeited remainder to the platform. One destination, so no
+  // share to claim and nothing to verify — the amount is fully determined by
+  // the bond and the refund already checked above.
+  const forfeited = (bond - claimedRefund) as Uint<128>;
+  const platformDest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: platformAddr }));
+  sendUnshielded(nativeToken(), disclose(forfeited), platformDest);
+}
+
+// ============================================================================
+// CIRCUITS — DARKVEIL PRIVATE BUY (from darkveil.compact)
+// ============================================================================
+
+// Submit a private buy commitment during the DarkVeil buying phase.
+// The commitment hides the purchase amount and buyer identity — no payment
+// happens here, deliberately: checking payment now would require
+// disclosing the amount, defeating the point of committing before
+// revealing.
+// Phase 4 fix (2026-07-12): previously ANY caller could submit a buy
+// commitment with no proof of prior DarkVeil registration at all, bypassing
+// the wallet-age/allowlist/NIGHT-bond eligibility gate entirely. Fixed by
+// requiring the caller to recompute their OWN registration nullifier (same
+// secret + same registration nonce + bondAmount used at
+// registerForDarkVeil) and prove it's already a member of
+// registrationNullifiers — this proves prior registration without
+// revealing WHICH registrant is buying (a nullifier is already a one-way,
+// unlinkable value, and this one is already public from registration),
+// preserving the commit-time identity-blindness this circuit is designed
+// around.
+// Fix (2026-07-21, High): nullifier is no longer a caller-supplied
+// parameter — see computeBuyNullifier's own comment for the full finding
+// (unlimited resubmission + precomputable identity leak) this closes.
+// Fix (2026-07-30): proof of prior registration is now a real Merkle
+// membership proof (verifyRegistrant) against registrantRoot, not a
+// disclosed nullifier value — see verifyRegistrant's own comment for why
+// the old nullifier-membership check was publicly precomputable and
+// de-anonymizing.
+export circuit submitBuyCommit(
+  commitment: Bytes<32>,
+  timestamp: Uint<64>
+): [] {
+  assert(disclose(dvState == DarkVeilState.Buying), "DarkVeil buying not active");
+
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  verifyRegistrant(caller.bytes);
+
+  assert(
+    !commitments.member(disclose(commitment)),
+    "Commitment already exists"
+  );
+
+  const nullifier = computeBuyNullifier(sk.bytes, launchId);
+  assert(
+    !buyNullifiers.member(disclose(nullifier)),
+    "Already bought in this DarkVeil phase"
+  );
+  buyNullifiers.insert(disclose(nullifier));
+
+  commitments.insert(disclose(commitment), disclose(BuyCommit {
+    commitment: commitment,
+    nullifier: nullifier,
+    timestamp: timestamp,
+    status: CommitStatus.Open
+  }));
+
+  dvTotalParticipants.increment(1);
+}
+
+// Reveal a buy commitment (after DarkVeil closes) — this is when the
+// actual purchase amount becomes public, by design.
+//
+// Bonus fix from this merge: revealBuyCommit now updates both
+// cumulativePurchases (5% cumulative cap, previously only reachable via
+// the standalone checkAndUpdateCap that nothing here ever called) and
+// dvTokensPurchased (needed by claimRatioBondRefund above) atomically,
+// same pattern Tier C's merged revealBuyCommit already uses.
+//
+// NOT fixed here (deliberately, tracked separately): no receiveUnshielded —
+// Tier B's ADA-denominated buy still has no payment enforcement. The
+// per-registrant baseSlot cap below bounds this gap's blast radius; it
+// does not close it.
+// Fix (2026-07-30): takes currentTimestamp now, bound to real chain
+// time via blockTimeGte/blockTimeLte (same 1-hour-band idiom already used
+// throughout cto_governance.compact/lp_escrow.compact) — an unbound
+// caller-supplied timestamp here would let anyone forge "still within the
+// reveal window" regardless of real elapsed time, defeating the deadline
+// below entirely.
+export circuit revealBuyCommit(
+  commitment: Bytes<32>,
+  tokenAmount: Uint<128>,
+  pricePerToken: Uint<128>,
+  currentTimestamp: Uint<64>
+): [] {
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  // DarkVeil must be closed
+  assert(disclose(dvState == DarkVeilState.Closed), "DarkVeil not closed");
+
+  // Fix (2026-07-30): reveal window closes revealWindowSeconds after
+  // the real, on-chain-recorded close time (fairLaunchCert.closeTimestamp,
+  // set once by closeDarkVeil) — without this, an unrevealed Open
+  // commitment could sit in `commitments` forever with no expiry path.
+  const revealDeadline = (fairLaunchCert.closeTimestamp + revealWindowSeconds) as Uint<64>;
+  assert(disclose(currentTimestamp <= revealDeadline), "Reveal window has closed");
+
+  // Verify commitment exists and is still Open
+  assert(commitments.member(disclose(commitment)), "Commitment not found");
+  const commit = commitments.lookup(disclose(commitment));
+  assert(disclose(commit.status == CommitStatus.Open), "Commitment already revealed");
+
+  // Verify the caller owns this commitment by recomputing it
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  const nonce = getBuyNonce();
+  const recomputed = computeBuyCommit(
+    caller.bytes,
+    launchId,
+    tokenAmount,
+    pricePerToken,
+    nonce
+  );
+  assert(disclose(recomputed == commitment), "Not the commitment owner");
+  // Zero extra disclosure cost — caller is already bound to this tx
+  // via the commitment-ownership proof above.
+  assert(disclose(caller.bytes != creatorKey), "Creator cannot buy their own DarkVeil allocation");
+
+  // Verify the price matches DarkVeil price
+  assert(disclose(pricePerToken == dvPrice), "Price mismatch with DarkVeil price");
+
+  // Design requirement: per-registrant cap — bounds a
+  // single registrant to their fair share of the pool rather than the
+  // entire dvAllocation.
+  assert(disclose(tokenAmount <= baseSlot), "Exceeds per-registrant DarkVeil allocation");
+
+  // Verify tokens don't exceed the pool-wide allocation
+  const newTotal = (totalTokensCommitted + tokenAmount) as Uint<128>;
+  assert(disclose(newTotal <= dvAllocation), "Exceeds DarkVeil allocation");
+
+  // Bonus fix (this merge): enforce the 5% cumulative wallet cap — same
+  // map, same walletCap, same identity checkAndUpdateCap uses.
+  const priorCumulative = cumulativePurchases.member(disclose(caller.bytes))
+    ? cumulativePurchases.lookup(disclose(caller.bytes))
+    : 0;
+  const newCumulative = (priorCumulative + tokenAmount) as Uint<128>;
+  assert(disclose(newCumulative <= walletCap), "Purchase exceeds 5% wallet cap");
+  cumulativePurchases.insert(disclose(caller.bytes), disclose(newCumulative));
+
+  // Bonus fix (this merge): track this buyer's DarkVeil-only purchase
+  // total, needed by claimRatioBondRefund.
+  const currentDvPurchased = dvTokensPurchased.member(disclose(caller.bytes))
+    ? dvTokensPurchased.lookup(disclose(caller.bytes))
+    : 0;
+  dvTokensPurchased.insert(disclose(caller.bytes), disclose((currentDvPurchased + tokenAmount) as Uint<128>));
+
+  // Update aggregate stats
+  totalTokensCommitted = disclose(newTotal);
+  const raisedF = ((tokenAmount as Field) * (pricePerToken as Field)) as Field;
+  const raised = raisedF as Uint<128>;
+  totalRaisedCommitted = disclose((totalRaisedCommitted + raised) as Uint<128>);
+
+  // Mark commitment as revealed
+  commitments.insert(disclose(commitment), disclose(BuyCommit {
+    commitment: commit.commitment,
+    nullifier: commit.nullifier,
+    timestamp: commit.timestamp,
+    status: CommitStatus.Revealed
+  }));
+}
+
+// Cancel a buy commitment (before DarkVeil closes)
+// Only the commitment owner can cancel
+export circuit cancelBuyCommit(commitment: Bytes<32>): [] {
+  // Must be in Buying phase
+  assert(disclose(dvState == DarkVeilState.Buying), "Can only cancel during buying phase");
+
+  // Verify commitment exists
+  assert(commitments.member(disclose(commitment)), "Commitment not found");
+  const commit = commitments.lookup(disclose(commitment));
+  assert(disclose(commit.status == CommitStatus.Open), "Commitment not open");
+
+  // Verify ownership via the nullifier (derived from the secret key —
+  // Fix, 2026-07-21, must match submitBuyCommit's derivation).
+  const sk = getUserSecret();
+  const expectedNullifier = computeBuyNullifier(sk.bytes, launchId);
+  assert(disclose(expectedNullifier == commit.nullifier), "Not the commitment owner");
+
+  // Mark as cancelled
+  commitments.insert(disclose(commitment), disclose(BuyCommit {
+    commitment: commit.commitment,
+    nullifier: commit.nullifier,
+    timestamp: commit.timestamp,
+    status: CommitStatus.Cancelled
+  }));
+
+  // Remove from nullifier set so the user can buy again
+  buyNullifiers.remove(disclose(commit.nullifier));
+
+  // Decrement participant count
+  dvTotalParticipants.decrement(1);
+}
+
+// ============================================================================
+// CIRCUITS — ZK FAIR LAUNCH CERTIFICATE
+// ============================================================================
+
+// Close DarkVeil and generate the ZK Fair Launch Certificate
+// Governor only — called after the buying phase ends
+//
+// Also takes `baseSlot_`, the per-registrant DarkVeil allocation, computed
+// off-chain by the governor from `dvAllocation / registrationCount` at
+// this exact moment — the final registrant count is only known once
+// registration is over.
+export circuit closeDarkVeil(closeTimestamp: Uint<64>, baseSlot_: Uint<128>): [] {
+  // Must be in Buying phase
+  assert(disclose(dvState == DarkVeilState.Buying), "DarkVeil not in buying phase");
+
+  // Verify governor
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can close DarkVeil");
+
+  assert(disclose(baseSlot_ > 0), "baseSlot must be positive");
+  // Fix (2026-07-30): verifyRatioRefund's own 2^40-1 ceiling on
+  // `allocated` (baseSlot) would otherwise only surface the first time
+  // claimRatioBondRefund runs, after every registrant has already bonded
+  // and bought — fail fast here instead, before any bond refund can be
+  // blocked.
+  assert(disclose(baseSlot_ <= 1099511627775), "baseSlot exceeds verifyRatioRefund's safe range"); // 2^40 - 1
+  // Fix (2026-07-21, Medium): baseSlot_ was previously only checked
+  // for being positive — a governor mistake (or malicious value) could set
+  // it so high that baseSlot * registrationCount collectively promises far
+  // more tokens than dvAllocation actually reserves, letting early
+  // revealBuyCommit callers (bounded individually by baseSlot, per-call)
+  // drain the pool before later ones can claim their fair share. Verified
+  // via Field multiplication (avoids the non-Field multiplication
+  // result-width ceiling — same idiom as revealBuyCommit's raisedF below).
+  const totalAllocatedF = ((baseSlot_ as Field) * (registrationCount.read() as Field)) as Field;
+  const totalAllocated = totalAllocatedF as Uint<128>;
+  assert(disclose(totalAllocated <= dvAllocation), "baseSlot * registrationCount exceeds dvAllocation");
+  baseSlot = disclose(baseSlot_);
+
+  // Transition to Closed
+  dvState = DarkVeilState.Closed;
+
+  // Generate certificate hash
+  const certHash = computeCertHash(
+    launchId,
+    dvTotalParticipants.read(),
+    totalTokensCommitted,
+    totalRaisedCommitted,
+    closeTimestamp
+  );
+
+  // Store the certificate
+  fairLaunchCert = disclose(FairLaunchCert {
+    launchId: launchId,
+    totalParticipants: dvTotalParticipants.read(),
+    totalTokensAllocated: totalTokensCommitted,
+    totalRaised: totalRaisedCommitted,
+    participationRate: 0, // Computed off-chain from raw numbers
+    closeTimestamp: closeTimestamp,
+    certHash: certHash
+  });
+}
+
+// Get the ZK Fair Launch Certificate (public, for display and verification)
+export circuit getFairLaunchCert(): FairLaunchCert {
+  return disclose(fairLaunchCert);
+}
+
+// Fix (2026-07-30, security audit): governor-only — records that
+// `buyerKey` really settled `settledAmount` tokens for real ADA, observed
+// from a real Cardano ClaimDarkVeilTokens transaction.
+// This is the ONLY way settledDvPurchases is ever written. The off-chain
+// caller (a relayer/CLI watching Cardano for real ClaimDarkVeilTokens
+// events) is expected to call this once per real settlement, with
+// settledAmount taken directly from that transaction's own dv_amount, not
+// from anything the buyer separately claims on Midnight. Idempotent
+// overwrite (insert, not add) — safe because a buyer can only ever settle
+// once on Cardano (the Merkle-nullifier claim mechanism prevents a
+// double-claim there), so this should only ever be called once per buyer
+// per launch in practice; a governor mistake re-calling it just overwrites
+// with the same (or a corrected) real value rather than double-counting.
+export circuit recordDarkVeilSettlement(
+  buyerKey: Bytes<32>,
+  settledAmount: Uint<128>
+): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can record a DarkVeil settlement");
+
+  // Same per-registrant ceiling revealBuyCommit itself enforces on the
+  // (untrusted) declared amount — a real settlement can never exceed it
+  // either, since Cardano's own ClaimDarkVeilTokens is gated by the same
+  // baseSlot-derived Merkle allocation.
+  assert(disclose(settledAmount <= baseSlot), "Settlement exceeds per-registrant DarkVeil allocation");
+
+  // Once finalized, the settlement record is closed. sweepForfeitedBond reads
+  // it to decide that a registrant never settled, so it must not be able to
+  // change after a sweep could have acted on it.
+  assert(disclose(!settlementFinalized), "DarkVeil settlement is already finalized");
+
+  settledDvPurchases.insert(disclose(buyerKey), disclose(settledAmount));
+}
+
+// Close the settlement record. Governor-only, one-way, and callable only on a
+// normally-closed DarkVeil.
+//
+// This is the governor attesting that the Cardano claim window has ended and
+// every real ClaimDarkVeilTokens settlement has been recorded. Compact cannot
+// observe Cardano, so that remains an attested fact — the same trust model as
+// the allowlist root, the CTO balance snapshot and the staking snapshot.
+//
+// A launch where the claim window never actually ran must NOT be finalized:
+// registrants would be recorded as non-settlers through no fault of their own.
+// cancelDarkVeil/markDarkVeilFailed is the correct path there, and it routes
+// every bond back in full via claimBondRefund.
+export circuit finalizeDvSettlement(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can finalize DarkVeil settlement");
+
+  assert(
+    disclose(phase != LaunchPhase.Cancelled && !dvFailed && dvState == DarkVeilState.Closed),
+    "Only finalizable after a normally-closed, non-cancelled, non-failed DarkVeil"
+  );
+  assert(disclose(!settlementFinalized), "DarkVeil settlement is already finalized");
+
+  settlementFinalized = disclose(true);
+}
+
+// Collect a bond that was forfeited in full, and pay it to the platform.
+//
+// A registrant who bonded, revealed a commitment on Midnight, and then never
+// settled on Cardano forfeits their whole bond. That much the refund path
+// already enforces: claimRatioBondRefund reads the governor-attested
+// settledDvPurchases, so their refund computes to zero. What it cannot do is
+// MOVE the NIGHT — it only ever runs when the registrant calls it, and a
+// registrant owed nothing never will. Their bond is real (registerForDarkVeil
+// takes custody via receiveUnshielded) and would otherwise sit in this
+// contract's balance permanently. This circuit is the platform's own door to
+// it, making the same sendUnshielded call the refund path already makes.
+//
+// Deliberately PERMISSIONLESS. The destination is sealed at deploy and the
+// amount is fully determined by the ledger, so calling it confers nothing on
+// the caller — the same "the condition is the authorization" idiom as the
+// Cardano validators' ExpireCurve and Graduate. Not requiring the governor
+// means collection cannot stall on one key.
+//
+// Deliberately FULL FORFEITURE ONLY. A registrant who settled in part is owed
+// a real refund and has every reason to claim it themselves; sweeping their
+// bond would take money that is theirs. Requiring a zero settlement keeps this
+// circuit unable to touch anything anyone is owed.
+//
+// Deliberately PROVEN. The bond swept must belong to a key with a real path in
+// registrantRoot. lockedBonds is written by each registrant's own call and
+// registrantRoot is published later by one key, so the two are separate
+// records of the same set with separate authors; requiring both to agree means
+// a bond is only ever collected here on evidence from each of them. See the
+// REGISTRANT EXCLUSION DISPUTE section below for the other half.
+export circuit sweepForfeitedBond(registrantKey: Bytes<32>): [] {
+  assert(
+    disclose(phase != LaunchPhase.Cancelled && !dvFailed && dvState == DarkVeilState.Closed),
+    "Only sweepable after a normally-closed, non-cancelled, non-failed DarkVeil"
+  );
+  assert(disclose(settlementFinalized), "DarkVeil settlement is not finalized yet");
+
+  assert(lockedBonds.member(disclose(registrantKey)), "No locked bond found for registrant");
+  const bond = lockedBonds.lookup(disclose(registrantKey));
+  assert(disclose(bond > 0), "Bond already claimed or swept");
+
+  // Absent or zero both mean the same thing: nothing was ever settled for this
+  // registrant, so nothing is owed back to them.
+  const settled = settledDvPurchases.member(disclose(registrantKey))
+    ? settledDvPurchases.lookup(disclose(registrantKey))
+    : 0;
+  assert(disclose(settled == 0), "Registrant settled part of their allocation and is owed a refund");
+
+  // The published tree must actually contain this registrant. Last, because it
+  // is the expensive check and the cheap ones above already name the common
+  // refusals.
+  verifyRegistrant(registrantKey);
+
+  // Clear before paying out — same checks-effects-interactions order as both
+  // refund circuits.
+  lockedBonds.insert(disclose(registrantKey), disclose(0));
+
+  const platformDest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: platformAddr }));
+  sendUnshielded(nativeToken(), disclose(bond), platformDest);
+}
+
+// ============================================================================
+// CIRCUITS — REGISTRANT EXCLUSION DISPUTE
+// ============================================================================
+//
+// What decides where a bond ends up is the record the registrant wrote
+// themselves.
+//
+// There are two records of who registered, and they have different authors.
+// lockedBonds is written a row at a time by each registrant's own
+// registerForDarkVeil call. registrantRoot is one hash, published later, by
+// one key, at the registration freeze; it exists so a buyer can prove
+// membership without naming themselves, and it is meant to commit to exactly
+// the set lockedBonds already holds. A Merkle root, though, carries no
+// evidence of which set it was built from, and buying is gated on it.
+//
+// These circuits make the two records answer to each other:
+//
+//   - A bond is only ever collected against a real published path
+//     (sweepForfeitedBond above), so a row in lockedBonds with no leaf in the
+//     tree is worth nothing to anyone.
+//   - A registrant holding a real bond may dispute, which starts a fixed
+//     window.
+//   - Anyone at all may end that window by producing the disputant's path.
+//     The tree is public, so a registrant the tree really does contain can be
+//     answered by any observer — not only by the key that published the root.
+//
+// So the two outcomes separate cleanly. A registrant who simply bought nothing
+// is in the tree, is answered, and forfeits on the ordinary terms. A
+// registrant with no path has nothing that can be produced against them, and
+// takes their bond back in full.
+//
+// Identity: disputing discloses caller.bytes, exactly as both refund circuits
+// already do. lockedBonds has carried that key publicly since registration and
+// buying is long over by this point, so this spends no privacy the refund path
+// does not spend already.
+
+// Open a dispute: a bond is held for this caller, and they hold no path in
+// registrantRoot.
+//
+// Available from the DarkVeil close rather than from settlement finalization,
+// so the window runs alongside the Cardano claim window instead of after it.
+// The payout waits for finalization regardless — see claimDisputedBond.
+export circuit disputeRegistrantExclusion(currentTimestamp: Uint<64>): [] {
+  // Same one-hour band on a caller-supplied timestamp as revealBuyCommit —
+  // without it, the window below could be declared already elapsed.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  assert(
+    disclose(phase != LaunchPhase.Cancelled && !dvFailed && dvState == DarkVeilState.Closed),
+    "Only disputable after a normally-closed, non-cancelled, non-failed DarkVeil"
+  );
+
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+
+  assert(lockedBonds.member(disclose(caller.bytes)), "No locked bond found for caller");
+  const bond = lockedBonds.lookup(disclose(caller.bytes));
+  assert(disclose(bond > 0), "Bond already claimed or swept");
+
+  // Answered first, open second. An answered dispute is still an open one —
+  // rebutRegistrantExclusion records the answer rather than clearing the
+  // dispute — so checking the other order would leave this unreachable and
+  // report the vaguer of the two refusals.
+  assert(
+    !rebuttedExclusions.member(disclose(caller.bytes)),
+    "This registrant's membership in the tree has already been shown"
+  );
+  assert(!disputedExclusions.member(disclose(caller.bytes)), "Exclusion already disputed");
+
+  const claimableFrom = (currentTimestamp + exclusionDisputeWindow) as Uint<64>;
+  disputedExclusions.insert(disclose(caller.bytes), disclose(claimableFrom));
+}
+
+// Answer a dispute by producing the disputant's own path in registrantRoot.
+//
+// Permissionless, and deliberately so: the tree is published, so whoever holds
+// it can answer, and collection never depends on one key staying available.
+// The proof is the entire authorization — it recomputes the published root or
+// the transaction fails — so calling this confers nothing on the caller.
+export circuit rebutRegistrantExclusion(registrantKey: Bytes<32>): [] {
+  assert(disputedExclusions.member(disclose(registrantKey)), "No open dispute for this registrant");
+  assert(!rebuttedExclusions.member(disclose(registrantKey)), "Dispute already answered");
+
+  verifyRegistrant(registrantKey);
+
+  rebuttedExclusions.insert(disclose(registrantKey));
+}
+
+// Take back a bond behind a dispute that stood unanswered for the full window.
+//
+// Gated on settlementFinalized for the same reason sweepForfeitedBond is: the
+// settlement record has to be closed before anything reads it to decide that
+// nothing is owed, or a settlement recorded afterwards would mean this paid
+// out in full where a ratio refund was owed.
+export circuit claimDisputedBond(
+  recipientAddr: Bytes<32>,
+  currentTimestamp: Uint<64>
+): [] {
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  assert(disclose(settlementFinalized), "DarkVeil settlement is not finalized yet");
+  // Same empty-recipient guard as both refund circuits.
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+
+  assert(disputedExclusions.member(disclose(caller.bytes)), "No open dispute for this registrant");
+  assert(
+    !rebuttedExclusions.member(disclose(caller.bytes)),
+    "This registrant's membership in the tree was shown; the bond forfeits on the ordinary terms"
+  );
+
+  const claimableFrom = disputedExclusions.lookup(disclose(caller.bytes));
+  assert(disclose(currentTimestamp >= claimableFrom), "Dispute window has not elapsed");
+
+  // A registrant who settled was never excluded — the ratio refund is theirs
+  // to claim and pays them what they are actually owed.
+  const settled = settledDvPurchases.member(disclose(caller.bytes))
+    ? settledDvPurchases.lookup(disclose(caller.bytes))
+    : 0;
+  assert(disclose(settled == 0), "Registrant settled part of their allocation; claim the ratio refund instead");
+
+  assert(lockedBonds.member(disclose(caller.bytes)), "No locked bond found for caller");
+  const bond = lockedBonds.lookup(disclose(caller.bytes));
+  assert(disclose(bond > 0), "Bond already claimed or swept");
+
+  // Clear before paying out — same checks-effects-interactions order as every
+  // other circuit here that moves NIGHT.
+  lockedBonds.insert(disclose(caller.bytes), disclose(0));
+
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+  sendUnshielded(nativeToken(), disclose(bond), dest);
+}
+
+// ============================================================================
+// CIRCUITS — VIEW / READ
+// ============================================================================
+
+// Get DarkVeil state
+export circuit getDvState(): DarkVeilState {
+  return dvState;
+}
+
+// Get total committed tokens (only meaningful after reveals)
+export circuit getTotalCommitted(): Uint<128> {
+  return totalTokensCommitted;
+}
+
+// Get total raised (only meaningful after reveals)
+export circuit getTotalRaisedCommitted(): Uint<128> {
+  return totalRaisedCommitted;
+}
+
+// Get DarkVeil allocation
+export circuit getDvAllocation(): Uint<128> {
+  return dvAllocation;
+}
+
+// Get DarkVeil price
+export circuit getDvPrice(): Uint<128> {
+  return dvPrice;
+}
+
+// ============================================================================
+// CIRCUITS — ADMIN / GOVERNOR
+// ============================================================================
+
+// Update allowlist root (for late additions)
+export circuit updateAllowlistRoot(newRoot: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can update allowlist");
+  allowlistRoot = disclose(newRoot);
+}
+
+// Record that DarkVeil failed (<50% participation).
+// Independent of `phase` so claimBondRefund keeps working regardless of
+// what phase the launch is in afterward. One-way: DarkVeil can only fail
+// once per launch.
+export circuit markDarkVeilFailed(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can mark DarkVeil failed");
+  assert(disclose(!dvFailed), "DarkVeil already marked failed");
+  dvFailed = disclose(true);
+}
+
+// Advance to next phase
+export circuit advancePhase(newPhase: LaunchPhase): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can advance phase");
+
+  // Fix (2026-07-30): the four checks below each correctly guard
+  // their own forward transition (DarkVeil/Public/Graduated all assert the
+  // one valid prior phase; Cancelled is reachable from either), but NONE
+  // of them ever matches newPhase == Pending — so nothing stopped the
+  // governor from calling advancePhase(Pending) from ANY state (DarkVeil,
+  // Public, even Graduated), silently resetting the whole one-way
+  // lifecycle backwards with no assertion firing at all. Pending is only
+  // ever the constructor's own initial value, never a legitimate target.
+  assert(disclose(newPhase != LaunchPhase.Pending), "Cannot advance phase back to Pending");
+
+  // Phase transitions must be sequential
+  if (disclose(newPhase == LaunchPhase.DarkVeil)) {
+    assert(disclose(phase == LaunchPhase.Pending), "Must be in Pending to start DarkVeil");
+  }
+  if (disclose(newPhase == LaunchPhase.Public)) {
+    assert(disclose(phase == LaunchPhase.DarkVeil), "Must be in DarkVeil to start Public");
+  }
+  if (disclose(newPhase == LaunchPhase.Graduated)) {
+    assert(disclose(phase == LaunchPhase.Public), "Must be in Public to graduate");
+  }
+  if (disclose(newPhase == LaunchPhase.Cancelled)) {
+    // Can cancel from DarkVeil or Public, but not from Graduated
+    assert(disclose(phase != LaunchPhase.Graduated), "Cannot cancel after graduation");
+  }
+
+  phase = disclose(newPhase);
+}
+
+// --- from darkveil.compact: dvState sub-phase admin circuits ---
+
+// Start registration phase
+export circuit startRegistration(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can start");
+  assert(disclose(dvState == DarkVeilState.Inactive), "DarkVeil already started");
+  dvState = DarkVeilState.Registration;
+}
+
+// Start buying phase
+// Fix (2026-07-30): now takes registrantRoot_, published by the
+// governor at this exact freeze point — the moment registrationCount stops
+// growing (the registration-freeze invariant), so the registrant set
+// this root commits to is final for the round. The governor computes the
+// tree off-chain from the real, already-public registrant set (readable
+// from lockedBonds/registrationNullifiers — same off-chain-computed,
+// governor-published-root trust model already used for allowlistRoot and
+// every other Merkle root on this platform), not a new trust assumption.
+export circuit startBuying(registrantRoot_: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can start buying");
+  assert(disclose(dvState == DarkVeilState.Registration), "Must be in registration phase");
+  // Refuse to open buying below the minimum registrant floor — the
+  // governor must call cancelDarkVeil() instead, which is fully refundable.
+  assert(
+    disclose(registrationCount.read() >= minDvParticipants),
+    "Below minimum DarkVeil participant threshold — cancel instead"
+  );
+  registrantRoot = disclose(registrantRoot_);
+  dvState = DarkVeilState.Buying;
+}
+
+// Cancel DarkVeil (failure path).
+// All bonds are refundable via claimBondRefund above.
+//
+// `dvFailed` is set here as well as `dvState`, and both are required for
+// that refund promise to hold. claimBondRefund gates on
+// `phase == Cancelled || dvFailed`, and claimRatioBondRefund gates on
+// `dvState == Closed` — so setting `dvState = Cancelled` alone satisfies
+// NEITHER path and every bond would be stranded. This is the escape hatch
+// startBuying() points the governor at when registration is below
+// minDvParticipants, so it must actually release the bonds it promises.
+export circuit cancelDarkVeil(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey.bytes == governorKey), "Only governor can cancel");
+  assert(disclose(dvState != DarkVeilState.Closed), "Already closed");
+  assert(disclose(dvState != DarkVeilState.Cancelled), "Already cancelled");
+  dvState = DarkVeilState.Cancelled;
+  dvFailed = disclose(true);
+}
+
+// ============================================================================
+// PRIVACY ANALYSIS
+// ============================================================================
+//
+// What goes ON-CHAIN (public ledger):
+//   - launchId, allowlistRoot, phase, totalSupply, maxWalletPercent, bondAmount
+//   - walletCap (precomputed)
+//   - governorKey, creatorKey (derived, not raw secrets)
+//   - platformAddr (real unshielded address, fixed at deploy)
+//   - cumulativePurchases (keyed by UserPublicKey, not real identity)
+//   - lockedBonds, dvTokensPurchased (keyed by UserPublicKey)
+//   - registrationNullifiers, buyNullifiers (commitment hashes, not
+//     linkable to identity)
+//   - registrationCount, dvTotalParticipants (aggregate counters)
+//   - dvState, commitments (commitment hashes + nullifiers — not linkable
+//     to identity until revealed)
+//   - dvAllocation, dvPrice, allowlistSize, registrationCloseTime (sealed)
+//   - totalTokensCommitted, totalRaisedCommitted (public for transparency
+//     once revealed)
+//   - baseSlot (per-registrant allocation, set once at DarkVeil close)
+//   - fairLaunchCert (public certificate, generated on close)
+//   - disputedExclusions, rebuttedExclusions (keyed by UserPublicKey). A
+//     dispute names its own caller, which is the same disclosure both refund
+//     circuits already make and the same key lockedBonds has carried publicly
+//     since registration — and it is only reachable once buying is over.
+//
+// What stays PRIVATE (never leaves the prover):
+//   - User's secret key (getUserSecret witness)
+//   - Merkle proof (getMerkleProof witness)
+//   - Buy nonce (getBuyNonce witness)
+//   - Governor's secret key (getGovernorSecret witness)
+//   - Individual buy amounts (hidden in commitments until revealed)
+//   - Mapping from UserPublicKey to real-world identity
+//
+// Privacy guarantees:
+//   - Allowlist membership is proven via ZK without revealing which entry,
+//     and the leaf is bound to the caller's own identity  so it
+//     can't be borrowed from another registrant's proof.
+//   - UserPublicKey is a domain-separated hash of the user's secret — not
+//     linkable to their real-world identity or to other launches.
+//   - Registration/buy nullifiers are unique per (user, launch[, nonce]) —
+//     prevent double-registration/double-buying without revealing which
+//     user acted.
+//   - DarkVeil buy amounts are committed privately; only the aggregate
+//     (totalTokensCommitted/totalRaisedCommitted) is public until an
+//     individual reveal, and even then the mapping from UserPublicKey to
+//     real identity stays unknown.
+//   - Cumulative purchases are visible by UserPublicKey, but the mapping
+//     from UserPublicKey to real identity is unknown.
+//
+// ============================================================================

@@ -1,0 +1,71 @@
+name: Checks
+
+# Fast feedback: lint + typecheck across the whole workspace (contracts/midnight,
+# integration, packages/types, packages/zk-proofs).
+#
+# Only two jobs: `biome` (no Compact compilation needed at all) and
+# `typecheck` (everything else, combined into one job). Found the hard way
+# (2026-07-30) that contracts/midnight's compiled output isn't just a
+# zk-proofs dependency — integration/midnight-client.ts imports it directly
+# too, same as several integration/tests/*.ts files — so a split that put
+# integration in its own "fast, no compile" job kept failing. Rather than
+# keep discovering one more hidden dependent, everything that needs the
+# Compact CLI/compiled output now lives in one job.
+#
+# Uses `npm install`, not `npm ci`: the Midnight SDK dependency tree pulls
+# in platform-gated optional packages (@emnapi/*, smoldot,
+# @polkadot-api/substrate-client) that publish frequently enough that a
+# locally-regenerated lockfile can fall out of sync with the runner's exact
+# resolution within minutes, even from a real Linux environment — `npm ci`'s
+# strict lockfile-sync check keeps rejecting on that drift. `npm install`
+# still fails on a genuinely broken package.json/dependency, just doesn't
+# require byte-perfect lockfile fidelity.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  biome:
+    name: Biome (lint + format check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install workspace dependencies
+        run: npm install
+      - name: Biome check (whole repo, per biome.json's own includes scope)
+        run: npx biome ci .
+
+  typecheck:
+    name: Typecheck — contracts/midnight, integration, zk-proofs, types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the Compact CLI
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.compact/bin" >> "$GITHUB_PATH"
+      - name: Install the Compact compiler
+        run: |
+          export PATH="$HOME/.compact/bin:$PATH"
+          compact update
+      - name: Install workspace dependencies
+        run: npm install
+      - name: Typecheck contracts/midnight (compiles all 8 PSMs first, then tsc)
+        run: |
+          export PATH="$HOME/.compact/bin:$PATH"
+          npm run typecheck --workspace=@noctis/midnight-contracts
+      - name: Typecheck integration (imports contracts/midnight's now-compiled output)
+        run: npm run typecheck --workspace=@noctis/integration
+      - name: Typecheck packages/zk-proofs (imports contracts/midnight's now-compiled output)
+        run: npm run typecheck --workspace=@noctis/zk-proofs
+      - name: Typecheck packages/types
+        run: npm run typecheck --workspace=@noctis/types

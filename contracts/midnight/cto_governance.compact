@@ -1,0 +1,1614 @@
+pragma language_version >= 0.16 && <= 0.23;
+
+import CompactStandardLibrary;
+
+// ============================================================================
+// CTO GOVERNANCE PSM — Noctis Protocol
+// ============================================================================
+//
+// Community Takeover Opportunity (CTO) governance system.
+//
+// When a creator goes MIA (90+ days no claim + no social post), the community
+// can vote to trigger a CTO. After CTO trigger:
+//   - Creator's future bonding-curve trade fees redirect to a community
+//     wallet (as of 2026-07-12: this happens directly on each tier's
+//     own bonding curve contract — bonding_curve.ak/bonding_curve_tier_b.ak/
+//     bonding_curve.compact's own triggerCTO — NOT via creator_escrow.compact,
+//     which never actually receives real fee deposits in the current
+//     architecture; see that file's header and internal tracking)
+//   - LP escrow migration authority transfers to community wallet
+//   - DEX whitelist management transfers to community wallet
+//   - Unvested creator tokens freeze to community treasury
+//
+// This contract (cto_governance) only ever flips its OWN ctoState/
+// communityWallet when a proposal executes — it cannot call any other
+// PSM's triggerCTO directly (Compact has no cross-contract call mechanism).
+// Each dependent contract's own triggerCTO must be called as a
+// separate, off-chain-orchestrated transaction — see
+// integration/midnight-client.ts's executeCtoProposal.
+//
+// This is NOT a kill switch — it's a living governance mechanism:
+//   - Ongoing community proposals after CTO (fund allocation, DEX migration)
+//   - Per-token weighted voting (balance from bonding curve PSM)
+//   - Private voting via nullifier pattern (prevent double-vote, protect privacy)
+//   - 72-hour ballot window, 5% quorum, simple majority
+//   - 90-day cooldown after any vote
+//   - 90-day post-graduation minimum before first proposal
+//
+// ANTI-WHALE-TAKEOVER SAFEGUARDS (2026-07-28): a real, structural gap —
+// quorum only requires 5% of supply to have VOTED, and majority is checked
+// against votes cast, not total supply. A single wallet holding >=5% could
+// vote alone and pass any proposal outright, and the platform's own 5%
+// whale cap only runs on the bonding curve pre-graduation — nothing stops
+// post-graduation DEX accumulation past that once trading moves off the
+// curve. Three safeguards close this, all reusing patterns already proven
+// elsewhere in this file/codebase rather than new primitives:
+//   1. maxVoterCap — every voter's counted weight (not just the creator's)
+//      is capped at a fixed fraction of supply, generalizing what the
+//      creator-vote-cap fix only applied to the creator. However much a wallet actually holds, no
+//      single vote can count for more than this cap — quorum+majority now
+//      structurally require real breadth of participation.
+//   2. minVoterCount — quorum requires a minimum number of DISTINCT voters,
+//      not just enough combined weight. Reuses the existing voterCount
+//      field, already incremented every castVote.
+//   3. minHoldingPeriod — a balance only counts toward a vote if the
+//      snapshot's heldSinceTimestamp for that leaf predates the proposal's
+//      own startTimestamp by at least this long, closing a buy-right-
+//      before-the-snapshot-then-vote-then-sell timing gap. Mirrors
+//      staking_pool.ak's STAKING_BONDING_PERIOD_DAYS anti-gaming pattern.
+//
+// Jinx's vision: "Features that help with CTOs, not just have keys and LP
+// burned." The community gets TOOLS to keep the project alive, not just
+// a nuclear option.
+//
+// BREAK-GLASS FALLBACK (2026-07-19): createProposal's SilenceLockTrigger
+// branch requires hasClaimableBalance == true before a vote can even
+// be proposed — but that field is governor-attested off-chain (this
+// contract has no cross-contract read into the real fee-holding curve
+// contract). A compromised, absent, or malicious governor could
+// therefore refuse to ever confirm a real claimable balance exists,
+// permanently blocking the community from ever proposing a CTO — a
+// single-point-of-failure that contradicts the whole premise of this
+// contract being a COMMUNITY-triggered process. bondedSilenceChallenge /
+// resolveBreakGlassChallenge / claimBreakGlassBondRefund below give the
+// community a bonded, permissionless override of that one gate:
+//   1. Anyone can post a NIGHT bond asserting hasClaimableBalance should be
+//      true, once the creator is already independently, publicly silent
+//      long enough (checked against the real elapsed time since
+//      lastCreatorActivity — break-glass never shortens the silence
+//      timer itself, only bypasses the balance attestation).
+//   2. The governor gets a fixed response window (72h, same as a normal
+//      ballot) to weigh in — a genuine, timestamped updateCreatorActivity
+//      call during or after that window that still shows no claimable
+//      balance counts as a real rebuttal and forfeits the bond (60/40
+//      treasury/ops, matching every other forfeiture in this codebase).
+//   3. If the governor never touches updateCreatorActivity at all during
+//      the window (true unresponsiveness/censorship), the challenge
+//      auto-confirms once the window elapses: hasClaimableBalance is
+//      force-set true and the challenger's bond is refunded in full.
+// This path never touches balanceSnapshotRoot, and no path does. That root
+// is what makes castVote's balance proof unforgeable, so it only ever comes
+// from the governor — a root anyone else could publish would prove nothing
+// about anyone's holdings, and accepting one would hand a challenger the
+// power to write the electorate's weights.
+//
+// An unrefreshed snapshot is handled on a different axis, by age rather than
+// by authorship: after staleSnapshotGraceWindow a CTO trigger may rest on the
+// last root the governor really published. Old and forged are different
+// things, and every vote is still proven against a tree nobody invented. See
+// that field's own declaration comment.
+//
+// Reuses patterns from:
+//   - midnight-modules/voting (ballot lifecycle, nullifier voting)
+//   - midnight-modules/commitment-nullifier (double-vote prevention)
+//   - midnight-modules/access-control (governor + community wallet)
+//   - realVote/zvoting (per-election nullifier, POL-gated voting)
+//   - midnight-expert FungibleToken (witness-derived identity)
+//
+// Compiler: compactc v0.31.1
+// ============================================================================
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+export enum CtoState { PreCTO, CTOTriggered, CTODissolved }
+
+export enum ProposalType {
+  SilenceLockTrigger,    // Initial CTO trigger (creator MIA 90+ days)
+  FundAllocation,        // Allocate community treasury funds
+  DexMigration,          // Migrate LP to a new DEX
+  WhitelistUpdate,       // Add/remove DEX from whitelist
+  DissolveCTO            // Dissolve CTO (return control to creator if they return)
+}
+
+// Note (2026-07-21, Low): `Pending` is never assigned anywhere in
+// this file — createProposal sets new proposals directly to `Active`
+// (the balanceSnapshotRoot/quorum/silence checks it already runs make a
+// separate not-yet-open state unnecessary). Kept in the enum for now since
+// removing a variant changes the generated type across every TS consumer;
+// dead but harmless.
+export enum ProposalState { Pending, Active, Passed, Failed, Executed }
+
+// Break-glass challenge lifecycle — see the file header's BREAK-GLASS
+// FALLBACK note for the full design.
+export enum BreakGlassState { None, Pending, Confirmed, Rebutted }
+
+export struct UserSecretKey { bytes: Bytes<32>; }
+export struct UserPublicKey { bytes: Bytes<32>; }
+
+export struct Proposal {
+  proposalType: ProposalType;
+  proposerKey: Bytes<32>;
+  descriptionHash: Bytes<32>;   // Hash of off-chain proposal description
+  startTimestamp: Uint<64>;
+  endTimestamp: Uint<64>;       // startTimestamp + 72h
+  yesVotes: Uint<128>;          // Total token-weight of YES votes
+  noVotes: Uint<128>;           // Total token-weight of NO votes
+  voterCount: Uint<64>;         // Number of unique voters
+  state: ProposalState;
+  // Creator vote audit tracking
+  creatorYesVotes: Uint<128>;  // Creator's YES vote weight (capped at 2% supply)
+  creatorNoVotes: Uint<128>;   // Creator's NO vote weight (capped at 2% supply)
+  // Execution payload — what happens when proposal passes
+  targetDexAddr: Bytes<32>;     // For DexMigration / WhitelistUpdate
+  allocationAmount: Uint<128>;  // For FundAllocation
+  allocationRecipient: Bytes<32>; // For FundAllocation
+  // Security audit fix: pinned at createProposal time so executeProposal
+  // can no longer accept an attacker-chosen wallet at execution time —
+  // only meaningful for SilenceLockTrigger, harmless (zero) otherwise.
+  proposedCommunityWallet: Bytes<32>;
+  // Security audit fix: the balance-snapshot Merkle root this proposal's
+  // votes are checked against, pinned at creation so a governor publishing
+  // a new snapshot mid-ballot can't change what an in-flight vote proves.
+  balanceSnapshotRoot: Bytes<32>;
+}
+
+// A single, per-launch break-glass challenge slot — one active challenge
+// at a time (mirrors how rare this path should be; a real challenge only
+// happens when the normal governor-attestation path has already failed).
+export struct BreakGlassChallenge {
+  challenger: Bytes<32>;
+  bondAmount: Uint<128>;
+  challengeTimestamp: Uint<64>;
+  state: BreakGlassState;
+}
+
+struct ProposalIdInput {
+  launchId: Bytes<32>;
+  proposerKey: Bytes<32>;
+  descriptionHash: Bytes<32>;
+  timestamp: Uint<64>;
+}
+
+struct VoteNullifierInput {
+  domain: Bytes<32>;
+  voterSecret: Bytes<32>;
+  launchId: Bytes<32>;
+  proposalId: Bytes<32>;
+}
+
+// One level of a Merkle inclusion proof for the balance snapshot — same
+// fixed-depth-tree convention as bonding_curve.compact's allowlist
+// proof (sibling + direction bit per level, 20 levels always, no early
+// exit since `fold` can't branch on tree size). Depth reduced 32 -> 20,
+// 2026-07-12 — see getBalanceProof's witness declaration comment.
+struct MerkleProofEntry {
+  sibling: Bytes<32>;
+  goesLeft: Boolean;
+}
+
+// Domain-separated leaf: binds a real token balance to the voter's own
+// derived identity so a balance can't be "borrowed" from someone else's
+// leaf the way an unbound allowlist leaf could (security audit fix).
+// heldSinceTimestamp (2026-07-28, anti-whale fix #3): the real time the
+// governor's off-chain snapshot first observed this wallet holding this
+// balance — included in the leaf hash so a voter can't claim a different
+// (earlier) held-since time than what the governor actually published;
+// it's bound by the same Merkle proof as the balance itself.
+struct BalanceLeafInput {
+  domain: Bytes<32>;
+  voterKey: Bytes<32>;
+  balance: Uint<128>;
+  heldSinceTimestamp: Uint<64>;
+}
+
+// Domain-separated Merkle node hash for the balance-snapshot tree.
+struct BalanceNodeInput {
+  domain: Bytes<32>;
+  left: Bytes<32>;
+  right: Bytes<32>;
+}
+
+// ============================================================================
+// LEDGER STATE
+// ============================================================================
+
+sealed ledger launchId: Bytes<32>;
+
+// CTO governance state
+export ledger ctoState: CtoState;
+
+// Community wallet — receives redirected fees after CTO trigger
+// Set when CTO is triggered, used for all future fund flows
+export ledger communityWallet: Bytes<32>;
+
+// Creator's last activity timestamp (claim or social post)
+// Updated by governor from off-chain monitoring
+export ledger lastCreatorActivity: Uint<64>;
+
+// Whether the launch's bonding-curve fee escrow (Stream A) currently holds
+// a real, unclaimed balance — governor-attested from off-chain monitoring
+// of the actual fee-holding contract (bonding_curve.compact for Tier C,
+// bonding_curve_tier_b.ak for Tier B; this contract has no cross-contract
+// call mechanism to check either directly). Fix (2026-07-12):
+// without this, a zero-volume launch (no trade fees ever accrued) could
+// still have SilenceLockTrigger proposed and passed purely on elapsed
+// time, triggering a CTO vote over nothing — there would be no balance to
+// "recover" for the community. Same governor-trust boundary already
+// accepted for lastCreatorActivity, not a new one — updated together via
+// updateCreatorActivity, since both facts come from the same off-chain
+// source (watching the curve contract).
+export ledger hasClaimableBalance: Boolean;
+
+// Graduation timestamp — proposals can't be submitted until 30 days after
+sealed ledger graduationTimestamp: Uint<64>;
+
+// Total token supply (for quorum calculation)
+sealed ledger totalSupply: Uint<128>;
+
+// Silence lock threshold in seconds (90 days = 7776000)
+sealed ledger silenceThreshold: Uint<64>;
+
+// Cooldown duration after any vote (90 days = 7776000)
+sealed ledger cooldownDuration: Uint<64>;
+
+// Minimum delay after graduation before first proposal (90 days = 7776000,
+// raised from the original 30 days, 2026-07-28 — 30 days was judged too
+// soon to let any token holder start a takeover vote against a healthy,
+// actively-building project)
+sealed ledger minPostGradDelay: Uint<64>;
+
+// Ballot duration (72 hours = 259200)
+sealed ledger ballotDuration: Uint<64>;
+
+// Quorum threshold in basis points (500 = 5% of total supply)
+sealed ledger quorumBps: Uint<16>;
+
+// Anti-whale-takeover safeguard #1 (2026-07-28): the max weight ANY
+// voter's vote counts as, as an absolute token amount pre-computed
+// off-chain (e.g. 1% of total supply) — set via the constructor, same
+// convention as every other absolute-amount cap in this codebase. This
+// replaces the old creator-only `creatorVoteCap`: rather than the
+// creator getting a distinct, higher cap than everyone else, every voter
+// — creator included — is now held to the SAME cap. creatorYesVotes/
+// creatorNoVotes below still track the creator's own (now-unified-cap)
+// weight separately, for the same audit-transparency reason it was
+// added in the first place.
+sealed ledger maxVoterCap: Uint<128>;
+
+// Anti-whale-takeover safeguard #2 (2026-07-28): minimum number of
+// DISTINCT voters required for quorum, alongside the 5% weight threshold
+// — closes the gap where a single sufficiently-large wallet could satisfy
+// quorum (5% weight) and majority (yes > no, with no other votes cast) by
+// itself. Checked against Proposal.voterCount, already incremented on
+// every real castVote.
+sealed ledger minVoterCount: Uint<64>;
+
+// Anti-whale-takeover safeguard #3 (2026-07-28): minimum time (30 days) a
+// balance-snapshot leaf's heldSinceTimestamp must predate a proposal's
+// startTimestamp before that balance counts toward a vote — closes a
+// buy-right-before-the-snapshot-then-vote-then-sell timing gap. Mirrors
+// CLAUDE.md's STAKING_BONDING_PERIOD_DAYS anti-gaming pattern (a newly-
+// staked position earns nothing until seasoned), same idea applied to
+// voting weight instead of staking rewards.
+sealed ledger minHoldingPeriod: Uint<64>;
+
+// Last proposal end timestamp (for cooldown enforcement)
+export ledger lastProposalEnd: Uint<64>;
+
+// Active proposals keyed by proposal ID
+export ledger proposals: Map<Bytes<32>, Proposal>;
+
+// Vote nullifiers — prevents double-voting per proposal
+export ledger voteNullifiers: Set<Bytes<32>>;
+
+// Proposal counter
+export ledger proposalCount: Counter;
+
+// Fix (2026-07-30): count of currently-Active proposals — incremented
+// by createProposal, decremented by finalizeProposal. createProposal
+// requires this to be zero. Before this, the cooldown (lastProposalEnd,
+// only written by finalizeProposal) limited how soon a NEW proposal could
+// be created AFTER a previous one fully finished, but nothing limited how
+// MANY proposals could be open at once — proposalId varies by caller-
+// chosen descriptionHash, so an attacker could pre-create many independent
+// SilenceLockTrigger ballots in one block, each its own 72h window, needing
+// only one to pass. This closes it: at most one Active proposal at a time,
+// so a real takeover attempt needs one real ballot, not many parallel
+// shots at the same cooldown window.
+export ledger activeProposalCount: Counter;
+
+// Governor key (platform admin, can update creator activity timestamps)
+sealed ledger governorKey: Bytes<32>;
+
+// Creator's identity, same UserPublicKey domain regular voters derive
+// under. Security audit fix: previously castVote took `isCreator` as a
+// free caller-supplied Boolean; now it's derived in-circuit by comparing
+// against this pinned key, same pattern as every other PSM's creator check.
+sealed ledger creatorKey: Bytes<32>;
+
+// Governor-published Merkle root of (voterKey, balance) leaves — security
+// audit fix for the vote-weight-forgery finding. Compact has no working
+// cross-contract call mechanism (see witnesses.ts's cross-PSM composition
+// note), so `castVote` can't read a real balance from the bonding curve
+// PSM directly. Governor periodically snapshots real holdings off-chain
+// and publishes the root here; each proposal pins whatever root is current
+// at creation time (see Proposal.balanceSnapshotRoot) so voters prove
+// their real balance via Merkle proof instead of just asserting a number.
+export ledger balanceSnapshotRoot: Bytes<32>;
+
+// Real wall-clock time the CURRENT balanceSnapshotRoot was published —
+// stale-snapshot fix (2026-07-19). Before this, createProposal only
+// checked balanceSnapshotRoot was non-empty (SOME snapshot exists, ever)
+// with no check on how OLD it is. A governor could publish one snapshot
+// early on and never refresh it again; every subsequent proposal for
+// months or years would still weight votes against real holdings that had
+// long since drifted — someone who sold their entire stake right after
+// the snapshot keeps full voting power under it, someone who bought a
+// large stake afterward gets none. maxSnapshotAge/createProposal's new
+// check below bound how stale a snapshot can be before a NEW proposal can
+// be created against it (existing proposals already pin their own root at
+// creation time and are unaffected once created).
+export ledger lastSnapshotTimestamp: Uint<64>;
+
+// Fixed platform policy constant — hardcoded in the constructor body, same
+// convention as ballotDuration/silenceThreshold. 30 days (2592000s),
+// matching minPostGradDelay's own value: tight enough that a genuinely
+// abandoned/censoring governor can't coast on a year-old snapshot, loose
+// enough not to demand near-continuous republishing for a quiet launch.
+sealed ledger maxSnapshotAge: Uint<64>;
+
+// How long a snapshot must have gone unrefreshed before a CTO trigger — and
+// only a CTO trigger — may rest on it. 90 days (7776000s), the same interval
+// silenceThreshold, cooldownDuration and minPostGradDelay all use, and three
+// times maxSnapshotAge.
+//
+// A snapshot root is what makes a vote's weight unforgeable, so it can only
+// ever come from the governor; nobody else's root would prove anything. What
+// this window recognises is that an OLD root and a FORGED one are different
+// things. The root reachable through here is one the governor really
+// published, from real balances — it is out of date, not invented, and votes
+// against it are still proven against a tree nobody could have made up.
+//
+// Reaching it needs no bond, no attestation and nobody's permission: the
+// evidence is that lastSnapshotTimestamp has not moved, which the governor
+// produces by their own inaction and which no caller can fabricate. Every
+// currentTimestamp here is bounded above by real chain time, so this window
+// can be waited out but never brought forward. Same "the deadline is the
+// authorization" idiom as the Cardano validators' ExpireCurve.
+//
+// Only SilenceLockTrigger passes, which is the narrowest opening that answers
+// the problem. A trigger redirects future fees and freezes unvested creator
+// tokens; it never sends funds to an address the caller names, and it still
+// has to clear the creator-silence timer and the claimable-balance check on
+// top of the ballot. Every other proposal type keeps requiring a snapshot no
+// older than maxSnapshotAge.
+sealed ledger staleSnapshotGraceWindow: Uint<64>;
+
+// ----------------------------------------------------------------------
+// Break-glass fallback (see file header's BREAK-GLASS FALLBACK note)
+// ----------------------------------------------------------------------
+
+// Minimum NIGHT bond required to open a break-glass challenge — launch-
+// specific (set at deploy, mirrors maxVoterCap's own per-launch sizing)
+// rather than a hardcoded platform constant, since a sensible bond floor
+// scales with the launch's own economics. CLAUDE.md does not yet name a
+// canonical USD/NIGHT figure for this the way it does for
+// NHOP_CHALLENGE_BOND — flagged as a follow-up, not invented here.
+sealed ledger breakGlassBondMin: Uint<128>;
+
+// Fixed platform policy constant, not a per-launch choice — same 72-hour
+// window as a normal ballot (ballotDuration), giving the governor the same
+// amount of time to respond as the community gets to vote.
+sealed ledger breakGlassResponseWindow: Uint<64>;
+
+// The public-notice period a community-wallet change made OUTSIDE a ballot
+// must sit through before it can take effect. 72 hours, the same window a
+// ballot itself runs for and the same one `lp_escrow.ak` gives a DEX-whitelist
+// change — the community gets no less warning about where its money is being
+// pointed than it gets to vote on anything else.
+sealed ledger emergencyNoticeWindow: Uint<64>;
+
+// The announced change, and when it was announced. `pendingCommunityWalletAt`
+// is 0 when nothing is pending, which is what every guard below reads.
+// Both are public, deliberately: an announcement nobody can see is not notice.
+export ledger pendingCommunityWallet: Bytes<32>;
+export ledger pendingCommunityWalletAt: Uint<64>;
+
+// Fixed payout destinations for a forfeited (rebutted) break-glass bond —
+// same 60/40 treasury/ops split convention as every other forfeiture in
+// this codebase. This contract had no such fields before; added
+// specifically to support break-glass forfeiture payouts.
+// One platform wallet: the treasury/ops pair is gone platform-wide.
+sealed ledger platformAddr: Bytes<32>;
+
+// Every open proposal's bond, keyed by proposal id, until it is settled.
+//
+// Filing a proposal takes the launch's single Active slot for the whole
+// ballot, and nobody else can file while it is held. That is a real cost
+// imposed on everyone else, so filing carries a real cost of its own: a NIGHT
+// bond, returned in full to the proposer if the ballot drew a genuine quorum,
+// and forfeited to the platform if it drew nobody.
+//
+// Deliberately reusing `breakGlassBondMin` as the floor rather than adding a
+// second tunable: both are the same act — putting money behind a claim that
+// spends other people's time — and one floor cannot drift out of step with
+// the other.
+export ledger proposalBonds: Map<Bytes<32>, Uint<128>>;
+
+// Real wall-clock time of the governor's LAST updateCreatorActivity call —
+// distinct from lastCreatorActivity (the CREATOR's attested activity
+// time). A governor who never touches updateCreatorActivity at all leaves
+// this frozen at its constructor value regardless of how much real time
+// passes, which is exactly the signal resolveBreakGlassChallenge checks
+// for genuine unresponsiveness.
+export ledger lastGovernorUpdateTimestamp: Uint<64>;
+
+// The current (or most recently resolved) break-glass challenge, if any.
+export ledger breakGlassChallenge: BreakGlassChallenge;
+
+// ============================================================================
+// WITNESSES
+// ============================================================================
+
+witness getUserSecret(): UserSecretKey;
+witness getGovernorSecret(): UserSecretKey;
+
+// Voter's real token balance at snapshot time — private, disclosed only
+// as the vote weight itself (which was already public before this fix).
+witness getBalanceLeafAmount(): Uint<128>;
+
+// Real time the governor's snapshot first observed this voter holding
+// their leaf's balance — private, disclosed only via the derived
+// holding-period check in castVote (anti-whale-takeover safeguard #3).
+witness getBalanceLeafHeldSince(): Uint<64>;
+
+// Merkle proof that (voter identity, balance) is a leaf in the currently
+// pinned balanceSnapshotRoot — private, stays with the prover.
+// Depth reduced 32 -> 20 (2026-07-12): a fixed-depth proof always
+// walks every level regardless of real holder count, so depth is a direct
+// proving-cost lever, not just a capacity ceiling. 2^20 (1,048,576) token
+// holders is far beyond any realistic single launch's voter base, for
+// 37.5% fewer hash operations per proof than the original 32.
+witness getBalanceProof(): Vector<20, MerkleProofEntry>;
+
+// ============================================================================
+// HELPER CIRCUITS
+// ============================================================================
+
+pure circuit deriveUserPublicKey(sk: UserSecretKey): UserPublicKey {
+  return UserPublicKey {
+    bytes: persistentHash<Vector<2, Bytes<32>>>([
+      pad(32, "noctis:cto:user:pk:v1"),
+      sk.bytes
+    ])
+  };
+}
+
+pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "noctis:cto:governor:pk:v1"),
+    sk.bytes
+  ]);
+}
+
+pure circuit computeProposalId(
+  proposer: Bytes<32>,
+  launch: Bytes<32>,
+  descHash: Bytes<32>,
+  timestamp: Uint<64>
+): Bytes<32> {
+  return persistentHash<ProposalIdInput>(ProposalIdInput {
+    launchId: launch,
+    proposerKey: proposer,
+    descriptionHash: descHash,
+    timestamp: timestamp
+  });
+}
+
+// A ballot's nullifier is derived from the voter's SECRET, so only that
+// voter can compute it.
+//
+// Every other input to a vote is knowable: a voter's public key appears in the
+// balance-snapshot tree the governor publishes, `launchId` is sealed and
+// public, and `proposalId` is on the proposal itself. A nullifier built from
+// those alone can be computed for any holder by anyone — and since it is
+// disclosed when the vote is cast, matching a precomputed value against a
+// transaction names the voter. Diffing the proposal's public tallies across
+// that same transaction then gives their direction and their exact weight.
+//
+// Hashing the secret instead means a nullifier can only be produced by the one
+// party who cannot be coerced into producing it for someone else's benefit —
+// the same construction eligibility_gate.compact's `computeBuyNullifier` and
+// bonding_curve.compact's own buy nullifier already use, and for the same
+// reason. Domain-separated, so a vote nullifier can never collide with any
+// other hash in this contract.
+//
+// One secret still yields exactly one nullifier per proposal, so this changes
+// nothing about double-vote prevention.
+pure circuit computeVoteNullifier(
+  voterSecret: Bytes<32>,
+  launch: Bytes<32>,
+  proposalId: Bytes<32>
+): Bytes<32> {
+  return persistentHash<VoteNullifierInput>(VoteNullifierInput {
+    domain: pad(32, "noctis:cto:vote:nullifier:v1"),
+    voterSecret: voterSecret,
+    launchId: launch,
+    proposalId: proposalId
+  });
+}
+
+// One Merkle tree node hash for the balance-snapshot proof — same
+// left/right-by-direction-bit fold body as bonding_curve.compact's
+// verifyAllowlist, domain-separated so it can never collide with any
+// other persistentHash use in this contract.
+pure circuit hashBalanceNode(left: Bytes<32>, right: Bytes<32>): Bytes<32> {
+  return persistentHash<BalanceNodeInput>(BalanceNodeInput {
+    domain: pad(32, "noctis:cto:balance:node:v1"),
+    left: left,
+    right: right
+  });
+}
+
+// Verify a claimed fee slice is the FLOOR of grossAmount * bps / 10000 —
+// same pattern as eligibility_gate.compact's copy. Compact
+// contracts don't share helpers across files, so this is a deliberate,
+// verbatim duplicate, not drift — needed here for
+// resolveBreakGlassChallenge's forfeited-bond treasury/ops split.
+pure circuit verifyFeeSlice(
+  grossAmount: Uint<128>,
+  bps: Uint<16>,
+  claimedFee: Uint<128>
+): Boolean {
+  assert(disclose(grossAmount <= 19342813113834066795298815), "grossAmount exceeds safe range"); // 2^84 - 1
+  assert(disclose(claimedFee <= 19342813113834066795298815), "claimedFee exceeds safe range"); // 2^84 - 1
+
+  const grossN = grossAmount as Uint<84>;
+  const claimedFeeN = claimedFee as Uint<84>;
+
+  const product = ((grossN as Uint<100>) * (bps as Uint<100>)) as Uint<100>;
+  const claimedTimesDenom = ((claimedFeeN as Uint<98>) * (10000 as Uint<98>)) as Uint<98>;
+  const nextClaimedTimesDenom = ((claimedTimesDenom as Uint<100>) + (10000 as Uint<100>)) as Uint<100>;
+
+  return disclose(
+    (claimedTimesDenom as Uint<100>) <= product && product < nextClaimedTimesDenom
+  );
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+constructor(
+  launchId_: Bytes<32>,
+  totalSupply_: Uint<128>,
+  graduationTimestamp_: Uint<64>,
+  maxVoterCap_: Uint<128>,
+  minVoterCount_: Uint<64>,
+  creatorPubKey_: Bytes<32>,
+  hasClaimableBalance_: Boolean,
+  breakGlassBondMin_: Uint<128>,
+  platformAddr_: Bytes<32>
+) {
+  launchId = disclose(launchId_);
+  totalSupply = disclose(totalSupply_);
+  graduationTimestamp = disclose(graduationTimestamp_);
+  assert(disclose(maxVoterCap_ > 0 && maxVoterCap_ <= totalSupply_), "maxVoterCap must be a positive fraction of totalSupply");
+  maxVoterCap = disclose(maxVoterCap_);
+  assert(disclose(minVoterCount_ > 0), "minVoterCount must be positive");
+  minVoterCount = disclose(minVoterCount_);
+  creatorKey = disclose(creatorPubKey_);
+  assert(disclose(breakGlassBondMin_ > 0), "breakGlassBondMin must be positive");
+  breakGlassBondMin = disclose(breakGlassBondMin_);
+  platformAddr = disclose(platformAddr_);
+
+  // Default thresholds
+  silenceThreshold = disclose(7776000);   // 90 days
+  cooldownDuration = disclose(7776000);   // 90 days
+  minPostGradDelay = disclose(7776000);   // 90 days (raised from 30, 2026-07-28)
+  ballotDuration = disclose(259200);      // 72 hours
+  quorumBps = disclose(500);              // 5%
+  breakGlassResponseWindow = disclose(259200); // 72 hours, same as ballotDuration
+  emergencyNoticeWindow = disclose(259200);    // 72 hours — seconds, like every window here
+  maxSnapshotAge = disclose(2592000);     // 30 days
+  staleSnapshotGraceWindow = disclose(7776000); // 90 days — see ledger comment
+  minHoldingPeriod = disclose(2592000);   // 30 days (anti-whale-takeover safeguard #3)
+
+  const govSecret = getGovernorSecret();
+  governorKey = disclose(deriveGovernorKey(govSecret));
+
+  ctoState = CtoState.PreCTO;
+  lastCreatorActivity = disclose(graduationTimestamp_);
+  lastGovernorUpdateTimestamp = disclose(graduationTimestamp_);
+  hasClaimableBalance = disclose(hasClaimableBalance_);
+  lastProposalEnd = 0;
+  communityWallet = disclose(pad(32, ""));
+  // No proposal can be created until the governor publishes a real balance
+  // snapshot (see createProposal's assert and updateBalanceSnapshot below).
+  balanceSnapshotRoot = disclose(pad(32, ""));
+  lastSnapshotTimestamp = disclose(0);
+  breakGlassChallenge = disclose(BreakGlassChallenge {
+    challenger: pad(32, ""),
+    bondAmount: 0,
+    challengeTimestamp: 0,
+    state: BreakGlassState.None
+  });
+}
+
+// Governor publishes a fresh Merkle root of (voterKey, balance) leaves.
+// Design requirement: this is what makes castVote's balance
+// proof meaningful — see the ledger field's comment for the full design.
+// Stale-snapshot fix (2026-07-19): now takes currentTimestamp, the real
+// wall-clock time of this publish, so createProposal can bound how old the
+// snapshot backing a NEW proposal is allowed to be — see
+// lastSnapshotTimestamp/maxSnapshotAge's own declaration comments.
+// Fix (2026-07-21, Compact security-review pass — Critical): every
+// circuit in this file that took a caller-supplied currentTimestamp used to
+// trust it outright, with zero binding to real chain time. Since every
+// ballot-lifecycle gate (createProposal/castVote/finalizeProposal/
+// checkSilenceLock/the break-glass window, plus the two governor-attested
+// clocks here) is ultimately checked against currentTimestamp, an attacker
+// holding >=5% tokens could fabricate an entire internally-consistent but
+// fictional create->vote->finalize sequence in a single real block,
+// completely bypassing the real 72-hour community window (full governance
+// takeover: treasury drain via FundAllocation, forced SilenceLockTrigger,
+// LP/DEX authority redirect). Fixed by requiring every currentTimestamp to
+// fall within a 1-hour band ending at real chain time — same
+// blockTimeGte/blockTimeLte idiom lp_escrow.compact's sealLock already uses
+// (see that circuit's own comment for the "why a window, not exact
+// equality" reasoning: block-time granularity + tx propagation lag).
+export circuit updateBalanceSnapshot(newRoot: Bytes<32>, currentTimestamp: Uint<64>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can update balance snapshot");
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  assert(disclose(currentTimestamp >= lastSnapshotTimestamp), "currentTimestamp cannot go backwards");
+  balanceSnapshotRoot = disclose(newRoot);
+  lastSnapshotTimestamp = disclose(currentTimestamp);
+}
+
+// ============================================================================
+// CIRCUITS — CREATOR ACTIVITY TRACKING
+// ============================================================================
+
+// Governor updates creator's last activity timestamp
+// This is called when the creator claims fees OR when a social post is detected
+// (off-chain monitoring by the platform)
+// Fix (2026-07-12): also refreshes hasClaimableBalance in the same call —
+// both facts come from the same off-chain observation of the real fee-holding
+// contract, so there's no reason to split them into a separate governor call.
+// Break-glass fix (2026-07-19): added currentTimestamp, the real wall-clock
+// time of THIS call — distinct from `timestamp` (the creator's attested
+// activity time, which can legitimately stay unchanged call after call).
+// Tracked separately as lastGovernorUpdateTimestamp so
+// resolveBreakGlassChallenge can tell a genuinely unresponsive governor
+// (this value never advances) from one who keeps checking in and honestly
+// reporting no change.
+export circuit updateCreatorActivity(timestamp: Uint<64>, hasClaimableBalance_: Boolean, currentTimestamp: Uint<64>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can update creator activity");
+  // Fix (2026-07-21): currentTimestamp is this call's real wall-clock
+  // time and resolveBreakGlassChallenge's "governorResponded" check depends
+  // on it being genuine — bind it the same way as every other entry point.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  assert(disclose(timestamp <= currentTimestamp), "Activity timestamp cannot be in the future");
+  assert(disclose(timestamp >= lastCreatorActivity), "Activity timestamp cannot go backwards");
+  assert(disclose(currentTimestamp >= lastGovernorUpdateTimestamp), "currentTimestamp cannot go backwards");
+  lastCreatorActivity = disclose(timestamp);
+  hasClaimableBalance = disclose(hasClaimableBalance_);
+  lastGovernorUpdateTimestamp = disclose(currentTimestamp);
+}
+
+// Check if creator has been silent for the silence threshold
+// Returns true if (currentTimestamp - lastCreatorActivity) >= silenceThreshold
+// Fix (2026-07-21): bound currentTimestamp to real chain time so a
+// caller can't misreport silence status to an off-chain consumer of this
+// query — same band idiom as every other circuit in this file.
+export circuit checkSilenceLock(currentTimestamp: Uint<64>): Boolean {
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  const elapsed = (currentTimestamp - lastCreatorActivity) as Uint<64>;
+  return disclose(elapsed >= silenceThreshold);
+}
+
+// ============================================================================
+// CIRCUITS — PROPOSAL CREATION
+// ============================================================================
+
+// Create a new governance proposal
+// Anyone can propose — the community decides via voting
+export circuit createProposal(
+  proposalType: ProposalType,
+  descriptionHash: Bytes<32>,
+  currentTimestamp: Uint<64>,
+  targetDexAddr: Bytes<32>,
+  allocationAmount: Uint<128>,
+  allocationRecipient: Bytes<32>,
+  proposedCommunityWallet: Bytes<32>,
+  bondAmount: Uint<128>
+): Bytes<32> {
+  // Fix (2026-07-21, Critical): bind currentTimestamp to real chain
+  // time before it's used for any of this circuit's own checks (snapshot
+  // staleness, post-graduation delay, cooldown, silence) or stored as the
+  // proposal's startTimestamp/endTimestamp — see the file header and
+  // updateBalanceSnapshot's comment for the full finding.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  // Security audit fix: a proposal can't be voted on meaningfully until a
+  // real balance snapshot exists — without this, balanceSnapshotRoot would
+  // still be the zero-value from deploy and no voter could ever construct
+  // a valid Merkle proof against it.
+  assert(disclose(balanceSnapshotRoot != pad(32, "")), "No balance snapshot published yet");
+  // Stale-snapshot fix (2026-07-19): existence alone isn't enough — a
+  // snapshot published once and never refreshed would let every future
+  // proposal weight votes against real holdings that have long since
+  // drifted. See lastSnapshotTimestamp/maxSnapshotAge's declaration
+  // comments for the full reasoning.
+  const snapshotAge = (currentTimestamp - lastSnapshotTimestamp) as Uint<64>;
+  if (disclose(snapshotAge > maxSnapshotAge)) {
+    // Past maxSnapshotAge a fresh root is owed, and a proposal waits for it.
+    // Past staleSnapshotGraceWindow the launch would otherwise have no route
+    // to community control at all, so a CTO trigger — and nothing else — may
+    // rest on the last root the governor really published. See
+    // staleSnapshotGraceWindow's own declaration comment for the full design.
+    assert(
+      disclose(snapshotAge >= staleSnapshotGraceWindow),
+      "Balance snapshot too stale — governor must republish"
+    );
+    assert(
+      disclose(proposalType == ProposalType.SilenceLockTrigger),
+      "Only a CTO trigger may rest on a snapshot this old"
+    );
+  }
+
+  // Must be after minimum post-graduation delay
+  const minProposalTime = (graduationTimestamp + minPostGradDelay) as Uint<64>;
+  assert(disclose(currentTimestamp >= minProposalTime), "Too soon after graduation");
+
+  // Cooldown must have passed since last proposal ended
+  if (disclose(lastProposalEnd > 0)) {
+    const cooldownEnd = (lastProposalEnd + cooldownDuration) as Uint<64>;
+    assert(disclose(currentTimestamp >= cooldownEnd), "Cooldown period active");
+  }
+
+  // Fix (2026-07-30): at most one Active proposal at a time — see
+  // activeProposalCount's own declaration comment for why the cooldown
+  // check above wasn't sufficient on its own.
+  assert(disclose(activeProposalCount.read() == 0), "A proposal is already active");
+
+  // Filing holds the launch's only proposal slot for a full ballot, so it is
+  // not free. A bond at or above the same floor a break-glass challenge pays
+  // is taken here and settled once the ballot closes — returned if a real
+  // quorum turned up, forfeited to the platform if none did.
+  assert(disclose(bondAmount >= breakGlassBondMin), "Proposal bond below minimum");
+  receiveUnshielded(nativeToken(), disclose(bondAmount));
+
+  // SilenceLockTrigger requires creator to be MIA
+  if (disclose(proposalType == ProposalType.SilenceLockTrigger)) {
+    assert(disclose(ctoState == CtoState.PreCTO), "CTO already triggered");
+    const elapsed = (currentTimestamp - lastCreatorActivity) as Uint<64>;
+    assert(disclose(elapsed >= silenceThreshold), "Creator not silent long enough");
+    // Fix (2026-07-12): a zero-volume launch has no fee balance to
+    // recover — don't let the community spend a vote on nothing.
+    assert(disclose(hasClaimableBalance), "No claimable balance — nothing to recover via CTO");
+    // Fix (2026-07-21, Low): reject an empty proposedCommunityWallet
+    // up front — same footgun class as bonding_curve.compact/lp_escrow.
+    // compact's triggerCTO empty-address guards; catching it here means a
+    // bad proposal never even reaches a vote.
+    assert(disclose(proposedCommunityWallet != pad(32, "")), "proposedCommunityWallet cannot be empty");
+  }
+
+  // DissolveCTO requires CTO to be triggered
+  if (disclose(proposalType == ProposalType.DissolveCTO)) {
+    assert(disclose(ctoState == CtoState.CTOTriggered), "CTO not triggered");
+  }
+
+  // FundAllocation / DexMigration / WhitelistUpdate require CTO to be active
+  if (disclose(proposalType == ProposalType.FundAllocation)) {
+    assert(disclose(ctoState == CtoState.CTOTriggered), "CTO not active");
+    // Fix (2026-07-21, Low): same empty-address guard for the fund
+    // recipient — this circuit only tracks intent (see the file's own note
+    // that real fund movement is a separate off-chain-orchestrated
+    // transaction), but an empty recipient here would still make that
+    // downstream transaction unroutable.
+    assert(disclose(allocationRecipient != pad(32, "")), "allocationRecipient cannot be empty");
+  }
+  if (disclose(proposalType == ProposalType.DexMigration)) {
+    assert(disclose(ctoState == CtoState.CTOTriggered), "CTO not active");
+  }
+  if (disclose(proposalType == ProposalType.WhitelistUpdate)) {
+    assert(disclose(ctoState == CtoState.CTOTriggered), "CTO not active");
+  }
+
+  // Derive proposer identity
+  const sk = getUserSecret();
+  const proposer = deriveUserPublicKey(sk);
+
+  // Compute proposal ID
+  const proposalId = computeProposalId(
+    proposer.bytes,
+    launchId,
+    descriptionHash,
+    currentTimestamp
+  );
+
+  // Ensure proposal doesn't already exist
+  assert(disclose(!proposals.member(disclose(proposalId))), "Proposal already exists");
+
+  // Compute ballot end time
+  const endTime = (currentTimestamp + ballotDuration) as Uint<64>;
+
+  // Store the proposal
+  proposals.insert(disclose(proposalId), disclose(Proposal {
+    proposalType: proposalType,
+    proposerKey: proposer.bytes,
+    descriptionHash: descriptionHash,
+    startTimestamp: currentTimestamp,
+    endTimestamp: endTime,
+    yesVotes: 0,
+    noVotes: 0,
+    voterCount: 0,
+    state: ProposalState.Active,
+    creatorYesVotes: 0,
+    creatorNoVotes: 0,
+    targetDexAddr: targetDexAddr,
+    allocationAmount: allocationAmount,
+    allocationRecipient: allocationRecipient,
+    proposedCommunityWallet: proposedCommunityWallet,
+    balanceSnapshotRoot: balanceSnapshotRoot
+  }));
+
+  proposalCount.increment(1);
+  proposalBonds.insert(disclose(proposalId), disclose(bondAmount));
+  activeProposalCount.increment(1);
+
+  return disclose(proposalId);
+}
+
+// ============================================================================
+// CIRCUITS — VOTING
+// ============================================================================
+
+// Cast a vote on a proposal
+// Design requirement: voteWeight and isCreator used to be
+// free caller-supplied parameters, justified by a comment claiming
+// "verified via transaction merging with bonding curve PSM" — a mechanism
+// that does not exist (Compact has no cross-contract calls; see
+// witnesses.ts's cross-PSM composition note). A single caller could
+// previously supply an arbitrary voteWeight and single-handedly satisfy
+// quorum + majority on any proposal. Fixed via a governor-published
+// balance-snapshot Merkle tree (see balanceSnapshotRoot/
+// updateBalanceSnapshot): the voter proves their own (identity, balance)
+// leaf against the root pinned on this proposal at creation time, and
+// isCreator is derived by comparing the voter's own identity to the
+// pinned creatorKey rather than trusting a self-declared flag.
+// The vote is private via nullifier pattern — which way you voted is not
+// linkable to your identity.
+export circuit castVote(
+  proposalId: Bytes<32>,
+  support: Boolean,
+  currentTimestamp: Uint<64>
+): [] {
+  // Fix (2026-07-21, Critical): bind currentTimestamp to real chain
+  // time before it's used to check the ballot window below — without this,
+  // a caller could claim any currentTimestamp within [proposal.startTimestamp,
+  // proposal.endTimestamp] regardless of real elapsed time.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  // Proposal must exist and be active
+  assert(disclose(proposals.member(disclose(proposalId))), "Proposal not found");
+  const proposal = proposals.lookup(disclose(proposalId));
+  assert(disclose(proposal.state == ProposalState.Active), "Proposal not active");
+
+  // Must be within ballot window
+  assert(disclose(currentTimestamp >= proposal.startTimestamp), "Voting not started");
+  assert(disclose(currentTimestamp <= proposal.endTimestamp), "Voting ended");
+
+  // Derive voter identity
+  const sk = getUserSecret();
+  const voter = deriveUserPublicKey(sk);
+
+  // Compute vote nullifier — prevents double-voting
+  const nullifier = computeVoteNullifier(sk.bytes, launchId, proposalId);
+  assert(disclose(!voteNullifiers.member(disclose(nullifier))), "Already voted on this proposal");
+  voteNullifiers.insert(disclose(nullifier));
+
+  // Security audit fix: real vote weight, proven via Merkle membership
+  // against the proposal's pinned balance-snapshot root instead of trusted
+  // as a bare parameter.
+  const balance = getBalanceLeafAmount();
+  assert(disclose(balance > 0), "Must have tokens to vote");
+
+  // Anti-whale-takeover safeguard #3: the leaf also binds a real
+  // held-since timestamp, so a voter can't claim to have held longer than
+  // the governor's snapshot actually observed.
+  const heldSince = getBalanceLeafHeldSince();
+
+  const leaf = persistentHash<BalanceLeafInput>(BalanceLeafInput {
+    domain: pad(32, "noctis:cto:balance:leaf:v1"),
+    voterKey: voter.bytes,
+    balance: balance,
+    heldSinceTimestamp: heldSince
+  });
+  const proof = getBalanceProof();
+  const recomputedRoot = fold(
+    (acc: Bytes<32>, entry: MerkleProofEntry): Bytes<32> => {
+      const left = disclose(entry.goesLeft) ? acc : entry.sibling;
+      const right = disclose(entry.goesLeft) ? entry.sibling : acc;
+      return hashBalanceNode(left, right);
+    },
+    leaf,
+    proof
+  );
+  assert(disclose(recomputedRoot == proposal.balanceSnapshotRoot), "Invalid balance proof");
+
+  // Anti-whale-takeover safeguard #3 (continued): the balance must have
+  // been held since before proposal.startTimestamp by at least
+  // minHoldingPeriod. Explicit ordering check first (rather than relying
+  // on wraparound behavior) since this is new logic, not an established
+  // pattern elsewhere in this file.
+  assert(disclose(heldSince <= proposal.startTimestamp), "Invalid held-since timestamp");
+  const heldDuration = (proposal.startTimestamp - heldSince) as Uint<64>;
+  assert(disclose(heldDuration >= minHoldingPeriod), "Balance not held long enough before this proposal");
+
+  const voteWeight = balance;
+
+  // Security audit fix: isCreator derived in-circuit, never self-declared.
+  const isCreator = disclose(voter.bytes == creatorKey);
+
+  // Anti-whale-takeover safeguard #1 (2026-07-28): maxVoterCap now applies
+  // to EVERY voter, not just the creator (generalizes the earlier creator-only
+  // cap — see maxVoterCap's own declaration comment for why).
+  const cap = maxVoterCap;
+  const effectiveWeight = disclose(voteWeight <= cap) ? voteWeight : cap;
+
+  // Update vote counts
+  const newYesVotes = (proposal.yesVotes + (support ? effectiveWeight : 0)) as Uint<128>;
+  const newNoVotes = (proposal.noVotes + (support ? 0 : effectiveWeight)) as Uint<128>;
+  const newVoterCount = (proposal.voterCount + 1) as Uint<64>;
+
+  // Track creator votes separately for audit
+  const creatorYesAdd = (support && isCreator) ? effectiveWeight : 0;
+  const creatorNoAdd = (!support && isCreator) ? effectiveWeight : 0;
+  const newCreatorYes = (proposal.creatorYesVotes + creatorYesAdd) as Uint<128>;
+  const newCreatorNo = (proposal.creatorNoVotes + creatorNoAdd) as Uint<128>;
+
+  proposals.insert(disclose(proposalId), disclose(Proposal {
+    proposalType: proposal.proposalType,
+    proposerKey: proposal.proposerKey,
+    descriptionHash: proposal.descriptionHash,
+    startTimestamp: proposal.startTimestamp,
+    endTimestamp: proposal.endTimestamp,
+    yesVotes: newYesVotes,
+    noVotes: newNoVotes,
+    voterCount: newVoterCount,
+    state: proposal.state,
+    creatorYesVotes: newCreatorYes,
+    creatorNoVotes: newCreatorNo,
+    targetDexAddr: proposal.targetDexAddr,
+    allocationAmount: proposal.allocationAmount,
+    allocationRecipient: proposal.allocationRecipient,
+    proposedCommunityWallet: proposal.proposedCommunityWallet,
+    balanceSnapshotRoot: proposal.balanceSnapshotRoot
+  }));
+}
+
+// ============================================================================
+// CIRCUITS — PROPOSAL FINALIZATION
+// ============================================================================
+
+// Finalize a proposal after the ballot window closes
+// Anyone can call this — the result is deterministic
+export circuit finalizeProposal(
+  proposalId: Bytes<32>,
+  currentTimestamp: Uint<64>
+): [] {
+  // Fix (2026-07-21, Critical): bind currentTimestamp to real chain
+  // time — without this, a just-created proposal could be finalized
+  // immediately by claiming a currentTimestamp already past endTimestamp.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  // Proposal must exist
+  assert(disclose(proposals.member(disclose(proposalId))), "Proposal not found");
+  const proposal = proposals.lookup(disclose(proposalId));
+  assert(disclose(proposal.state == ProposalState.Active), "Proposal not active");
+
+  // Ballot window must have closed
+  assert(disclose(currentTimestamp > proposal.endTimestamp), "Ballot still open");
+
+  // Calculate total votes
+  const totalVotes = (proposal.yesVotes + proposal.noVotes) as Uint<128>;
+
+  // Check quorum: totalVotes >= totalSupply * quorumBps / 10000
+  // Verify via multiplication: totalVotes * 10000 >= totalSupply * quorumBps
+  const quorumCheck = (totalSupply * quorumBps as Uint<128>) as Uint<128>;
+  const quorumMet = (totalVotes * 10000) as Uint<128>;
+  const passedQuorum = disclose(quorumMet >= quorumCheck);
+
+  // Check majority: yesVotes > noVotes
+  const passedMajority = disclose(proposal.yesVotes > proposal.noVotes);
+
+  // Anti-whale-takeover safeguard #2: quorum requires real breadth of
+  // participation, not just combined weight — see minVoterCount's own
+  // declaration comment.
+  const passedVoterCount = disclose(proposal.voterCount >= minVoterCount);
+
+  // Proposal passes if quorum, majority, AND minimum voter count all hold
+  const passed = disclose(passedQuorum && passedMajority && passedVoterCount);
+
+  // Update proposal state
+  const newState = passed ? ProposalState.Passed : ProposalState.Failed;
+  proposals.insert(disclose(proposalId), disclose(Proposal {
+    proposalType: proposal.proposalType,
+    proposerKey: proposal.proposerKey,
+    descriptionHash: proposal.descriptionHash,
+    startTimestamp: proposal.startTimestamp,
+    endTimestamp: proposal.endTimestamp,
+    yesVotes: proposal.yesVotes,
+    noVotes: proposal.noVotes,
+    voterCount: proposal.voterCount,
+    state: newState,
+    creatorYesVotes: proposal.creatorYesVotes,
+    creatorNoVotes: proposal.creatorNoVotes,
+    targetDexAddr: proposal.targetDexAddr,
+    allocationAmount: proposal.allocationAmount,
+    allocationRecipient: proposal.allocationRecipient,
+    proposedCommunityWallet: proposal.proposedCommunityWallet,
+    balanceSnapshotRoot: proposal.balanceSnapshotRoot
+  }));
+
+  // The 90-day cooldown is the scarce thing here, so only a ballot that drew
+  // real participation starts it. A proposal nobody voted in is not a
+  // community decision and buys no silence; the slot simply frees up and the
+  // next proposal can be filed at once. Note this keys off QUORUM, not the
+  // outcome — a well-attended ballot that fails on the majority is a genuine
+  // decision and earns the cooldown exactly as a passing one does.
+  if (disclose(passedQuorum && passedVoterCount)) {
+    lastProposalEnd = disclose(proposal.endTimestamp);
+  }
+
+  // Fix (2026-07-30): this proposal has left the Active state (Passed
+  // or Failed above) — see activeProposalCount's own declaration comment.
+  activeProposalCount.decrement(1);
+}
+
+// ============================================================================
+// CIRCUITS — PROPOSAL EXECUTION
+// ============================================================================
+
+// Execute a passed proposal
+// This is where the actual state changes happen
+// Design requirement: communityWalletAddr is never accepted as
+// a free execution-time parameter with no binding to what the community
+// actually voted on — whoever called executeProposal first chose the
+// wallet. Now read from proposal.proposedCommunityWallet, pinned at
+// createProposal time, before any voting happened. Still permissionless —
+// same "the passed state is the authorization" idiom used elsewhere
+// (ExpireCurve, Graduate) — because the payload itself can no longer be
+// changed by whoever calls this.
+export circuit executeProposal(
+  proposalId: Bytes<32>
+): [] {
+  // Proposal must exist and be passed
+  assert(disclose(proposals.member(disclose(proposalId))), "Proposal not found");
+  const proposal = proposals.lookup(disclose(proposalId));
+  assert(disclose(proposal.state == ProposalState.Passed), "Proposal not passed");
+
+  // Fix (2026-07-21, Medium): executeProposal never re-validated
+  // ctoState at execution time — only createProposal checked it, at
+  // creation. Two proposals can both be validly created while ctoState
+  // satisfies each one's own creation-time requirement, then execute out
+  // of order (or twice): e.g. two SilenceLockTrigger proposals both created
+  // while PreCTO, both passed, then both executed back-to-back — the
+  // second execution would silently overwrite the first's communityWallet
+  // with no error, even though the first execution had already legitimately
+  // set it. Re-checking here means only the proposal whose expected
+  // pre-state still actually holds can execute; a stale second proposal
+  // now correctly fails instead of silently corrupting state.
+  if (disclose(proposal.proposalType == ProposalType.SilenceLockTrigger)) {
+    assert(disclose(ctoState == CtoState.PreCTO), "CTO state changed since this proposal passed");
+    // Trigger CTO — set community wallet and state
+    ctoState = CtoState.CTOTriggered;
+    communityWallet = disclose(proposal.proposedCommunityWallet);
+  }
+
+  if (disclose(proposal.proposalType == ProposalType.DissolveCTO)) {
+    assert(disclose(ctoState == CtoState.CTOTriggered), "CTO state changed since this proposal passed");
+    // Dissolve CTO — return control to creator
+    // Only if creator has returned and is active again
+    ctoState = CtoState.PreCTO;
+    communityWallet = disclose(pad(32, ""));
+  }
+
+  // FundAllocation/DexMigration/WhitelistUpdate: this circuit only flips
+  // THIS contract's own ctoState/communityWallet and marks the proposal
+  // executed. The actual fund movement / DEX change / whitelist update on
+  // creator_escrow PSM or lp_escrow PSM requires a SEPARATE, individually-
+  // submitted transaction calling that PSM's own equivalent circuit
+  // (triggerCTO, etc.) — Compact has no cross-contract call mechanism
+  // (confirmed), so nothing here can invoke those PSMs directly.
+  // For Tier C, the contract holding the claimable creator/treasury fees is
+  // bonding_curve.compact rather than creator_escrow.compact, and it carries
+  // its own ctoTriggered/communityWallet state plus triggerCTO/dissolveCTO
+  // circuits. Its withdrawFees pays the creator's share to communityWallet
+  // once triggered, so an executed trigger reaches the fees that matter.
+  // These three proposal types also require ctoState == CTOTriggered at
+  // createProposal time, re-validated here as well — same staleness
+  // reasoning as the two branches above.
+  if (
+    disclose(
+      proposal.proposalType == ProposalType.FundAllocation ||
+      proposal.proposalType == ProposalType.DexMigration ||
+      proposal.proposalType == ProposalType.WhitelistUpdate
+    )
+  ) {
+    assert(disclose(ctoState == CtoState.CTOTriggered), "CTO state changed since this proposal passed");
+  }
+
+  // Mark proposal as executed
+  proposals.insert(disclose(proposalId), disclose(Proposal {
+    proposalType: proposal.proposalType,
+    proposerKey: proposal.proposerKey,
+    descriptionHash: proposal.descriptionHash,
+    startTimestamp: proposal.startTimestamp,
+    endTimestamp: proposal.endTimestamp,
+    yesVotes: proposal.yesVotes,
+    noVotes: proposal.noVotes,
+    voterCount: proposal.voterCount,
+    state: ProposalState.Executed,
+    creatorYesVotes: proposal.creatorYesVotes,
+    creatorNoVotes: proposal.creatorNoVotes,
+    targetDexAddr: proposal.targetDexAddr,
+    allocationAmount: proposal.allocationAmount,
+    allocationRecipient: proposal.allocationRecipient,
+    proposedCommunityWallet: proposal.proposedCommunityWallet,
+    balanceSnapshotRoot: proposal.balanceSnapshotRoot
+  }));
+}
+
+// ============================================================================
+// CIRCUITS — VIEW / READ
+// ============================================================================
+
+// Get CTO state
+export circuit getCtoState(): CtoState {
+  return ctoState;
+}
+
+// Get community wallet address
+export circuit getCommunityWallet(): Bytes<32> {
+  return communityWallet;
+}
+
+// Get creator's last activity timestamp
+export circuit getLastCreatorActivity(): Uint<64> {
+  return lastCreatorActivity;
+}
+
+// Get whether the launch currently has a claimable fee balance
+export circuit getHasClaimableBalance(): Boolean {
+  return hasClaimableBalance;
+}
+
+// Get proposal details
+export circuit getProposal(proposalId: Bytes<32>): Proposal {
+  assert(disclose(proposals.member(disclose(proposalId))), "Proposal not found");
+  return disclose(proposals.lookup(disclose(proposalId)));
+}
+
+// Check whether THIS CALLER has already voted on a proposal.
+//
+// Answers only about the caller, from the caller's own secret. It used to take
+// any key at all and answer about that holder, which is a question only the
+// holder can ask now that the nullifier derives from a secret — a UI asking
+// "have I voted?" is served exactly as well, and nothing else is.
+export circuit hasCallerVoted(proposalId: Bytes<32>): Boolean {
+  const sk = getUserSecret();
+  const nullifier = computeVoteNullifier(sk.bytes, launchId, proposalId);
+  return disclose(voteNullifiers.member(disclose(nullifier)));
+}
+
+// Get proposal count
+export circuit getProposalCount(): Uint<64> {
+  return proposalCount.read();
+}
+
+// ============================================================================
+// CIRCUITS — BREAK-GLASS FALLBACK
+// ============================================================================
+// See the file header's BREAK-GLASS FALLBACK note for the full design.
+
+// Open a bonded challenge asserting hasClaimableBalance should be true,
+// bypassing the governor's withheld attestation. Anyone can call this —
+// same permissionless-with-skin-in-the-game pattern as the platform's
+// other bonded challenges (NHOP_CHALLENGE_BOND).
+export circuit bondedSilenceChallenge(
+  bondAmount: Uint<128>,
+  currentTimestamp: Uint<64>
+): [] {
+  // Fix (2026-07-21, Critical): bind currentTimestamp to real chain
+  // time — it's both used for the silence-elapsed check below and stored as
+  // challengeTimestamp, which resolveBreakGlassChallenge's response window
+  // is computed from.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  assert(disclose(ctoState == CtoState.PreCTO), "CTO already triggered");
+  assert(disclose(!hasClaimableBalance), "hasClaimableBalance already true — no need to challenge");
+  assert(
+    disclose(breakGlassChallenge.state != BreakGlassState.Pending),
+    "A break-glass challenge is already pending"
+  );
+  // Fix (2026-07-30): breakGlassChallenge is a single struct, not a
+  // per-challenger map — once resolved (Confirmed/Rebutted), the state
+  // check above alone would let a new challenge overwrite it, silently
+  // stranding the PRIOR challenger's still-unclaimed bond (their
+  // challenger/bondAmount fields are gone, and claimBreakGlassBondRefund
+  // reads only the current struct). Refuse a new challenge until the
+  // previous one's bond has actually been claimed.
+  assert(
+    disclose(breakGlassChallenge.bondAmount == 0),
+    "Prior challenger's bond must be claimed before a new challenge can open"
+  );
+  assert(disclose(bondAmount >= breakGlassBondMin), "Bond below minimum");
+
+  // Silence itself is independently, publicly verifiable via elapsed real
+  // time against lastCreatorActivity — break-glass bypasses the withheld
+  // hasClaimableBalance attestation only, never the silence timer itself.
+  const elapsed = (currentTimestamp - lastCreatorActivity) as Uint<64>;
+  assert(disclose(elapsed >= silenceThreshold), "Creator not silent long enough");
+
+  const sk = getUserSecret();
+  const challenger = deriveUserPublicKey(sk);
+  assert(disclose(challenger.bytes != pad(32, "")), "Invalid challenger key");
+
+  // Real, ledger-enforced NIGHT bond — same receiveUnshielded pattern as
+  // eligibility_gate.compact's DarkVeil bonds.
+  receiveUnshielded(nativeToken(), disclose(bondAmount));
+
+  breakGlassChallenge = disclose(BreakGlassChallenge {
+    challenger: challenger.bytes,
+    bondAmount: bondAmount,
+    challengeTimestamp: currentTimestamp,
+    state: BreakGlassState.Pending
+  });
+}
+
+// Resolve a pending break-glass challenge. Permissionless and moves no
+// funds to any caller-chosen address — the Rebutted path pays only the
+// fixed, sealed platformAddr, and the Confirmed path only flips
+// state (the challenger claims their own refund separately via
+// claimBreakGlassBondRefund, identity-gated so a third party calling this
+// can't redirect the challenger's bond to themselves).
+// Fix (2026-07-21, High): the Rebutted branch used to forfeit the
+// challenger's bond to the platform — but governorResponded
+// and stillUnsupported are BOTH fully governor-controlled (a governor
+// withholding hasClaimableBalance in bad faith only needs to call
+// updateCreatorActivity, a free, routine, always-available call, to
+// "rebut" any challenge), and platformAddr is a platform-controlled
+// address — the SAME party as the governor. That made every break-glass
+// challenge against a dishonest governor a guaranteed, costless profit for
+// that same governor's own platform: confiscate the bond, and the false
+// hasClaimableBalance withholding continues unchallenged. That made the
+// community's only recourse mechanism a net loss to use against exactly the
+// adversary it exists to check. Fixed by removing the
+// forfeiture destination's conflict of interest: a Rebutted challenge no
+// longer pays anyone — the full bond remains refundable to the ORIGINAL
+// CHALLENGER via claimBreakGlassBondRefund (extended below to accept the
+// Rebutted state, not just Confirmed). A genuine governor rebuttal still
+// correctly blocks the false-positive hasClaimableBalance flip; the
+// challenger just isn't financially punished for a good-faith attempt
+// judged by the very party it's checking.
+export circuit resolveBreakGlassChallenge(
+  currentTimestamp: Uint<64>
+): [] {
+  // Fix (2026-07-21, Critical): bind currentTimestamp to real chain
+  // time — the Undefended branch below requires currentTimestamp to be past
+  // the response window, which is only a real guarantee if currentTimestamp
+  // itself is genuine.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  assert(disclose(breakGlassChallenge.state == BreakGlassState.Pending), "No pending break-glass challenge");
+
+  const challenger = breakGlassChallenge.challenger;
+  const bond = breakGlassChallenge.bondAmount;
+  const challengeTimestamp = breakGlassChallenge.challengeTimestamp;
+  const windowEnd = (challengeTimestamp + breakGlassResponseWindow) as Uint<64>;
+
+  // A governor who has touched updateCreatorActivity since the challenge
+  // was opened, and whose most current attestation still says no claimable
+  // balance exists, counts as a real rebuttal — whether that update landed
+  // inside the response window or arrived late is irrelevant to whether
+  // it's genuine information; only silence (this branch never triggering
+  // at all before the window elapses) means true unresponsiveness.
+  const governorResponded = disclose(lastGovernorUpdateTimestamp >= challengeTimestamp);
+  const stillUnsupported = disclose(!hasClaimableBalance);
+
+  if (disclose(governorResponded && stillUnsupported)) {
+    // Rebutted — fix (2026-07-21): no forfeiture, no payout here.
+    // The bond stays intact and refundable to the original challenger via
+    // claimBreakGlassBondRefund (see this circuit's own header comment).
+    breakGlassChallenge = disclose(BreakGlassChallenge {
+      challenger: challenger,
+      bondAmount: bond,
+      challengeTimestamp: challengeTimestamp,
+      state: BreakGlassState.Rebutted
+    });
+  } else {
+    assert(disclose(currentTimestamp > windowEnd), "Governor's response window has not elapsed yet");
+
+    // Undefended — the community's bonded assertion substitutes for the
+    // governor's withheld attestation. This is the actual "break glass."
+    hasClaimableBalance = true;
+    breakGlassChallenge = disclose(BreakGlassChallenge {
+      challenger: challenger,
+      bondAmount: bond,
+      challengeTimestamp: challengeTimestamp,
+      state: BreakGlassState.Confirmed
+    });
+  }
+}
+
+// Claim a refund for a CONFIRMED or REBUTTED break-glass challenge's bond.
+// Identity-gated to the original challenger — resolveBreakGlassChallenge
+// above is deliberately permissionless but pays no one directly for this
+// reason. Fix (2026-07-21): Rebutted now also refunds in full (no
+// forfeiture) — see resolveBreakGlassChallenge's own comment for why.
+export circuit claimBreakGlassBondRefund(recipientAddr: Bytes<32>): [] {
+  assert(
+    disclose(breakGlassChallenge.state == BreakGlassState.Confirmed || breakGlassChallenge.state == BreakGlassState.Rebutted),
+    "Challenge not resolved to a refundable state"
+  );
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk);
+  assert(disclose(caller.bytes == breakGlassChallenge.challenger), "Only the original challenger can claim this refund");
+
+  const bond = breakGlassChallenge.bondAmount;
+  assert(disclose(bond > 0), "Bond already claimed");
+
+  // Clear before paying out (checks-effects-interactions, same pattern as
+  // claimBondRefund/claimRatioBondRefund elsewhere in this codebase).
+  breakGlassChallenge = disclose(BreakGlassChallenge {
+    challenger: breakGlassChallenge.challenger,
+    bondAmount: 0,
+    challengeTimestamp: breakGlassChallenge.challengeTimestamp,
+    state: breakGlassChallenge.state
+  });
+
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+  sendUnshielded(nativeToken(), disclose(bond), dest);
+}
+
+// Get the current (or most recently resolved) break-glass challenge.
+export circuit getBreakGlassChallenge(): BreakGlassChallenge {
+  return disclose(breakGlassChallenge);
+}
+
+// ============================================================================
+// CIRCUITS — ADMIN / GOVERNOR
+// ============================================================================
+
+// Governor can set community wallet in emergency (e.g., compromise detected)
+// Whether a finalized proposal drew real participation.
+//
+// The same two conditions finalizeProposal weighs, recomputed from the stored
+// tallies rather than stored as a third flag that could disagree with them.
+// Majority is deliberately not part of it: a well-attended ballot that loses is
+// still a real community decision.
+circuit proposalDrewQuorum(proposal: Proposal): Boolean {
+  const totalVotes = (proposal.yesVotes + proposal.noVotes) as Uint<128>;
+  const quorumCheck = (totalSupply * quorumBps as Uint<128>) as Uint<128>;
+  const quorumMet = (totalVotes * 10000) as Uint<128>;
+  return disclose(quorumMet >= quorumCheck && proposal.voterCount >= minVoterCount);
+}
+
+// Take back the bond behind a ballot that drew a quorum.
+//
+// Proposer only, and only once the ballot has closed. Losing on the majority
+// costs nothing — filing a proposal the community turns down is participation,
+// not abuse, and charging for it would price honest challenges out.
+export circuit claimProposalBond(proposalId: Bytes<32>, recipientAddr: Bytes<32>): [] {
+  assert(disclose(proposals.member(disclose(proposalId))), "Proposal not found");
+  const proposal = proposals.lookup(disclose(proposalId));
+  assert(disclose(proposal.state != ProposalState.Active), "Ballot still open");
+  assert(disclose(proposalBonds.member(disclose(proposalId))), "No bond to claim");
+
+  const sk = getUserSecret();
+  const claimant = deriveUserPublicKey(sk);
+  assert(disclose(claimant.bytes == proposal.proposerKey), "Only the proposer can reclaim this bond");
+  assert(disclose(proposalDrewQuorum(proposal)), "This ballot drew no quorum — its bond is forfeit");
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  const bond = proposalBonds.lookup(disclose(proposalId));
+  proposalBonds.remove(disclose(proposalId));
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+  sendUnshielded(nativeToken(), disclose(bond), dest);
+}
+
+// Sweep the bond behind a ballot nobody turned up to.
+//
+// Permissionless, on the same reasoning as every other sweep in this codebase:
+// the destination is the sealed platform address, the amount is fully
+// determined by the ledger, and the condition is a public fact about a closed
+// ballot — so calling it confers nothing on the caller. Without this the bond
+// would sit in the contract with no door, since the only other exit requires a
+// quorum this proposal never drew.
+export circuit sweepForfeitedProposalBond(proposalId: Bytes<32>): [] {
+  assert(disclose(proposals.member(disclose(proposalId))), "Proposal not found");
+  const proposal = proposals.lookup(disclose(proposalId));
+  assert(disclose(proposal.state != ProposalState.Active), "Ballot still open");
+  assert(disclose(proposalBonds.member(disclose(proposalId))), "No bond to sweep");
+  assert(disclose(!proposalDrewQuorum(proposal)), "This ballot drew a quorum — its bond is the proposer's");
+
+  const bond = proposalBonds.lookup(disclose(proposalId));
+  proposalBonds.remove(disclose(proposalId));
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: platformAddr }));
+  sendUnshielded(nativeToken(), disclose(bond), dest);
+}
+
+// Announce a community-wallet change that no ballot produced.
+//
+// This path exists for the case a passed vote cannot cover — a community
+// wallet lost or compromised after the fact, where waiting for a fresh ballot
+// would mean pointing funds at a wallet already known to be wrong. It is
+// deliberately the slowest circuit in the contract: it announces, and the
+// announcement is the whole mechanism. `pendingCommunityWallet` is public from
+// this moment, so the community can see where the money is about to be pointed
+// and has `emergencyNoticeWindow` to react — by ballot, by break-glass
+// challenge, or by leaving.
+//
+// Nothing moves here. Only `executeCommunityWalletChange`, and only once the
+// window has fully elapsed, changes `communityWallet`.
+export circuit proposeCommunityWalletChange(wallet: Bytes<32>, currentTimestamp: Uint<64>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can propose a community wallet change");
+  assert(disclose(ctoState == CtoState.CTOTriggered), "CTO not triggered");
+  assert(disclose(wallet != pad(32, "")), "Community wallet address cannot be empty");
+  // One announcement at a time. Otherwise a governor could keep a fresh
+  // proposal always pending and restart the clock at will, which is the same
+  // as having no clock.
+  assert(disclose(pendingCommunityWalletAt == 0), "A community wallet change is already pending");
+  pendingCommunityWallet = disclose(wallet);
+  pendingCommunityWalletAt = disclose(currentTimestamp);
+}
+
+// Apply an announced change once its notice period has fully elapsed.
+//
+// Permissionless, on the same reasoning as `lp_escrow.ak`'s ExecuteDexChange
+// and every other deadline-gated circuit here: the proposal was public for the
+// entire window, the destination was fixed when it was announced and cannot be
+// chosen now, so calling this confers nothing on the caller. Requiring the
+// governor's signature would only let a governor announce a change and then
+// decline to finish it, leaving the slot occupied.
+export circuit executeCommunityWalletChange(currentTimestamp: Uint<64>): [] {
+  assert(disclose(pendingCommunityWalletAt != 0), "No community wallet change is pending");
+  assert(disclose(ctoState == CtoState.CTOTriggered), "CTO not triggered");
+  const noticeEnds = (pendingCommunityWalletAt + emergencyNoticeWindow) as Uint<64>;
+  assert(disclose(currentTimestamp >= noticeEnds), "Notice period has not elapsed");
+  communityWallet = disclose(pendingCommunityWallet);
+  pendingCommunityWallet = disclose(pad(32, ""));
+  pendingCommunityWalletAt = disclose(0);
+}
+
+// Withdraw an announced change before it takes effect.
+export circuit cancelPendingCommunityWalletChange(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can cancel a community wallet change");
+  assert(disclose(pendingCommunityWalletAt != 0), "No community wallet change is pending");
+  pendingCommunityWallet = disclose(pad(32, ""));
+  pendingCommunityWalletAt = disclose(0);
+}
+
+// ============================================================================
+// PRIVACY ANALYSIS
+// ============================================================================
+//
+// What goes ON-CHAIN (public ledger):
+//   - launchId, totalSupply, graduationTimestamp (sealed at deploy)
+//   - silenceThreshold, cooldownDuration, minPostGradDelay, ballotDuration, quorumBps (sealed)
+//   - maxVoterCap, minVoterCount, minHoldingPeriod (sealed — the
+//     anti-whale-takeover safeguard thresholds are public policy, known
+//     before anyone votes, same transparency rationale as quorumBps)
+//   - ctoState (public for transparency)
+//   - communityWallet (public — community needs to know where funds go)
+//   - lastCreatorActivity (public — community needs to see if creator is active)
+//   - hasClaimableBalance (public — community needs to see whether a
+//     SilenceLockTrigger would even have anything to recover)
+//   - proposals (public — proposal details, vote counts, state)
+//   - voteNullifiers (set of nullifier hashes — prevents double-voting)
+//   - lastProposalEnd (public — for cooldown transparency)
+//   - governorKey (derived, not raw secret)
+//   - breakGlassBondMin, breakGlassResponseWindow (sealed — the bond floor
+//     and response window are public policy, known before anyone commits
+//     a bond)
+//   - platformAddr (sealed — the fixed platform payout address)
+//   - lastGovernorUpdateTimestamp (public — community needs to see whether
+//     the governor is genuinely engaged, the whole point of break-glass)
+//   - breakGlassChallenge (public — challenger identity, bond amount,
+//     timestamp, and state are all public; a break-glass challenge is
+//     itself a public accountability signal, not something to hide)
+//   - lastSnapshotTimestamp, maxSnapshotAge (public — the community needs
+//     to see whether the current balanceSnapshotRoot is actually fresh
+//     enough to trust for a new proposal, same transparency rationale as
+//     lastGovernorUpdateTimestamp)
+//
+// What stays PRIVATE:
+//   - User's secret key (getUserSecret witness)
+//   - Governor's secret key (getGovernorSecret witness)
+//   - The voter's IDENTITY behind any single vote (nullifier is a one-way,
+//     unlinkable value — it proves a specific secret voted, without
+//     revealing which real-world identity holds that secret)
+//   - Mapping from UserPublicKey to real-world identity
+//   - The voter's raw balance-snapshot leaf inputs (getBalanceLeafAmount,
+//     getBalanceLeafHeldSince) — only the already-capped effectiveWeight
+//     that results from them is written to the public proposal tally, same
+//     as before this file's anti-whale-takeover fix
+//
+// Privacy notes:
+//   - Vote nullifiers are unique per (voter, launch, proposal) — prevent
+//     double-voting without revealing which voter is associated with which nullifier
+//   - The community wallet is public by design (transparency for fund routing)
+//
+// Correction (2026-07-21, Medium): this section previously also
+// claimed vote DIRECTION itself was private ("which way a voter voted...
+// not how", "individual votes are not linkable to voter identity" implying
+// the vote itself was hidden too). That overstates what castVote actually
+// does. Every castVote call writes the FULL updated yesVotes/noVotes/
+// voterCount to the public `proposals` Map, unconditionally, on every
+// single call — so an observer watching that ONE transaction can trivially
+// compute the exact weight and direction of THAT vote by diffing the
+// proposal's state immediately before and after the call, with zero
+// cryptography needed. What genuinely stays hidden is only the voter's
+// IDENTITY (which real-world key cast that vote) — not the vote itself.
+// This is a materially weaker guarantee than a real privacy-preserving
+// tally (e.g. homomorphic aggregation, where individual transactions
+// reveal nothing until an aggregate reveal step) and was not something
+// this session attempted to fix — closing it for real would need a
+// different vote-aggregation design, tracked as a follow-up rather than
+// attempted as a quick patch here.
+// ============================================================================

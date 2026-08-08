@@ -1,0 +1,106 @@
+name: Cardano contracts
+
+# Aiken validators: tests, build, and a blueprint-freshness guard.
+#
+# WHY THIS EXISTS
+# ---------------
+# Until now neither checks.yml nor test.yml touched Aiken at all — the Cardano
+# validators were never compiled or tested in CI, only locally. This closes
+# that, and adds one guard the TypeScript side depends on.
+#
+# THE FRESHNESS GUARD, AND THE GAP IT CLOSES
+# ------------------------------------------
+# `integration/tests/schema-drift-guard.test.ts` asserts our hand-mirrored Lucid
+# datum schemas match `contracts/cardano/plutus.json`. That guard is only as
+# good as plutus.json being CURRENT: if someone edits a .ak file and forgets to
+# regenerate the blueprint, the mirror and the blueprint stay consistent with
+# each other while both drift away from the actual on-chain bytecode — and every
+# test still passes. This job rebuilds the blueprint and fails if the committed
+# copy differs, which makes the chain complete:
+#
+#   .ak source  --(this job)-->  plutus.json is current
+#   plutus.json --(drift guard in test.yml)-->  TypeScript mirrors are correct
+#
+# A stale plutus.json has already caused a real bug in this project (a security
+# fix and a whole validator were missing from it for days), so this is a
+# regression guard, not a hypothetical.
+#
+# Verified locally before this workflow was written (2026-08-02): `aiken build`
+# is deterministic here — a fresh build reproduced the committed plutus.json
+# byte-for-byte (310,955 bytes) — and `aiken check` passes 294 checks with 0
+# errors. Neither step was added speculatively.
+#
+# The 10 warnings aiken currently emits (unused private constants) are NOT
+# treated as failures: `--deny-warnings` is deliberately not used, so this job
+# does not fail on pre-existing lint debt it was not written to fix.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  aiken:
+    name: Aiken — check, build, blueprint freshness
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts/cardano
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the compiler pin from aiken.toml rather than hardcoding it here,
+      # so the toolchain used by CI can never silently drift from the version
+      # the project actually declares.
+      - name: Resolve the pinned Aiken version from aiken.toml
+        id: aiken-version
+        run: |
+          version="$(grep -E '^compiler[[:space:]]*=' aiken.toml | head -1 | sed -E 's/.*"(.*)".*/\1/')"
+          if [ -z "$version" ]; then
+            echo "Could not read the compiler pin from contracts/cardano/aiken.toml" >&2
+            exit 1
+          fi
+          echo "Using Aiken $version (from aiken.toml)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: aiken-lang/setup-aiken@v1
+        with:
+          version: ${{ steps.aiken-version.outputs.version }}
+
+      - name: Confirm the installed toolchain matches the pin
+        run: aiken --version
+
+      # The real validator test suite (294 checks as of 2026-08-02).
+      - name: aiken check
+        run: aiken check
+
+      - name: aiken build (regenerates plutus.json)
+        run: aiken build
+
+      # The guard itself. If a .ak file changed without the blueprint being
+      # regenerated and committed, the rebuild above will have rewritten
+      # plutus.json and this fails with the exact diff.
+      - name: plutus.json must be current
+        run: |
+          if ! git diff --exit-code -- plutus.json; then
+            echo ""
+            echo "::error file=contracts/cardano/plutus.json::plutus.json is out of date with the .ak sources."
+            echo "A validator changed but the compiled blueprint was not regenerated."
+            echo "Fix: run 'aiken build' in contracts/cardano and commit the updated plutus.json."
+            echo "This matters because integration/tests/schema-drift-guard.test.ts checks the"
+            echo "TypeScript datum mirrors against this file — a stale blueprint makes that"
+            echo "guard verify the mirrors against the wrong contract."
+            exit 1
+          fi
+          echo "plutus.json matches a fresh build of the current .ak sources."
+
+      # Surfaces the compiled artifact for inspection when a run does fail.
+      - name: Upload the freshly built blueprint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plutus-json
+          path: contracts/cardano/plutus.json
+          if-no-files-found: warn

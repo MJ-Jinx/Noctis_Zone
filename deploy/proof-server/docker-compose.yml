@@ -1,0 +1,75 @@
+
+services:
+  # Midnight proof server — serves /check, /prove, /prove-tx to the DarkVeil
+  # widget's ContractProviders (midnightZk.proofServerUrl). Version is pinned,
+  # not `latest` — see internal tracking for why: the proof server,
+  # Compact compiler, and wallet SDK must all agree on the same validated
+  # release triple, or /prove fails with a 400 (binary deserialization
+  # mismatch) or a 500 (internal circuit error). Confirmed combination as of
+  # 2026-07-21 (Midnight's mainnet-upgrade announcement, matching preprod):
+  #   Node 1.0.0 / Ledger 8.1.0 / Indexer 4.3.3 / Proof Server 8.1.0
+  # Do NOT bump this tag without re-confirming the whole quadruple together.
+  proof-server:
+    # Per project direction (2026-07-23): track the LATEST proof-server tag.
+    # As of this date `latest` and `8.1.0` are the same image digest
+    # (801bbc0340e9); the version-quadruple caveat from the README still
+    # applies — if you bump this, re-confirm the compact compiler / ledger /
+    # indexer all agree.
+    image: midnightntwrk/proof-server:latest
+    container_name: noctis-proof-server
+    restart: unless-stopped
+    # The image's ENTRYPOINT is `bash -c`, so `command` must be a SINGLE
+    # string that bash runs as a whole — a YAML list of separate args gets
+    # mangled (bash -c runs only the first word, the rest become ignored
+    # positional params, and the server exits immediately). Include --port
+    # explicitly since we're not relying on the image's default $PORT CMD.
+    command:
+      - "midnight-proof-server --num-workers 3 --job-capacity 20 --job-timeout 300 -v --port 6300"
+    ports:
+      - "127.0.0.1:6300:6300"  # not published on the public interface — Caddy terminates TLS and proxies in
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+        reservations:
+          memory: 4g
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:6300/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Pre-fetch of ZK public parameters + built-in proving keys runs BEFORE
+      # the HTTP listener binds — /health is unreachable (connection refused),
+      # not slow, for the first 2-5 min. start_period must exceed that or
+      # Docker marks the container unhealthy during normal startup.
+      start_period: 300s
+    networks:
+      - noctis-proof
+
+  # TLS termination. The DarkVeil widget bundle runs in a browser on an HTTPS
+  # WordPress page — calling a bare http://<ip>:6300 proof-server endpoint
+  # directly would be blocked as mixed content. Caddy gets automatic
+  # Let's Encrypt certs from just a domain name, no manual cert management.
+  caddy:
+    image: caddy:2-alpine
+    container_name: noctis-proof-server-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - proof-server
+    networks:
+      - noctis-proof
+
+networks:
+  noctis-proof:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

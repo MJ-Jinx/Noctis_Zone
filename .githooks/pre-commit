@@ -1,0 +1,90 @@
+#!/bin/sh
+# Blocks a commit that would introduce internal issue-tracker IDs, secret-shaped
+# content, or a statement that a weakness is currently unfixed.
+# See "REPOSITORY HYGIENE — HARD RULE" in CLAUDE.md for the full policy — this
+# hook enforces it mechanically so it doesn't depend on remembering to check.
+#
+# Reviewed exceptions live in .githooks/hygiene-allow.txt, not in people's
+# habits: a check that fires on its own rule text trains everyone to reach for
+# --no-verify, which is worse than the check not existing.
+#
+# Escape hatch (only for a real, reviewed false positive): git commit --no-verify
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$STAGED" ] && exit 0
+
+FAIL=0
+ALLOW=".githooks/hygiene-allow.txt"
+
+# Drop hits that match a reviewed exception (path + substring, both required).
+filter_allowed() {
+  if [ ! -f "$ALLOW" ]; then cat; return; fi
+  while IFS= read -r hit; do
+    hf=${hit%%:*}
+    keep=1
+    while IFS= read -r rule; do
+      case "$rule" in ''|'#'*) continue ;; esac
+      rp=${rule%%|*}; rs=${rule#*|}
+      [ "$hf" = "$rp" ] || continue
+      case "$hit" in *"$rs"*) keep=0; break ;; esac
+    done < "$ALLOW"
+    [ "$keep" = "1" ] && printf '%s\n' "$hit"
+  done
+}
+
+# Scan added lines of each staged file with a pattern, printing "file: line".
+# $3 = "i" for case-insensitive. Tracker IDs must stay case-SENSITIVE: lowercase
+# t1/d87980 are ordinary identifiers and hex, and matching them buries real hits.
+scan() {
+  pattern="$1"
+  exclude="$2"
+  gflags="-nE"
+  [ "$3" = "i" ] && gflags="-niE"
+  printf '%s\n' "$STAGED" | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    case "$f" in
+      .githooks/*) continue ;;                 # defines the patterns
+      */node_modules/*|*/dist/*|*/vendor/*) continue ;;
+      *.min.js|*.min.css|*.bundle.js|*.map) continue ;;
+    esac
+    [ -n "$exclude" ] && case "$f" in $exclude) continue ;; esac
+    git diff --cached -- "$f" | grep -E '^\+' | grep -vE '^\+\+\+' \
+      | grep $gflags "$pattern" | sed "s|^|$f: |"
+  done
+}
+
+# 1. Internal issue-tracker IDs. ROADMAP.md's A1-E4 section numbering is a
+#    separate, legitimate scheme and is excluded the same way manual passes do.
+HITS=$(scan '\b(T[0-9]+|D[0-9]+|MN-[0-9]+|T-[A-Z][A-Z-]*|C-[0-9]+)\b' 'ROADMAP.md' | filter_allowed)
+if [ -n "$HITS" ]; then
+  echo "BLOCKED: internal issue-tracker IDs. These belong only in local/ — never in a repo."
+  echo "$HITS"
+  FAIL=1
+fi
+
+# 2. Secret-shaped content.
+HITS=$(scan "BEGIN ([A-Z]+ )?PRIVATE KEY|xprv[0-9A-Za-z]{50,}|sk_live_[0-9A-Za-z]{10,}|ed25519e?_sk1[a-z0-9]{40,}|\b(mainnet|preprod)[A-Za-z0-9]{28,}\b" '')
+if [ -n "$HITS" ]; then
+  echo "BLOCKED: staged content looks like real key material."
+  echo "$HITS"
+  FAIL=1
+fi
+
+# 3. The composition rule: never publish that a weakness is currently open.
+#    Naming remaining WORK is fine ("wiring X is the remaining half"); naming an
+#    unguarded HOLE is not.
+HITS=$(scan 'not yet (fixed|enforced|mitigated)|still (not enforced|unfixed|unmitigated|vulnerable)|(remains|currently) (unfixed|unmitigated|unguarded|vulnerable)|deliberately not (fixed|addressed)|real gap, not yet|known gap[,:]|tracked as a real gap' '' i | filter_allowed)
+if [ -n "$HITS" ]; then
+  echo "BLOCKED: this states that a weakness is currently open."
+  echo "Describe the guarantee the code now makes, not the gap it leaves."
+  echo "$HITS"
+  FAIL=1
+fi
+
+if [ "$FAIL" = "1" ]; then
+  echo ""
+  echo "Genuine, reviewed false positive? Add it to $ALLOW rather than using --no-verify."
+  exit 1
+fi
+
+exit 0

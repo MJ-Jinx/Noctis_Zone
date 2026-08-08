@@ -1,0 +1,345 @@
+// Tests for tier-b-graduation-submitter.ts's TierBGraduationSubmitter — a
+// direct mirror of tier-a-graduation-submitter.ts's proven two-transaction
+// graduation flow, targeting bonding_curve_tier_b.ak instead of
+// bonding_curve.ak. This file's own header flags the one thing genuinely
+// worth testing distinctly from the Tier A version: Tier B's DarkVeil-
+// specific datum fields (dv_allocation_root, dv_claimed,
+// dv_settled) must survive Graduate's `...curveDatum` spread untouched — a
+// real schema-sync bug once dropped them. Same importOriginal
+// partial-mock Lucid strategy as the other submitter tests.
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@lucid-evolution/lucid')>();
+  return {
+    ...actual,
+    Lucid: vi.fn(),
+    Data: {
+      ...actual.Data,
+      from: vi.fn((d: unknown) => d),
+      to: vi.fn((d: unknown) => d),
+    },
+  };
+});
+
+import { CML, credentialToAddress, Lucid } from '@lucid-evolution/lucid';
+import { TierBGraduationSubmitter } from '../tier-b-graduation-submitter.js';
+
+function fakeKeyHash(fill: number): string {
+  return fill.toString(16).padStart(2, '0').repeat(28);
+}
+function addrFor(hash: string): string {
+  return credentialToAddress('Preprod', { type: 'Key', hash });
+}
+function toHex(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('hex');
+}
+
+const REAL_EXTENDED_KEY_HEX = toHex(CML.PrivateKey.generate_ed25519extended().to_raw_bytes());
+const LAUNCH_ID_HEX = toHex(new TextEncoder().encode('launch-grad-b-1'));
+const TOKEN_POLICY = 'aa'.repeat(28);
+const TOKEN_ASSET_NAME = '42'.repeat(4);
+const TOKEN_UNIT = TOKEN_POLICY + TOKEN_ASSET_NAME;
+const GOVERNOR_ADDR = addrFor(fakeKeyHash(0x11));
+
+function curveDatum(overrides: Record<string, unknown> = {}) {
+  return {
+    launch_id: LAUNCH_ID_HEX,
+    curve_state: 'Graduated',
+    total_raised: 10_000_000n,
+    lp_reserve_tokens: 150_000_000n,
+    staking_reserve_tokens: 250_000_000n,
+    lp_seeded: false,
+    staking_seeded: false,
+    token_policy_id: TOKEN_POLICY,
+    token_asset_name: TOKEN_ASSET_NAME,
+    // Tier B-only DarkVeil fields — must survive Graduate's spread unchanged.
+    dv_allocation_root: toHex(new Uint8Array(32).fill(9)),
+    dv_claimed: [fakeKeyHash(0x88)],
+    dv_settled: true,
+    ...overrides,
+  };
+}
+
+function lpDatum(overrides: Record<string, unknown> = {}) {
+  return {
+    launch_id: LAUNCH_ID_HEX,
+    lock_timestamp: 0n,
+    lp_state: 'Unlocked',
+    lp_token_amount: 150_000_000n,
+    ...overrides,
+  };
+}
+
+function vestDatum(overrides: Record<string, unknown> = {}) {
+  return {
+    launch_id: LAUNCH_ID_HEX,
+    vesting_state: 'NotStarted',
+    vest_start_timestamp: 0n,
+    ...overrides,
+  };
+}
+
+function makeFakeTxBuilder() {
+  const calls: Record<string, unknown[]> = {};
+  const collectFromCalls: unknown[][] = [];
+  const payToContractCalls: unknown[][] = [];
+  const builder: Record<string, unknown> = {};
+  builder.collectFrom = vi.fn((...a: unknown[]) => {
+    collectFromCalls.push(a);
+    return builder;
+  });
+  builder.attach = { SpendingValidator: vi.fn((..._a: unknown[]) => builder) };
+  builder.pay = {
+    ToContract: vi.fn((...a: unknown[]) => {
+      payToContractCalls.push(a);
+      return builder;
+    }),
+  };
+  builder.addSigner = vi.fn((...a: unknown[]) => {
+    calls.addSigner = a;
+    return builder;
+  });
+  builder.complete = vi.fn((...a: unknown[]) => {
+    calls.complete = a;
+    return Promise.resolve({
+      sign: {
+        withPrivateKey: () => ({
+          complete: vi.fn().mockResolvedValue({
+            submit: vi.fn().mockResolvedValue(nextTxHash()),
+          }),
+        }),
+      },
+    });
+  });
+  return { builder, calls, collectFromCalls, payToContractCalls };
+}
+
+let txHashCounter = 0;
+function nextTxHash() {
+  txHashCounter++;
+  return `grad-b-tx-${txHashCounter}`;
+}
+
+const addressRefs = { curve: '', lp: '', vesting: '' };
+
+function makeSubmitter(
+  builder: ReturnType<typeof makeFakeTxBuilder>['builder'],
+  opts: {
+    curveUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
+    lpUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
+    vestingUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
+  } = {},
+) {
+  const awaitTx = vi.fn().mockResolvedValue(true);
+  const fakeLucid = {
+    selectWallet: { fromAddress: vi.fn() },
+    utxosAt: vi.fn().mockImplementation((address: string) => {
+      if (address === addressRefs.curve) return Promise.resolve(opts.curveUtxos ?? []);
+      if (address === addressRefs.lp) return Promise.resolve(opts.lpUtxos ?? []);
+      if (address === addressRefs.vesting) return Promise.resolve(opts.vestingUtxos ?? []);
+      return Promise.resolve([]);
+    }),
+    awaitTx,
+    newTx: () => builder,
+  };
+  vi.mocked(Lucid).mockResolvedValue(fakeLucid as never);
+
+  const submitter = new TierBGraduationSubmitter({
+    blockfrostProjectId: 'proj',
+    blockfrostUrl: 'https://cardano-preprod.blockfrost.io/api/v0',
+    network: 'Preprod',
+    bondingCurveTierBScriptCbor: '590001',
+    lpEscrowScriptCbor: '590002',
+    vestingScriptCbor: '590003',
+    launchIdHex: LAUNCH_ID_HEX,
+  });
+  addressRefs.curve = (submitter as unknown as { bondingCurveAddress: string }).bondingCurveAddress;
+  addressRefs.lp = (submitter as unknown as { lpEscrowAddress: string }).lpEscrowAddress;
+  addressRefs.vesting = (submitter as unknown as { vestingAddress: string }).vestingAddress;
+
+  return { submitter, fakeLucid };
+}
+
+beforeEach(() => {
+  vi.mocked(Lucid).mockReset();
+  txHashCounter = 0;
+});
+
+describe('TierBGraduationSubmitter.graduateAndSealLp — guard rails (same as Tier A)', () => {
+  it('rejects when the curve is not Graduated', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum({ curve_state: 'Active' }), assets: {} }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /Curve is not Graduated/,
+    );
+  });
+
+  it('rejects when Graduate already ran, and when total_raised is not positive', async () => {
+    const { builder: b1 } = makeFakeTxBuilder();
+    const { submitter: s1 } = makeSubmitter(b1, {
+      curveUtxos: [{ datum: curveDatum({ lp_seeded: true }), assets: {} }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(s1.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /Graduate already ran/,
+    );
+
+    const { builder: b2 } = makeFakeTxBuilder();
+    const { submitter: s2 } = makeSubmitter(b2, {
+      curveUtxos: [{ datum: curveDatum({ total_raised: 0n }), assets: {} }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(s2.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /total_raised .* is not positive/,
+    );
+  });
+});
+
+describe('TierBGraduationSubmitter.graduateAndSealLp — Tier B DarkVeil field preservation', () => {
+  it('carries dv_allocation_root/dv_claimed/dv_settled through Graduate unchanged', async () => {
+    const { builder, payToContractCalls } = makeFakeTxBuilder();
+    const dvRoot = toHex(new Uint8Array(32).fill(42));
+    const dvClaimed = [fakeKeyHash(0x11), fakeKeyHash(0x22)];
+    const _identityPurchases = [[fakeKeyHash(0x33), 12345n]];
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [
+        {
+          datum: curveDatum({
+            dv_allocation_root: dvRoot,
+            dv_claimed: dvClaimed,
+            dv_settled: true,
+          }),
+          assets: { lovelace: 20_000_000n, [TOKEN_UNIT]: 1_000_000n },
+        },
+      ],
+      lpUtxos: [{ datum: lpDatum(), assets: { lovelace: 2_000_000n } }],
+    });
+
+    await submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1_700_000_000);
+
+    const [, curvePayload] = payToContractCalls[0] as [string, { value: Record<string, unknown> }];
+    expect(curvePayload.value.dv_allocation_root).toBe(dvRoot);
+    expect(curvePayload.value.dv_claimed).toEqual(dvClaimed);
+    expect(curvePayload.value.dv_settled).toBe(true);
+    // The 3 fields Graduate DOES change:
+    expect(curvePayload.value.total_raised).toBe(0n);
+    expect(curvePayload.value.lp_seeded).toBe(true);
+    expect(curvePayload.value.staking_seeded).toBe(true);
+  });
+});
+
+describe('TierBGraduationSubmitter.graduateAndSealLp — value movement + redeemers', () => {
+  it('moves lpAda + reserve tokens OUT of the curve and INTO lp_escrow exactly, redeemer indices 8/0', async () => {
+    const { builder, payToContractCalls, collectFromCalls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [
+        {
+          datum: curveDatum({
+            total_raised: 5_000_000n,
+            lp_reserve_tokens: 100n,
+            staking_reserve_tokens: 50n,
+          }),
+          assets: { lovelace: 20_000_000n, [TOKEN_UNIT]: 1_000_000n },
+        },
+      ],
+      lpUtxos: [
+        {
+          datum: lpDatum({ lp_token_amount: 100n }),
+          assets: { lovelace: 2_000_000n },
+        },
+      ],
+    });
+
+    const result = await submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1_700_000_000);
+
+    expect(result.lpAda).toBe(5_000_000n);
+    const [, , curveAssets] = payToContractCalls[0] as [string, unknown, Record<string, bigint>];
+    expect(curveAssets.lovelace).toBe(15_000_000n);
+    expect(curveAssets[TOKEN_UNIT]).toBe(999_850n);
+    const [, , lpAssets] = payToContractCalls[1] as [string, unknown, Record<string, bigint>];
+    expect(lpAssets.lovelace).toBe(7_000_000n);
+    expect(lpAssets[TOKEN_UNIT]).toBe(100n);
+
+    expect((collectFromCalls[0][1] as { index: number }).index).toBe(8);
+    expect((collectFromCalls[1][1] as { index: number }).index).toBe(0);
+  });
+
+  it('requires the governor as signer and passes localUPLCEval: false (multi-script eval)', async () => {
+    const { builder, calls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum(), assets: {} }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000);
+    expect(calls.addSigner).toEqual([GOVERNOR_ADDR]);
+    expect(calls.complete).toEqual([{ localUPLCEval: false }]);
+  });
+});
+
+describe('TierBGraduationSubmitter.startVesting (shared vesting.ak)', () => {
+  it('rejects when vesting is not NotStarted', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      vestingUtxos: [{ datum: vestDatum({ vesting_state: 'Vesting' }), assets: {} }],
+    });
+    await expect(submitter.startVesting(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /StartVesting already ran/,
+    );
+  });
+
+  it('transitions to Vesting and stamps vest_start_timestamp', async () => {
+    const { builder, payToContractCalls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      vestingUtxos: [{ datum: vestDatum(), assets: {} }],
+    });
+    await submitter.startVesting(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1_700_000_000);
+    const [, payload] = payToContractCalls[0] as [string, { value: Record<string, unknown> }];
+    expect(payload.value.vesting_state).toBe('Vesting');
+    expect(payload.value.vest_start_timestamp).toBe(1_700_000_000n);
+  });
+});
+
+describe('TierBGraduationSubmitter.graduate (sequencing convenience wrapper)', () => {
+  it("runs graduateAndSealLp then awaits TX1 before starting TX2, returning both hashes and step1's figures", async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter, fakeLucid } = makeSubmitter(builder, {
+      curveUtxos: [
+        {
+          datum: curveDatum({
+            total_raised: 777n,
+            lp_reserve_tokens: 10n,
+            staking_reserve_tokens: 5n,
+          }),
+          assets: {},
+        },
+      ],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+      vestingUtxos: [{ datum: vestDatum(), assets: {} }],
+    });
+
+    const result = await submitter.graduate(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000);
+
+    expect(fakeLucid.awaitTx).toHaveBeenCalledWith('grad-b-tx-1');
+    expect(result.graduateSealLockTxHash).toBe('grad-b-tx-1');
+    expect(result.startVestingTxHash).toBe('grad-b-tx-2');
+    expect(result.lpAda).toBe(777n);
+  });
+
+  it("wraps a TX2 failure with TX1's hash", async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum({ total_raised: 1n }), assets: {} }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+      vestingUtxos: [{ datum: vestDatum({ vesting_state: 'Vesting' }), assets: {} }], // makes step2 fail
+    });
+
+    await expect(submitter.graduate(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /graduateAndSealLp succeeded \(txHash: grad-b-tx-1\) but startVesting failed/,
+    );
+  });
+});

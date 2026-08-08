@@ -1,0 +1,19 @@
+# Reviewed exceptions to the pre-commit hygiene checks.
+#
+# One rule per line:   <path>|<substring that must appear on the flagged line>
+# A hit is skipped only when BOTH match, so an exception cannot silently widen
+# to the rest of a file. Lines starting with # are comments.
+#
+# Keep this list short. Every entry is a place the checks are deliberately
+# blind, so each one needs to be a case where the pattern IS the subject
+# matter — documenting the rule, or defining it.
+
+# CLAUDE.md states the hygiene rule, which requires naming the ID shapes it
+# forbids. Without this the rule itself cannot be committed.
+CLAUDE.md|Internal issue-tracker IDs of any shape
+CLAUDE.md|no listing which validators/files a fix skipped
+CLAUDE.md|A commit may say what it *does*
+
+# The composition rule's own text necessarily quotes the phrasings it bans.
+CLAUDE.md|Never state that a weakness is currently unfixed
+CLAUDE.md|is not included in this change

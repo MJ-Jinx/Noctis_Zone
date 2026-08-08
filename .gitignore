@@ -1,0 +1,72 @@
+# ── Local-only working directory ─────────────────────────────────────────
+# Internal working documents live here and are not published. Contents are
+# available to auditors and partners on request.
+/local/
+
+# Unpublished drafts (kept locally; not ready for publication)
+noctis_v1/noctis_whitepaper_v1.html
+noctis_v2/noctis_whitepaper_v2.html
+/architecture.html
+
+# Build output — regenerable, not source
+contracts/midnight/compiled_realzk/
+/releases/
+offline-preview/
+dist/
+build/
+coverage/
+
+# Files removed from tracking but kept locally for reference
+/archive/
+
+# WordPress
+wp-config.php
+wp-config-local.php
+.htaccess
+/apps/web/wp-content/uploads/
+/apps/web/wp-content/cache/
+/apps/web/wp-content/upgrade/
+*.log
+
+# Local by Flywheel
+*.local
+local-by-flywheel.json
+
+# Python
+*.pyc
+*.pyo
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+.npm/
+
+# Environment / credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local tooling state (machine-specific)
+.agents/
+skills-lock.json
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local git-history backups (created during repo re-inits — never publish)
+.git.bak*

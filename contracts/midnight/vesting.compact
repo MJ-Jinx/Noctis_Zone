@@ -1,0 +1,351 @@
+pragma language_version >= 0.16 && <= 0.23;
+
+import CompactStandardLibrary;
+
+// ============================================================================
+// VESTING PSM — Noctis Protocol
+// ============================================================================
+//
+// Controls the release schedule of the creator's TOKEN allocation (5-10% of
+// total supply) — separate from Creator Fee Escrow (creator_escrow.compact),
+// which handles the creator's ADA/NIGHT trade-fee income. CLAUDE.md is
+// explicit that these are two distinct income streams and must never be
+// conflated ("Two income streams for creators are distinct... never show
+// them as one number").
+//
+// Split out 2026-07-09: this vesting logic used to live inside
+// creator_escrow.compact's `claimVested` circuit, applying a day-based
+// vesting curve directly to `escrowAmount` — the SAME ledger value that
+// `depositFees` was simultaneously growing with new trade-fee income. That
+// silently corrupted the vesting math any time a fee arrived mid-vest,
+// since `claimAmount * vestDays == escrowAmount * elapsedDays` assumes
+// `escrowAmount` is a fixed total, not one that grows underneath an
+// in-progress claim schedule. This PSM instead vests a `tokenAllocation`
+// value that is fixed at deploy time and never changes.
+//
+// Vesting rules (CLAUDE.md):
+//   - Creator chooses 90-365 days at launch wizard. No default — forced
+//     active selection.
+//   - No tokens release before graduation, regardless of elapsed time —
+//     vesting only starts once startVesting() is called (governor, at
+//     graduation).
+//   - Linear daily release: claimable = tokenAllocation * elapsedDays / vestDays
+//   - ZK proof published separately (off-chain / other PSM composition):
+//     creator held 0 tokens at DarkVeil open.
+//
+// CTO (Community Takeover Opportunity):
+//   If a SilenceLockTrigger proposal passes via cto_governance PSM, unvested
+//   creator tokens are frozen and redirected to a community treasury —
+//   NOT burned (CLAUDE.md's "What a Passed Vote Does" #3). Already-vested
+//   tokens the creator already claimed are unaffected.
+//
+// Compiler: compactc v0.31.1
+// ============================================================================
+
+export enum VestingState { NotStarted, Vesting, FullyClaimed, CTOFrozen, Cancelled }
+
+export struct UserSecretKey { bytes: Bytes<32>; }
+
+sealed ledger launchId: Bytes<32>;
+sealed ledger creatorKey: Bytes<32>;
+
+// Total creator token allocation — fixed at deploy, never changes
+// (unlike creator_escrow.compact's fee accumulator, which grows over time)
+sealed ledger tokenAllocation: Uint<128>;
+sealed ledger vestDays: Uint<16>;
+
+export ledger vestingState: VestingState;
+export ledger claimedTokens: Uint<128>;
+export ledger vestStartTimestamp: Uint<64>;
+
+sealed ledger governorKey: Bytes<32>;
+
+// CTO state — mirrors creator_escrow.compact's pattern
+export ledger ctoTriggered: Boolean;
+// Which ballot this contract's CTO state acts on, and every ballot already
+// spent here.
+//
+// A CTO trigger changes who receives money. Naming the proposal makes that
+// change a public, checkable claim: `ctoProposalId` is the ballot the CURRENT
+// state rests on, readable by anyone and matchable against cto_governance's
+// own `proposals` ledger, which records each proposal's votes, outcome and —
+// for a SilenceLockTrigger — the community wallet pinned at creation.
+//
+// `consumedProposals` makes a ballot single-use HERE. One passed vote
+// authorises one transition on this contract; re-presenting it does nothing,
+// so a trigger cannot be replayed after a dissolve to install a different
+// wallet under the authority of the same vote.
+export ledger ctoProposalId: Bytes<32>;
+export ledger consumedProposals: Set<Bytes<32>>;
+
+export ledger communityTreasuryWallet: Bytes<32>;
+
+witness getCreatorSecret(): UserSecretKey;
+witness getGovernorSecret(): UserSecretKey;
+
+pure circuit deriveCreatorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:vesting:creator:pk:v1"), sk.bytes]);
+}
+pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([pad(32, "noctis:vesting:governor:pk:v1"), sk.bytes]);
+}
+
+constructor(
+  launchId_: Bytes<32>,
+  tokenAllocation_: Uint<128>,
+  vestDays_: Uint<16>
+) {
+  // Force active selection: vestDays must be 90-365, no default
+  assert(disclose(vestDays_ >= 90), "Vesting must be at least 90 days");
+  assert(disclose(vestDays_ <= 365), "Vesting must be at most 365 days");
+
+  launchId = disclose(launchId_);
+  tokenAllocation = disclose(tokenAllocation_);
+  vestDays = disclose(vestDays_);
+
+  const govSecret = getGovernorSecret();
+  governorKey = disclose(deriveGovernorKey(govSecret));
+
+  const creatorSecret = getCreatorSecret();
+  creatorKey = disclose(deriveCreatorKey(creatorSecret));
+
+  vestingState = VestingState.NotStarted;
+  claimedTokens = 0;
+  vestStartTimestamp = 0;
+  ctoTriggered = disclose(false);
+  communityTreasuryWallet = disclose(pad(32, ""));
+}
+
+// Start vesting — governor only, called at graduation. No tokens release
+// before this regardless of elapsed wall-clock time.
+//
+// Chain-time binding: startTimestamp is bound to real chain time, not taken
+// as a trusted caller value. claimVested computes elapsedSeconds
+// = currentTimestamp - vestStartTimestamp, so binding startTimestamp is what
+// keeps the vested amount honest; an unbound value would inflate
+// elapsedSeconds to cover the entire real epoch, letting the creator claim
+// 100% of the allocation on day one regardless of true elapsed time. Bound
+// against real chain time on BOTH sides, same idiom as bonding_curve.
+// compact's expireCurve (blockTimeGt against a ledger-stored deadline): the
+// supplied anchor must be within a 1-hour window of the real block time —
+// not exact equality (block time is approximate, per this codebase's own
+// compact-patterns reference — tight windows cause spurious failures), but
+// tight enough that neither direction of anchor drift is usable.
+export circuit startVesting(startTimestamp: Uint<64>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can start vesting");
+  assert(disclose(vestingState == VestingState.NotStarted), "Vesting already started");
+  assert(blockTimeGte(disclose(startTimestamp)), "startTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((startTimestamp + 3600) as Uint<64>)),
+    "startTimestamp too far in the past"
+  );
+  vestingState = VestingState.Vesting;
+  vestStartTimestamp = disclose(startTimestamp);
+}
+
+// Claim vested tokens (creator only)
+// vestable = tokenAllocation * (elapsedSeconds / vestSeconds)
+// Since Compact circuits can't divide, the caller provides the cumulative
+// claim total and we verify it via cross-multiplication:
+//   totalClaimed * vestSeconds == tokenAllocation * elapsedSeconds
+// Field only supports equality comparisons, not ordering (there's no
+// provable "less than" on raw scalar field elements the way there is on a
+// bounded Uint), so — same as verifyPrice/verifyFeeSlice elsewhere in this
+// codebase — this must be an exact match, not a <= tolerance. Off-chain
+// tooling computes the exact claimable amount; it isn't a hand-typed
+// number. tokenAllocation is sealed and never changes, so unlike the old
+// merged design, this check is stable across the whole vesting period.
+//
+// Note (2026-07-21, Medium — documented, not fixed here): the
+// exact-equality requirement is a liveness/UX limitation, not an
+// over-claim risk (a creator can mathematically never claim more than the
+// real linear schedule allows this way) — but it does mean a claim is only
+// representable at timestamps where totalClaimed*vestSeconds divides
+// evenly into tokenAllocation*elapsedSeconds. Off-chain tooling must pick
+// a currentTimestamp that lands on an exact match, which in practice means
+// computing the largest currentTimestamp <= real-now whose implied
+// totalClaimed is an integer — not simply "claim now." Not a security
+// issue, just a real constraint any claim-building UI must account for.
+export circuit claimVested(
+  claimAmount: Uint<128>,
+  currentTimestamp: Uint<64>
+): [] {
+  assert(disclose(vestingState == VestingState.Vesting), "Vesting not active");
+  assert(disclose(!ctoTriggered), "CTO active — unvested tokens frozen");
+  // Fix (2026-07-21, High): defense-in-depth against the
+  // triggerCTO/dissolveCTO guard above — vestStartTimestamp must
+  // be genuinely set before any elapsed-time math is meaningful.
+  assert(disclose(vestStartTimestamp != 0), "Vesting has not actually started");
+
+  const creatorSecret = getCreatorSecret();
+  const creator = deriveCreatorKey(creatorSecret);
+  assert(disclose(creator == creatorKey), "Only creator can claim");
+
+  // Chain-time binding: currentTimestamp used
+  // to be trusted outright — the creator (the exact party vesting exists to
+  // constrain) could supply an arbitrarily large value to claim their whole
+  // allocation on day one. Bound to real chain time: currentTimestamp can't
+  // be in the future. A creator under-reporting elapsed time only reduces
+  // their own claimable amount, so no lower bound is needed here (unlike
+  // startVesting's anchor, which needs both directions bounded).
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+
+  const totalClaimed = (claimedTokens + claimAmount) as Uint<128>;
+  assert(disclose(totalClaimed <= tokenAllocation), "Claim exceeds token allocation");
+
+  // Work entirely in seconds to avoid division (Compact circuits can't
+  // divide, and `/` isn't even parseable) — instead of converting elapsed
+  // seconds into days, convert vestDays into seconds (a multiplication)
+  // and cross-multiply both sides by that common unit:
+  //   totalClaimed * (vestDays * 86400) <= tokenAllocation * elapsedSeconds
+  const elapsedSeconds = disclose((currentTimestamp - vestStartTimestamp) as Uint<64>);
+  const vestSecondsF = ((vestDays as Field) * (86400 as Field)) as Field;
+  const leftSideF = ((totalClaimed as Field) * vestSecondsF) as Field;
+  const rightSideF = ((tokenAllocation as Field) * (elapsedSeconds as Field)) as Field;
+  assert(disclose(leftSideF == rightSideF), "Claimed amount doesn't match vested-to-date amount");
+
+  claimedTokens = disclose(totalClaimed);
+
+  if (disclose(totalClaimed == tokenAllocation)) {
+    vestingState = VestingState.FullyClaimed;
+  }
+
+  // No real token transfer happens here yet — this circuit only updates
+  // claimedTokens bookkeeping. Actual token movement is blocked on the
+  // Midnight fungible token standard being unconfirmed for Tier C; "transaction
+  // merging" was never the mechanism regardless (no cross-contract call
+  // exists in Compact).
+}
+
+// ============================================================================
+// CTO CIRCUITS
+// ============================================================================
+
+// Trigger CTO — called by the governor in a separate transaction after a
+// SilenceLockTrigger proposal passes on cto_governance PSM (no cross-
+// contract call mechanism exists in Compact — so this is always a
+// separate, off-chain-sequenced transaction). Unvested tokens freeze here;
+// already-claimed tokens are unaffected (they already left this PSM).
+// Fix (2026-07-21, High): triggerCTO previously only forbade
+// FullyClaimed, so it could also be entered from NotStarted or Cancelled.
+// Combined with dissolveCTO unconditionally setting vestingState = Vesting
+// with NO check/restore of vestStartTimestamp, a triggerCTO -> dissolveCTO
+// round trip from an un-started schedule left state == Vesting with
+// vestStartTimestamp still 0 (the constructor default). claimVested only
+// checks vestingState == Vesting — it never checked vestStartTimestamp !=
+// 0 — so a creator could then call claimVested with
+// currentTimestamp = vestDays*86400 (comfortably below the real epoch, so
+// it passes the "not in the future" check) and claim 100% of the
+// allocation in one call on day one, defeating the entire linear vesting
+// schedule. Fixed by only allowing triggerCTO from the real Vesting state
+// — the exact state whose elapsed-time-so-far is genuinely meaningful to
+// freeze. claimVested also gets a vestStartTimestamp != 0 assert below as
+// defense-in-depth.
+export circuit triggerCTO(proposalId: Bytes<32>, communityTreasuryWallet_: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can trigger CTO");
+  assert(disclose(!ctoTriggered), "CTO already triggered");
+  // The ballot must be named, and must not already have been spent here.
+  assert(disclose(proposalId != pad(32, "")), "CTO trigger must name the proposal that authorised it");
+  assert(disclose(!consumedProposals.member(disclose(proposalId))), "This proposal has already been acted on here");
+  assert(disclose(vestingState == VestingState.Vesting), "Vesting must be actively in progress to freeze");
+  // Phase 5 hygiene fix (2026-07-12): same empty-address guard as
+  // bonding_curve.compact's triggerCTO — an empty communityTreasuryWallet_
+  // would silently freeze tokens with nowhere for them to go.
+  assert(disclose(communityTreasuryWallet_ != pad(32, "")), "Community wallet address cannot be empty");
+
+  // Note (2026-07-21, Low — documented, not fixed here): this
+  // circuit freezes claimVested (state -> CTOFrozen) but moves no real
+  // tokens to communityTreasuryWallet — consistent with claimVested's own
+  // comment that real token transfer is blocked on the Midnight
+  // fungible-token standard being unconfirmed for Tier C. The "redirect to
+  // community treasury" this circuit's name implies isn't wired yet;
+  // revisit once that resolves and real token movement exists to wire here.
+  consumedProposals.insert(disclose(proposalId));
+  ctoProposalId = disclose(proposalId);
+  ctoTriggered = disclose(true);
+  communityTreasuryWallet = disclose(communityTreasuryWallet_);
+  vestingState = VestingState.CTOFrozen;
+}
+
+// Dissolve CTO — creator returned, community voted to restore control.
+// Resumes vesting from where it left off (vestStartTimestamp is unchanged,
+// so the creator does not get "extra" vested time for the frozen period —
+// matches creator_escrow.compact's equivalent dissolve behavior).
+export circuit dissolveCTO(proposalId: Bytes<32>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can dissolve CTO");
+  assert(disclose(ctoTriggered), "CTO not triggered");
+  // Same binding as triggerCTO: a dissolve is a governance outcome too.
+  assert(disclose(proposalId != pad(32, "")), "CTO dissolve must name the proposal that authorised it");
+  assert(disclose(!consumedProposals.member(disclose(proposalId))), "This proposal has already been acted on here");
+  // Fix (2026-07-30): dissolveCTO previously checked only
+  // ctoTriggered, not vestingState — if cancelLaunch was called while
+  // CTOFrozen (permitted, see cancelLaunch's own comment), ctoTriggered
+  // stayed true (cancelLaunch didn't clear it), so dissolveCTO would still
+  // pass its only check and set vestingState back to Vesting, resurrecting
+  // a schedule the governor had force-cancelled. Requiring the real prior
+  // state (CTOFrozen) closes this — paired with cancelLaunch now also
+  // clearing ctoTriggered below, for defense in depth.
+  assert(disclose(vestingState == VestingState.CTOFrozen), "Vesting is not currently CTO-frozen");
+
+  consumedProposals.insert(disclose(proposalId));
+  ctoProposalId = disclose(proposalId);
+  ctoTriggered = disclose(false);
+  communityTreasuryWallet = disclose(pad(32, ""));
+  vestingState = VestingState.Vesting;
+}
+
+// Cancel launch — called as a separate transaction, sequenced off-chain by
+// the platform's orchestration layer, when the bonding curve expires
+//
+// GitHub #68 fix (2026-07-14): this circuit had NO identity check at all —
+// every other state-changing circuit in this file (dissolveCTO immediately
+// above it, startVesting, triggerCTO) checks the governor key first. As
+// written, anyone able to submit a transaction could permanently cancel an
+// active vesting schedule. Fixed to match the same governor-key pattern.
+// Note (2026-07-21, Low — documented, not fixed here): the only
+// disallowed source state is Cancelled itself — this circuit is callable
+// from NotStarted, Vesting, FullyClaimed, or CTOFrozen alike, with no
+// check on whether cancelling makes sense from that state (e.g.
+// "cancelling" a FullyClaimed schedule has nothing left to cancel).
+// Governor-only and harmless in practice (nothing further reads vestable
+// amounts once Cancelled), so left permissive rather than adding
+// speculative state-transition restrictions no real workflow needs yet.
+export circuit cancelLaunch(): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can cancel launch");
+  assert(disclose(vestingState != VestingState.Cancelled), "Already cancelled");
+  vestingState = VestingState.Cancelled;
+  // Fix (2026-07-30): clear ctoTriggered on cancellation — see
+  // dissolveCTO's own comment for the resurrection bug this pairs with.
+  // A cancelled launch's ctoTriggered flag has no coherent meaning going
+  // forward regardless of dissolveCTO's own new vestingState guard; clear
+  // it here too so the ledger doesn't carry a stale true value.
+  ctoTriggered = disclose(false);
+}
+
+// ============================================================================
+// VIEW / READ
+// ============================================================================
+
+export circuit getVestingState(): VestingState {
+  return vestingState;
+}
+
+export circuit getCtoStatus(): Boolean {
+  return ctoTriggered;
+}
+
+export circuit getCommunityTreasuryWallet(): Bytes<32> {
+  return communityTreasuryWallet;
+}
+
+export circuit getClaimedTokens(): Uint<128> {
+  return claimedTokens;
+}

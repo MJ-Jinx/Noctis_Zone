@@ -1,0 +1,163 @@
+#!/bin/sh
+# Last line of defence before anything reaches the PUBLIC GitHub repo.
+#
+# WHY THIS EXISTS ALONGSIDE pre-commit
+# ------------------------------------
+# pre-commit only sees what is being committed, at the moment it is committed.
+# It does not see:
+#   - commits made with --no-verify (its own documented escape hatch)
+#   - commits made before the hook existed, or on a machine without it
+#   - commits pulled in from a branch or another clone
+# Push is the point of no return: once content is on GitHub it must be treated
+# as public forever, even if deleted afterwards. So the whole range being pushed
+# is re-scanned here, not just one commit's staged diff.
+#
+# Scope is deliberately WIDER than pre-commit: it also blocks live server/infra
+# details and local machine paths, neither of which is secret-shaped enough for
+# pre-commit's key-material patterns to catch, but both of which hand an
+# attacker a starting point and have no business in a public repo.
+#
+# See "REPOSITORY HYGIENE — HARD RULE" in CLAUDE.md for the policy this enforces.
+#
+# Escape hatch (only for a real, reviewed false positive): git push --no-verify
+
+REMOTE_REF_BASE=""
+FAIL=0
+
+# stdin gives: <local ref> <local sha> <remote ref> <remote sha>
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  # Deleting a ref — nothing to scan.
+  case "$local_sha" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+
+  if [ -z "${remote_sha##*[!0]*}" ]; then
+    RANGE="$remote_sha..$local_sha"
+  else
+    # New branch with no remote counterpart — scan against the default branch
+    # so we review only what this branch actually adds.
+    BASE=$(git merge-base origin/main "$local_sha" 2>/dev/null)
+    if [ -n "$BASE" ]; then
+      RANGE="$BASE..$local_sha"
+    else
+      RANGE="$local_sha"
+    fi
+  fi
+  REMOTE_REF_BASE="$REMOTE_REF_BASE $RANGE"
+done
+
+[ -z "$REMOTE_REF_BASE" ] && exit 0
+
+for RANGE in $REMOTE_REF_BASE; do
+  # .githooks/ is excluded from the CONTENT scan because these hooks necessarily
+  # contain the very patterns they block — the pattern definitions themselves
+  # are not leaks, and without this exclusion the hooks could never be pushed.
+  # Commit messages are still scanned in full, and every other path is too.
+  DIFF=$(git diff "$RANGE" -- . ':(exclude).githooks/' 2>/dev/null)
+  MSGS=$(git log --format='%B' "$RANGE" 2>/dev/null)
+  [ -z "$DIFF" ] && [ -z "$MSGS" ] && continue
+
+  # Content AND commit messages are both in scope — the hygiene rule covers
+  # "not in a doc, not in a code comment, not in a commit message".
+  BOTH=$(printf '%s\n%s\n' "$DIFF" "$MSGS")
+
+  check() {
+    label="$1"
+    pattern="$2"
+    hits=$(printf '%s\n' "$BOTH" | grep -nEi "$pattern" | head -5)
+    if [ -n "$hits" ]; then
+      echo "BLOCKED [$label] in $RANGE:"
+      echo "$hits" | cut -c1-160
+      echo ""
+      FAIL=1
+    fi
+  }
+
+  check "private key material" \
+    "BEGIN [A-Z ]*PRIVATE KEY|xprv[0-9A-Za-z]{50,}|ed25519_sk1[0-9a-z]{50,}"
+
+  check "mnemonic / seed phrase" \
+    "(mnemonic|seed[_ ]phrase)[[:space:]]*[:=][[:space:]]*[\"'][a-z ]{20,}[\"']"
+
+  check "API key or token with a real-looking value" \
+    "(api[_-]?key|apikey|auth[_-]?token|access[_-]?token|client[_-]?secret|project_id|password)[[:space:]]*[:=][[:space:]]*[\"'][A-Za-z0-9_/+-]{16,}[\"']"
+
+  check "GitHub / cloud credential" \
+    "ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sk_live_[0-9A-Za-z]{10,}"
+
+  check "live server / hosting detail" \
+    "noctcrpd|server209|/home/noctcrpd|port[[:space:]]*21098|cpanel[[:space:]]*(user|password)"
+
+  check "local machine path" \
+    "C:\\\\+Users\\\\+[A-Za-z]|/home/jinx|/mnt/c/Users|AppData[\\\\/]+Local[\\\\/]+Temp"
+
+  check "internal issue-tracker ID" \
+    "\b(T[0-9]{1,3}|D[0-9]{1,2}|MN-[0-9]+|T-[A-Z][A-Z-]+|C-[0-9]+)\b"
+done
+
+if [ "$FAIL" = "1" ]; then
+  cat <<'EOF'
+--------------------------------------------------------------------
+PUSH BLOCKED. This repository is PUBLIC — anything pushed must be
+treated as public permanently, even if deleted afterwards.
+
+Content that must never be pushed lives in gitignored local/ instead:
+  local/OPEN_ISSUES.md, local/FLAGGED_ISSUES.md,
+  local/SECURITY_AUDIT.md, local/CHANGELOG.md
+
+If a match is a genuine, reviewed false positive (not merely
+inconvenient), push with:  git push --no-verify
+--------------------------------------------------------------------
+EOF
+  exit 1
+fi
+
+# --------------------------------------------------------------------------
+# Lint/format gate — the same command the Checks workflow runs.
+#
+# Added 2026-08-02 after a push failed CI on Biome issues alone: the security
+# scan above passed, the code was correct and fully tested, and CI still went
+# red purely on import ordering and formatting. `biome ci .` covers the whole
+# repo in well under a second, so there is no reason to discover that on
+# GitHub instead of here.
+#
+# Runs AFTER the security scan on purpose — a leak is the hard failure and
+# should be reported first even when lint is also broken.
+# --------------------------------------------------------------------------
+
+if [ -f biome.json ] || [ -f biome.jsonc ]; then
+  if command -v npx >/dev/null 2>&1; then
+    echo "pre-push: running biome ci (same check as the Checks workflow)..."
+    BIOME_LOG=$(mktemp 2>/dev/null || echo "./.biome-prepush.log")
+    if ! npx --no-install biome ci . >"$BIOME_LOG" 2>&1; then
+      # `--no-install` failing can simply mean biome isn't installed locally,
+      # which should warn rather than block. A real lint failure must block.
+      if grep -qiE "could not determine executable|not found|npm ERR" "$BIOME_LOG"; then
+        echo "pre-push: WARNING — biome is not installed locally, skipping the lint gate."
+        echo "          Run 'npm install' so this check works; CI still enforces it."
+      else
+        echo ""
+        tail -30 "$BIOME_LOG"
+        cat <<'EOF'
+
+--------------------------------------------------------------------
+PUSH BLOCKED — biome ci failed. The Checks workflow runs this exact
+command, so this push would go red on GitHub.
+
+Fix most of it automatically:   npx biome check --write .
+Some rules are "unsafe fixes" and must be applied by hand — biome
+prints the suggested replacement for those.
+
+To push anyway (rarely correct):  git push --no-verify
+--------------------------------------------------------------------
+EOF
+        rm -f "$BIOME_LOG"
+        exit 1
+      fi
+    fi
+    rm -f "$BIOME_LOG"
+  fi
+fi
+
+exit 0
