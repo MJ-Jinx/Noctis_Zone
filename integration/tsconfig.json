@@ -13,5 +13,11 @@
 	// actually executes, and while they were excluded a submitter's API could
 	// change without anything flagging the CLI calling the old one. esbuild
 	// bundles without type-checking, so this is the only thing that catches it.
-	"include": ["*.ts", "cli/*.ts"]
+	//
+	// widget/ is included for the same reason: those entry points are what the
+	// browser executes, and webpack bundles them without type-checking either.
+	// Every call they make into a submitter is now checked against that
+	// submitter's real signature, so a builder cannot change shape underneath
+	// them without this failing.
+	"include": ["*.ts", "cli/*.ts", "widget/*.ts"]
 }

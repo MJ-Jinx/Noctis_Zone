@@ -42,7 +42,11 @@
 
 import type { Network as LucidNetwork, WalletApi } from '@lucid-evolution/lucid';
 import { getAddressDetails } from '@lucid-evolution/lucid';
+import { usdToMinAdaLovelace } from '../ada-price-oracle.js';
 import { type TierAClaimsConfig, TierAClaimsSubmitter } from '../tier-a-claims-submitter.js';
+
+/** The platform's flat claim fee, in USD — same figure cli/claim-creator-fees-tier-a.ts pays. */
+const PLATFORM_CLAIM_FEE_USD = 1;
 
 export interface TierADashboardWidgetConfig {
   blockfrostProjectId: string;
@@ -147,9 +151,21 @@ async function claimVested(params: { claimAmount: string; walletApi: WalletApi }
   return { txHash: result.txHash };
 }
 
+/**
+ * Claiming accrued creator fees also pays the platform's flat $1 claim fee,
+ * which the contract enforces a floor on. The submitter stays oracle-agnostic
+ * by design, so the live ADA/USD conversion happens here — the same place and
+ * the same way cli/claim-creator-fees-tier-a.ts does it, so a creator pays the
+ * same real figure whether they claim from the dashboard or the CLI.
+ *
+ * `usdToMinAdaLovelace` throws rather than guessing if the price sources
+ * disagree or are unreachable, which surfaces to the caller as a failed claim
+ * instead of a transaction the chain rejects for underpaying.
+ */
 async function claimCreatorFees(params: { amount: string; walletApi: WalletApi }): Promise<{ txHash: string }> {
   const s = requireSubmitter();
-  const result = await s.claimCreatorFeesWithWallet(params.walletApi, BigInt(params.amount));
+  const { minLovelace: platformClaimFeeLovelace } = await usdToMinAdaLovelace(PLATFORM_CLAIM_FEE_USD);
+  const result = await s.claimCreatorFeesWithWallet(params.walletApi, BigInt(params.amount), platformClaimFeeLovelace);
   return { txHash: result.txHash };
 }
 

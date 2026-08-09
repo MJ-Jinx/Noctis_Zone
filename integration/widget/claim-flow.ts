@@ -16,17 +16,30 @@
 // Serving a buyer their own allocation proof is dedicated per-buyer work:
 // it belongs behind an endpoint that returns one buyer's own leaf, which is
 // what keeps the rest of the roster private. Callers supply these three
-// values; this module deliberately fetches nothing.
+// values; this module fetches no private data.
+//
+// The cap accumulator is the deliberate exception, and it is not private:
+// it is rebuilt here from the launch's own public trade history and checked
+// against the `cap_root` the curve datum carries. Taking it from the caller
+// would mean trusting a value the chain already has the authority on, and a
+// wrong one fails at signing time with nothing useful to say.
 // ============================================================================
 
 import type { WalletApi } from '@lucid-evolution/lucid';
+import { rebuildCapAccumulator } from '../cap-accumulator-from-history.js';
 import { LucidDarkVeilClaimSubmitter, type LucidDarkVeilClaimSubmitterConfig } from '../darkveil-claim-submitter.js';
+import { TierATradeHistoryReader } from '../tier-a-trade-history-reader.js';
 
 export interface ClaimTierBParams {
   dvAmount: bigint;
   salt: Uint8Array;
   merkleProof: Array<{ sibling: Uint8Array; goesLeft: boolean }>;
   buyerKeyHash: Uint8Array;
+  /** This registrant's index in the allocation tree — selects their bit in the
+   *  curve's `claimed_bits`, and is hashed into their own leaf so it cannot be
+   *  aimed at anyone else's. Served by the same per-buyer endpoint as the
+   *  proof above, for the same privacy reason. */
+  leafIndex: number;
 }
 
 /**
@@ -40,10 +53,25 @@ export async function claimTierBTokens(
   params: ClaimTierBParams,
 ): Promise<{ txHash: string }> {
   const submitter = new LucidDarkVeilClaimSubmitter(config);
-  return submitter.claimDarkVeilTokens(walletApi, {
-    dvAmount: params.dvAmount,
-    salt: params.salt,
-    merkleProof: params.merkleProof,
-    buyerKeyHash: params.buyerKeyHash,
+  const datum = await submitter.readCurveDatum();
+  const reader = new TierATradeHistoryReader({
+    blockfrostProjectId: config.blockfrostProjectId,
+    blockfrostUrl: config.blockfrostUrl,
+    bondingCurveAddress: submitter.curveAddress,
+    launchIdHex: Buffer.from(config.launchId).toString('hex'),
+    tier: 'B',
   });
+  const capState = await rebuildCapAccumulator(reader, datum.cap_root);
+
+  return submitter.claimDarkVeilTokens(
+    walletApi,
+    {
+      dvAmount: params.dvAmount,
+      salt: params.salt,
+      merkleProof: params.merkleProof,
+      buyerKeyHash: params.buyerKeyHash,
+      leafIndex: params.leafIndex,
+    },
+    capState,
+  );
 }

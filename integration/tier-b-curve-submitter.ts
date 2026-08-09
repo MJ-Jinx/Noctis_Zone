@@ -252,6 +252,14 @@ export class LucidTierBCurveSubmitter {
     return this.config.referenceScript !== undefined;
   }
 
+  /** The curve's own script address, derived from the compiled validator.
+   *  Exposed because rebuilding the cap accumulator needs an address to read
+   *  the launch's trade history from, and deriving it a second time at the
+   *  call site would risk deriving a different one. */
+  get curveAddress(): string {
+    return this.scriptAddress;
+  }
+
   /**
    * Refuses a signer the curve will not accept, before anything is built.
    *

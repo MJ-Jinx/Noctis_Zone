@@ -90,6 +90,17 @@ export class LucidDarkVeilClaimSubmitter {
     return this.curve.claimDarkVeilTokensWithWallet(walletApi, params, capState);
   }
 
+  /** The curve's script address — see LucidTierBCurveSubmitter.curveAddress. */
+  get curveAddress(): string {
+    return this.curve.curveAddress;
+  }
+
+  /** The launch's current on-chain state, including the `cap_root` a rebuilt
+   *  accumulator has to derive. */
+  async readCurveDatum() {
+    return this.curve.readCurveDatum();
+  }
+
   /** The same claim, signed from a mnemonic — the CLI path. */
   async claimDarkVeilTokensFromMnemonic(
     buyerMnemonic: string,

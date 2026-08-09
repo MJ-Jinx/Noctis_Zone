@@ -173,6 +173,14 @@ export class LucidTierACurveSubmitter {
     this.lucidPromise = Lucid(new Blockfrost(config.blockfrostUrl, config.blockfrostProjectId), config.network);
   }
 
+  /** The curve's own script address, derived from the compiled validator.
+   *  Exposed because rebuilding the cap accumulator needs an address to read
+   *  the launch's trade history from, and deriving it a second time at the
+   *  call site would risk deriving a different one. */
+  get curveAddress(): string {
+    return this.scriptAddress;
+  }
+
   /** findCurveUtxo only ever returns a UTXO it already confirmed has a
    *  datum (it skips undatumed UTXOs while scanning below) — this just
    *  makes that invariant explicit at each call site with a clear error

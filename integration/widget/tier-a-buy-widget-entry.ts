@@ -49,11 +49,14 @@
 // ============================================================================
 
 import type { Network as LucidNetwork, WalletApi } from '@lucid-evolution/lucid';
+import { rebuildCapAccumulator } from '../cap-accumulator-from-history.js';
+import type { CapAccumulator } from '../cap-accumulator-tree.js';
 import {
   curvePriceAt,
   LucidTierACurveSubmitter,
   type LucidTierACurveSubmitterConfig,
 } from '../tier-a-curve-submitter.js';
+import { TierATradeHistoryReader } from '../tier-a-trade-history-reader.js';
 
 export interface TierABuyWidgetConfig {
   blockfrostProjectId: string;
@@ -75,9 +78,9 @@ export interface CurveStateSummary {
   currentPriceLovelace: string;
   basePrice: string;
   maxPrice: string;
-  /** Largest amount a SINGLE transaction may buy — not a lifetime limit per
-   *  wallet. The curve keeps no per-wallet history, so there is nothing to
-   *  report a running total against. */
+  /** The per-wallet lifetime cap. The curve commits to every wallet's running
+   *  total in its `cap_root`, so a buy is checked against everything that
+   *  wallet already holds, not against this one transaction's size. */
   walletCapTokens: string;
 }
 
@@ -128,6 +131,30 @@ async function getCurveState(_buyerAddress?: string): Promise<CurveStateSummary>
 }
 
 /**
+ * The launch's cap accumulator, rebuilt from its own public trade history and
+ * checked against the `cap_root` the curve datum carries.
+ *
+ * Read fresh on every buy rather than cached, for the same reason
+ * getCurveState() is: another wallet's trade moves the root, and a stale
+ * accumulator derives a proof the validator rejects. `rebuildCapAccumulator`
+ * refuses to return one that doesn't derive the on-chain root, so a partial
+ * history read fails here rather than at signing time.
+ */
+async function loadCapState(): Promise<CapAccumulator> {
+  const s = requireSubmitter();
+  const cfg = config as TierABuyWidgetConfig;
+  const datum = await s.readCurveDatum();
+  const reader = new TierATradeHistoryReader({
+    blockfrostProjectId: cfg.blockfrostProjectId,
+    blockfrostUrl: cfg.blockfrostUrl,
+    bondingCurveAddress: s.curveAddress,
+    launchIdHex: cfg.launchIdHex,
+    tier: 'A',
+  });
+  return rebuildCapAccumulator(reader, datum.cap_root);
+}
+
+/**
  * Real buy. `tokenAmount` must be a whole number of tokens (as a string, to
  * survive JSON/DOM round-tripping without float precision loss) — the
  * caller (theme JS) is responsible for converting a user's ADA input into a
@@ -140,7 +167,8 @@ async function buy(params: { tokenAmount: string; walletApi: WalletApi }): Promi
   avgPrice: string;
 }> {
   const s = requireSubmitter();
-  const result = await s.buyTokensWithWallet(params.walletApi, BigInt(params.tokenAmount));
+  const capState = await loadCapState();
+  const result = await s.buyTokensWithWallet(params.walletApi, BigInt(params.tokenAmount), capState);
   return {
     txHash: result.txHash,
     grossPayment: result.grossPayment.toString(),
