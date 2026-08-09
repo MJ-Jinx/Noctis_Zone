@@ -40,8 +40,17 @@ interface Blueprint {
 const blueprint: Blueprint = JSON.parse(
   readFileSync(join(import.meta.dirname, '..', '..', 'contracts', 'cardano', 'plutus.json'), 'utf8'),
 );
-const TIER_B = blueprint.validators.find((v) => v.title === 'bonding_curve_tier_b.bonding_curve_tier_b.spend');
-if (!TIER_B) throw new Error('blueprint is missing the Tier B curve');
+// Same lookup helper as mesh-curve-spend.test.ts: returning the validator
+// gives TIER_B a non-optional type at the declaration, which a bare find()
+// plus a throw does not — TypeScript will not carry that narrowing into a
+// hoisted function declaration, so every use inside one stays optional.
+function validator(title: string) {
+  const found = blueprint.validators.find((v) => v.title === title);
+  if (!found) throw new Error(`${title} missing from plutus.json`);
+  return found;
+}
+
+const TIER_B = validator('bonding_curve_tier_b.bonding_curve_tier_b.spend');
 
 /** A real derived payment key, at the same path the platform's custody uses. */
 function keyFromEntropy(entropyHex: string): { extendedHex: string; keyHash: string } {

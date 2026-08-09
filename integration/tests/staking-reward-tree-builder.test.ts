@@ -9,7 +9,7 @@
 import { Data } from '@lucid-evolution/lucid';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchStakeHistory } from '../staking-reward-tree-builder.js';
-import { StakingDatumSchema } from '../tier-a-schemas.js';
+import { type StakingDatumData, StakingDatumSchema } from '../tier-a-schemas.js';
 
 const LAUNCH = 'a1'.repeat(32);
 const TOKEN_POLICY = 'b2'.repeat(28);
@@ -23,7 +23,7 @@ const STAKE_TX = 'bb'.repeat(32);
 const CONFIG = { blockfrostUrl: 'https://bf.test', blockfrostProjectId: 'proj' };
 
 function poolDatum() {
-  return Data.to(
+  return Data.to<StakingDatumData>(
     {
       Pool: [
         {
@@ -43,7 +43,7 @@ function poolDatum() {
 }
 
 function positionDatum(stakerVkh: string, claimedAmount: bigint, tsMs: bigint) {
-  return Data.to(
+  return Data.to<StakingDatumData>(
     { Position: [{ launch_id: LAUNCH, staker_vkh: stakerVkh, staked_amount: claimedAmount, stake_timestamp: tsMs }] },
     StakingDatumSchema as never,
   );

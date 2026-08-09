@@ -19,5 +19,11 @@
 	// Every call they make into a submitter is now checked against that
 	// submitter's real signature, so a builder cannot change shape underneath
 	// them without this failing.
-	"include": ["*.ts", "cli/*.ts", "widget/*.ts"]
+	//
+	// tests/ is included because a test that calls a stale signature still
+	// passes for as long as no assertion happens to reach the changed code —
+	// and then it reads as coverage while proving nothing. The other two
+	// workspaces (contracts/midnight, packages/zk-proofs) have always checked
+	// their tests; this one now matches them.
+	"include": ["*.ts", "cli/*.ts", "widget/*.ts", "tests/**/*.ts"]
 }

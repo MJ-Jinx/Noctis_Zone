@@ -133,6 +133,20 @@ beforeEach(() => {
 // Pure computation functions
 // ============================================================================
 
+/**
+ * A typed view of an argument recorded by a `deployContract` /
+ * `findDeployedContract` mock.
+ *
+ * The cast goes through `unknown` deliberately. The SDK's own
+ * `CompiledContract` type does not declare `witnesses`, but the real object
+ * passed at runtime carries them — that is exactly what these tests assert
+ * on. So this is reaching past a type that describes less than the value
+ * does, not claiming a shape the SDK contradicts.
+ */
+function recorded<T>(call: unknown): T {
+  return call as T;
+}
+
 describe('computeBondingCurveFees', () => {
   it('splits a gross payment 0.5% / 1.0% (creator/platform), floored', () => {
     expect(computeBondingCurveFees(1_000_000n)).toEqual({
@@ -296,11 +310,11 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployEligibilityGate(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE, REG_NONCE);
 
-    const call = vi.mocked(deployContract).mock.calls[0][1] as {
+    const call = recorded<{
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
-    };
+    }>(vi.mocked(deployContract).mock.calls[0][1]);
     const w = call.compiledContract.witnesses;
     expect(w.getUserSecret(undefined)[1]).toEqual(USER_SK);
     expect(w.getGovernorSecret(undefined)[1]).toEqual(GOVERNOR_SK);
@@ -392,13 +406,13 @@ describe('NoctisMidnightClient.deployCreatorEscrow / connectCreatorEscrow', () =
       currency: 0,
     });
 
-    const call = vi.mocked(deployContract).mock.calls[0][1] as {
+    const call = recorded<{
       args: unknown[];
       privateStateId: string;
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
-    };
+    }>(vi.mocked(deployContract).mock.calls[0][1]);
     expect(call.privateStateId).toBe('creator_escrow');
     expect(call.args).toEqual([fakeBytes32(40), 0]);
     const w = call.compiledContract.witnesses;
@@ -410,11 +424,11 @@ describe('NoctisMidnightClient.deployCreatorEscrow / connectCreatorEscrow', () =
   it('uses an explicit communitySk when provided', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployCreatorEscrow(FAKE_PROVIDERS, { launchId: fakeBytes32(41), currency: 1 }, COMMUNITY_SK);
-    const call = vi.mocked(deployContract).mock.calls[0][1] as {
+    const call = recorded<{
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
-    };
+    }>(vi.mocked(deployContract).mock.calls[0][1]);
     expect(call.compiledContract.witnesses.getCommunitySecret(undefined)[1]).toEqual(COMMUNITY_SK);
   });
 
@@ -456,13 +470,13 @@ describe('NoctisMidnightClient.deployLpEscrow / connectLpEscrow', () => {
       launchId: fakeBytes32(60),
       lockDuration: 31_536_000n,
     });
-    const call = vi.mocked(deployContract).mock.calls[0][1] as {
+    const call = recorded<{
       args: unknown[];
       privateStateId: string;
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
-    };
+    }>(vi.mocked(deployContract).mock.calls[0][1]);
     expect(call.privateStateId).toBe('lp_escrow');
     expect(call.args).toEqual([fakeBytes32(60), 31_536_000n]);
     expect(call.compiledContract.witnesses.getCommunitySecret(undefined)[1]).toEqual(GOVERNOR_SK);
@@ -540,11 +554,11 @@ describe('NoctisMidnightClient.deployCtoGovernance / connectCtoGovernance', () =
   it('deploy defaults balanceLeafAmount/balanceProof to 0n/[] (governor deploy, no vote cast yet)', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployCtoGovernance(FAKE_PROVIDERS, args);
-    const call = vi.mocked(deployContract).mock.calls[0][1] as {
+    const call = recorded<{
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
-    };
+    }>(vi.mocked(deployContract).mock.calls[0][1]);
     const w = call.compiledContract.witnesses;
     expect(w.getBalanceLeafAmount(undefined)[1]).toBe(0n);
     expect(w.getBalanceProof(undefined)[1]).toEqual([]);
@@ -556,13 +570,13 @@ describe('NoctisMidnightClient.deployCtoGovernance / connectCtoGovernance', () =
     await client.connectCtoGovernance(FAKE_PROVIDERS, 'addr-cto-1', 12_345n, MERKLE_PROOF, 999_999n);
 
     expect(findDeployedContract).toHaveBeenCalledTimes(1);
-    const call = vi.mocked(findDeployedContract).mock.calls[0][1] as {
+    const call = recorded<{
       contractAddress: string;
       privateStateId: string;
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
-    };
+    }>(vi.mocked(findDeployedContract).mock.calls[0][1]);
     expect(call.contractAddress).toBe('addr-cto-1');
     expect(call.privateStateId).toBe('cto_governance');
     const w = call.compiledContract.witnesses;
