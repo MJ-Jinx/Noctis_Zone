@@ -1,11 +1,19 @@
 // Mirrors the `pure circuit` / `circuit` helpers in
 // contracts/midnight/staking_pool.compact (2026-07-14).
 
-import { bytes32Type, hashDomainKey, pad32, persistentHash, structType, uintType } from './compact-types.js';
+import {
+  bytes32Type,
+  hashDomainKey,
+  hashDomainKeyScoped,
+  pad32,
+  persistentHash,
+  structType,
+  uintType,
+} from './compact-types.js';
 
 /** staking_pool.compact — `deriveUserPublicKey`. */
-export function deriveUserPublicKey(secretKeyBytes: Uint8Array): Uint8Array {
-  return hashDomainKey('noctis:staking:user:pk:v1', secretKeyBytes);
+export function deriveUserPublicKey(secretKeyBytes: Uint8Array, launchId: Uint8Array): Uint8Array {
+  return hashDomainKeyScoped('noctis:staking:user:pk:v1', secretKeyBytes, launchId);
 }
 
 /** staking_pool.compact — `deriveGovernorKey`. */

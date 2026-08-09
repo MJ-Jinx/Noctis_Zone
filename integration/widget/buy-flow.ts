@@ -56,7 +56,7 @@ async function connectForBuyFlow(session: DarkVeilSession, params: BuyFlowContra
     );
   }
 
-  const buyerKey = deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER).bytes;
+  const buyerKey = deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER, params.launchIdBytes).bytes;
   return {
     client,
     manager: new NoctisLaunchManager(client),

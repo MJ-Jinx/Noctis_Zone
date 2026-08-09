@@ -69,7 +69,11 @@ const MIN_VOTER_COUNT = 15n;
 // makeWitnesses(CREATOR_FILL, ...) are the ones the circuit will recognize
 // as isCreator === true; every other fill is a regular voter.
 const CREATOR_FILL = 99;
-const CREATOR_PUBKEY = deriveUserPublicKey(fakeBytes32(CREATOR_FILL));
+// The launch every contract in this file is deployed with. Identity is scoped
+// per launch, so a key derived under any other value matches nothing on-chain.
+const LAUNCH_ID = fakeBytes32(9);
+
+const CREATOR_PUBKEY = deriveUserPublicKey(fakeBytes32(CREATOR_FILL), LAUNCH_ID);
 const VOTER_FILL = 3;
 const OTHER_VOTER_FILL = 77;
 const CHALLENGER_FILL = 55;
@@ -94,7 +98,7 @@ function deploy(
   const { init, contractAddress, ctx } = deployForTest(
     contract,
     undefined,
-    fakeBytes32(9),
+    LAUNCH_ID,
     TOTAL_SUPPLY,
     GRADUATION_TIMESTAMP,
     maxVoterCap,
@@ -127,7 +131,7 @@ function publishBalanceSnapshot(
 ) {
   const keyed = entries.map((e) => ({
     fill: e.fill,
-    voterKey: deriveUserPublicKey(fakeBytes32(e.fill)),
+    voterKey: deriveUserPublicKey(fakeBytes32(e.fill), LAUNCH_ID),
     balance: e.balance,
     heldSinceTimestamp: e.heldSinceTimestamp ?? 0n,
   }));
@@ -1002,7 +1006,7 @@ describe('cto_governance.compact — Fix (2026-07-21, Medium): executeProposal r
     // recorded state.
     const tree2 = buildBalanceSnapshotTree(
       voterFills.map((fill) => ({
-        voterKey: deriveUserPublicKey(fakeBytes32(fill)),
+        voterKey: deriveUserPublicKey(fakeBytes32(fill), LAUNCH_ID),
         balance: CREATOR_VOTE_CAP,
         heldSinceTimestamp: 0n,
       })),
@@ -1127,7 +1131,11 @@ describe('cto_governance.compact — fix (2026-07-30): concurrent-proposal coold
 
     const createTime2 = finalizeTime + 7_776_000n + 1n; // 90-day cooldown + 1s
     const tree2 = buildBalanceSnapshotTree([
-      { voterKey: deriveUserPublicKey(fakeBytes32(VOTER_FILL)), balance: CREATOR_VOTE_CAP, heldSinceTimestamp: 0n },
+      {
+        voterKey: deriveUserPublicKey(fakeBytes32(VOTER_FILL), LAUNCH_ID),
+        balance: CREATOR_VOTE_CAP,
+        heldSinceTimestamp: 0n,
+      },
     ]);
     const rSnapshot2 = d.contract.circuits.updateBalanceSnapshot(
       nextContextAtTime(d.contractAddress, ctx, Number(createTime2)),
@@ -1188,7 +1196,7 @@ describe('cto_governance.compact — anti-whale-takeover safeguard #2: minimum d
     } = deployForTest(
       contract,
       undefined,
-      fakeBytes32(9),
+      LAUNCH_ID,
       TOTAL_SUPPLY,
       GRADUATION_TIMESTAMP,
       CREATOR_VOTE_CAP,
@@ -1247,7 +1255,7 @@ describe('cto_governance.compact — anti-whale-takeover safeguard #2: minimum d
     } = deployForTest(
       contract,
       undefined,
-      fakeBytes32(9),
+      LAUNCH_ID,
       TOTAL_SUPPLY,
       GRADUATION_TIMESTAMP,
       CREATOR_VOTE_CAP,
@@ -1642,8 +1650,6 @@ describe('cto_governance.compact — an empty ballot buys no cooldown, and filin
 // particular holder's ballot on sight.
 
 describe('cto_governance.compact — ballot secrecy', () => {
-  const LAUNCH_ID = fakeBytes32(9); // what deploy() seals in
-
   function oneVoteCast() {
     const d = deployAndCreateProposal([
       { fill: VOTER_FILL, balance: CREATOR_VOTE_CAP },
@@ -1677,7 +1683,7 @@ describe('cto_governance.compact — ballot secrecy', () => {
     const st = ledger(d.ctx.currentQueryContext.state);
 
     const voterSecret = fakeBytes32(VOTER_FILL);
-    const voterPublicKey = deriveUserPublicKey(voterSecret);
+    const voterPublicKey = deriveUserPublicKey(voterSecret, LAUNCH_ID);
 
     // The value an observer could assemble from public inputs alone — the
     // voter's own snapshot leaf key, the sealed launchId, the proposal id.

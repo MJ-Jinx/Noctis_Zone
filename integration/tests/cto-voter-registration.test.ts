@@ -36,6 +36,11 @@ function realSignedRegistration(network: 'Preprod' | 'Mainnet' = 'Preprod') {
   return { address, signedMessage, paymentKeyHash };
 }
 
+// The launch these registrations are for. A voter's identity is scoped per
+// launch, so the derived key is only meaningful alongside this value.
+const LAUNCH_ID_HEX = '09'.repeat(32);
+const LAUNCH_ID = new Uint8Array(32).fill(0x09);
+
 describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cryptographic round-trip)', () => {
   it('accepts a genuinely valid CIP-8 signature and derives the expected CTO voter identity', () => {
     const { address, signedMessage } = realSignedRegistration();
@@ -44,6 +49,7 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
       cardanoAddress: address,
       cip8SignatureHex: signedMessage.signature,
       cip8KeyHex: signedMessage.key,
+      launchIdHex: LAUNCH_ID_HEX,
     });
 
     expect(result.cardanoAddress).toBe(address);
@@ -53,7 +59,7 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
     // client-side getOrCreateIdentity() would produce from this exact
     // signature -- proves server and client land on the identical identity.
     const expectedSk = deriveFromSignature(CTO_SK_DOMAIN, signedMessage.signature);
-    const expectedPubKey = deriveUserPublicKey({ bytes: expectedSk }, DOMAINS.CTO_USER);
+    const expectedPubKey = deriveUserPublicKey({ bytes: expectedSk }, DOMAINS.CTO_USER, LAUNCH_ID);
     const expectedHex = Array.from(expectedPubKey.bytes)
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
@@ -78,6 +84,7 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
         cardanoAddress: address,
         cip8SignatureHex: signedMessage.signature,
         cip8KeyHex: signedMessage.key,
+        launchIdHex: LAUNCH_ID_HEX,
       }),
     ).toThrow(/invalid cip-8 signature/i);
   });
@@ -100,6 +107,7 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
         cardanoAddress: otherAddress,
         cip8SignatureHex: signedMessage.signature,
         cip8KeyHex: signedMessage.key,
+        launchIdHex: LAUNCH_ID_HEX,
       }),
     ).toThrow();
   });
@@ -116,6 +124,7 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
         cardanoAddress: address,
         cip8SignatureHex: tampered,
         cip8KeyHex: signedMessage.key,
+        launchIdHex: LAUNCH_ID_HEX,
       }),
     ).toThrow();
   });
@@ -128,11 +137,13 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
       cardanoAddress: a.address,
       cip8SignatureHex: a.signedMessage.signature,
       cip8KeyHex: a.signedMessage.key,
+      launchIdHex: LAUNCH_ID_HEX,
     });
     const resultB = verifyAndDeriveCtoVoterIdentity({
       cardanoAddress: b.address,
       cip8SignatureHex: b.signedMessage.signature,
       cip8KeyHex: b.signedMessage.key,
+      launchIdHex: LAUNCH_ID_HEX,
     });
 
     expect(resultA.ctoVoterPubKeyHex).not.toBe(resultB.ctoVoterPubKeyHex);
@@ -163,11 +174,13 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
       cardanoAddress: address,
       cip8SignatureHex: first.signature,
       cip8KeyHex: first.key,
+      launchIdHex: LAUNCH_ID_HEX,
     });
     const resultSecond = verifyAndDeriveCtoVoterIdentity({
       cardanoAddress: address,
       cip8SignatureHex: second.signature,
       cip8KeyHex: second.key,
+      launchIdHex: LAUNCH_ID_HEX,
     });
 
     expect(resultSecond.ctoVoterPubKeyHex).toBe(resultFirst.ctoVoterPubKeyHex);

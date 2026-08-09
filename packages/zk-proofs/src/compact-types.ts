@@ -91,12 +91,34 @@ export function structType<T extends object>(
   };
 }
 
-/** A 2-element `Vector<2, Bytes<32>>` — the shape every `deriveXxxKey` helper hashes (`[pad32(domain), secretBytes]`). */
+/** A 2-element `Vector<2, Bytes<32>>` — the shape every ROLE key hashes (`[pad32(domain), secretBytes]`). */
 export const domainKeyVectorType: CompactType<Uint8Array[]> = new CompactTypeVector(2, bytes32Type);
 
-/** Hashes `[pad32(domain), secretBytes]` — the exact pattern every PSM's `deriveUserPublicKey`/`deriveGovernorKey` uses. */
+/**
+ * Hashes `[pad32(domain), secretBytes]` — the pattern every PSM's
+ * `deriveGovernorKey`/`deriveCreatorKey`/`deriveCommunityKey` uses.
+ *
+ * Do NOT fold a launch ID into this. Those roles are the same party across
+ * every launch by definition, and the Merkle-leaf hashers in this package
+ * depend on this exact two-element shape.
+ */
 export function hashDomainKey(domain: string, secretBytes: Uint8Array): Uint8Array {
   return persistentHash(domainKeyVectorType, [pad32(domain), secretBytes]);
+}
+
+/** A 3-element `Vector<3, Bytes<32>>` — the shape a launch-scoped USER key hashes. */
+export const scopedKeyVectorType: CompactType<Uint8Array[]> = new CompactTypeVector(3, bytes32Type);
+
+/**
+ * Hashes `[pad32(domain), secretBytes, launchId]` — the exact pattern every
+ * PSM's `deriveUserPublicKey` uses.
+ *
+ * The launch ID is what keeps one person's participation in two launches
+ * unlinkable: the same secret derives a different key under each, so the
+ * keys the two launches publish cannot be matched to each other.
+ */
+export function hashDomainKeyScoped(domain: string, secretBytes: Uint8Array, launchId: Uint8Array): Uint8Array {
+  return persistentHash(scopedKeyVectorType, [pad32(domain), secretBytes, launchId]);
 }
 
 export { persistentHash };

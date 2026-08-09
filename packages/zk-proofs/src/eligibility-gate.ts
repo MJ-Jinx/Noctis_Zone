@@ -3,11 +3,19 @@
 // domain separation, deliberately, so a key derived for one PSM never
 // collides with another.
 
-import { bytes32Type, hashDomainKey, pad32, persistentHash, structType, uintType } from './compact-types.js';
+import {
+  bytes32Type,
+  hashDomainKey,
+  hashDomainKeyScoped,
+  pad32,
+  persistentHash,
+  structType,
+  uintType,
+} from './compact-types.js';
 
 /** eligibility_gate.compact:127 — `deriveUserPublicKey`. */
-export function deriveUserPublicKey(secretKeyBytes: Uint8Array): Uint8Array {
-  return hashDomainKey('noctis:user:pk:v1', secretKeyBytes);
+export function deriveUserPublicKey(secretKeyBytes: Uint8Array, launchId: Uint8Array): Uint8Array {
+  return hashDomainKeyScoped('noctis:user:pk:v1', secretKeyBytes, launchId);
 }
 
 /** eligibility_gate.compact:137 — `deriveGovernorKey`. */

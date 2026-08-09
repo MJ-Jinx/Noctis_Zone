@@ -211,15 +211,20 @@ export class NoctisMidnightClient {
   }
 
   /**
-   * The caller's public key, derived the same way the eligibility gate /
-   * merged Tier C bonding curve circuit expects it. `deriveUserPublicKey`
-   * now uses the real `persistentHash`-based derivation (fixed as part of
-   * this session's compilation/verification-gap pass) and `DOMAINS.ELIGIBILITY_USER`
-   * has been corrected to the real unified post-merge domain
-   * (`'noctis:user:pk:v1'`) — this call site no longer inherits either bug.
+   * The caller's public key for ONE launch, derived the same way the
+   * eligibility gate / merged Tier C bonding curve circuit expects it,
+   * using the real `persistentHash`-based derivation under the unified
+   * post-merge domain (`'noctis:user:pk:v1'`).
+   *
+   * `launchId` must be the 32 bytes the target contract was deployed with:
+   * identity is scoped per launch, so the same secret yields a different key
+   * for every launch, and a key derived under the wrong one matches nothing
+   * on-chain. It is a parameter rather than constructor state because
+   * `treasury` is shared across launches while the other six PSMs are not —
+   * see this class's own header.
    */
-  get callerPublicKey(): Uint8Array {
-    return deriveUserPublicKey(this.userSecretKey, DOMAINS.ELIGIBILITY_USER).bytes;
+  callerPublicKeyFor(launchId: Uint8Array): Uint8Array {
+    return deriveUserPublicKey(this.userSecretKey, DOMAINS.ELIGIBILITY_USER, launchId).bytes;
   }
 
   // --- Eligibility Gate (Tier B — merged with DarkVeil, Phase 2 2026-07-11) ---

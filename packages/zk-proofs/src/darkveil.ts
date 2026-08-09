@@ -25,8 +25,9 @@ import { bytes32Type, hashDomainKey, persistentHash, structType, uintType } from
  * commitment hash that will never match what revealBuyCommit recomputes
  * on-chain — every reveal would fail. Use
  * contracts/midnight/witnesses.ts's real deriveUserPublicKey(sk,
- * DOMAINS.CURVE_USER) instead (same function also correctly covers Tier B,
- * since ELIGIBILITY_USER and CURVE_USER are the same string).
+ * DOMAINS.CURVE_USER, launchId) instead (same function also correctly
+ * covers Tier B, since ELIGIBILITY_USER and CURVE_USER are the same
+ * string). The launch ID is required: identity is scoped per launch.
  */
 export function deriveUserPublicKey(secretKeyBytes: Uint8Array): Uint8Array {
   return hashDomainKey('noctis:darkveil:user:pk:v1', secretKeyBytes);
@@ -35,8 +36,9 @@ export function deriveUserPublicKey(secretKeyBytes: Uint8Array): Uint8Array {
 /**
  * @deprecated STALE DOMAIN, DO NOT USE (2026-07-15) — same issue as
  * deriveUserPublicKey above, for the governor identity instead. Use
- * contracts/midnight/witnesses.ts's real deriveUserPublicKey(sk,
- * DOMAINS.CURVE_GOVERNOR).
+ * contracts/midnight/witnesses.ts's real deriveRoleKey(sk,
+ * DOMAINS.CURVE_GOVERNOR) — a governor is one party across every launch,
+ * so its key is not launch-scoped.
  */
 export function deriveGovernorKey(secretKeyBytes: Uint8Array): Uint8Array {
   return hashDomainKey('noctis:darkveil:governor:pk:v1', secretKeyBytes);

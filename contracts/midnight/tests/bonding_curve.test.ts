@@ -18,6 +18,10 @@ import { deployForTest, fakeBytes32, type LedgerSink, nextContext, nextContextAt
 
 type PrivateState = undefined;
 
+// The launch every contract in this file is deployed with. Identity is scoped
+// per launch, so a key derived under any other value matches nothing on-chain.
+const LAUNCH_ID = fakeBytes32(9);
+
 // Fix (2026-07-10, extended same day): bonding_curve.compact is now a
 // 3-WAY MERGE of eligibility_gate.compact + darkveil.compact +
 // bonding_curve.compact for Tier C — see the file header in
@@ -43,7 +47,7 @@ type PrivateState = undefined;
 // hashAllowlistLeaf(caller), so the off-chain tree must be built with the
 // SAME formula for the buyer's real derived identity (fakeBytes32(3)),
 // not an arbitrary opaque value.
-const BUYER_KEY = deriveUserPublicKey(fakeBytes32(3));
+const BUYER_KEY = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
 const ALLOWLIST_LEAF = hashAllowlistLeaf(BUYER_KEY);
 const ALLOWLIST_TREE = buildAllowlistTree([ALLOWLIST_LEAF]);
 const BUY_NONCE = fakeBytes32(8);
@@ -77,8 +81,6 @@ const REGISTRATION_CLOSE_TIME = 1_000_000n;
 // with a real threshold to exercise the floor itself.
 const MIN_DV_PARTICIPANTS_TEST = 1n;
 
-const LAUNCH_ID = fakeBytes32(9);
-
 // The creator's identity, distinct from the regular buyer secret
 // (fakeBytes32(3)) every other test in this file uses — same derivation
 // off-chain mirror (deriveUserPublicKey) the contract's own creatorKey
@@ -86,7 +88,7 @@ const LAUNCH_ID = fakeBytes32(9);
 // mirror (Uint8Array in/out), not the UserSecretKey/UserPublicKey struct
 // wrapper the witness type uses.
 const CREATOR_SECRET_BYTES = fakeBytes32(42);
-const CREATOR_KEY = deriveUserPublicKey(CREATOR_SECRET_BYTES);
+const CREATOR_KEY = deriveUserPublicKey(CREATOR_SECRET_BYTES, LAUNCH_ID);
 
 // Fixed payout addresses for forfeited DarkVeil bond NIGHT — real
 // unshielded addresses, not derived identities, so plain fakeBytes32 is
@@ -641,7 +643,7 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
     // "noctis:user:pk:v1") computes what buyTokens actually keys its
     // ledger writes by.
     const d = deployAndActivate();
-    const buyerDerivedKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerDerivedKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
 
     const claimedPrice = expectedPrice(0n);
     const tokenAmount = 25n;
@@ -709,9 +711,9 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
   const SECRET_A = fakeBytes32(101);
   const SECRET_B = fakeBytes32(102);
   const SECRET_C = fakeBytes32(103);
-  const KEY_A = deriveUserPublicKey(SECRET_A);
-  const KEY_B = deriveUserPublicKey(SECRET_B);
-  const KEY_C = deriveUserPublicKey(SECRET_C);
+  const KEY_A = deriveUserPublicKey(SECRET_A, LAUNCH_ID);
+  const KEY_B = deriveUserPublicKey(SECRET_B, LAUNCH_ID);
+  const KEY_C = deriveUserPublicKey(SECRET_C, LAUNCH_ID);
   const FLOOR_TREE = buildAllowlistTree([hashAllowlistLeaf(KEY_A), hashAllowlistLeaf(KEY_B), hashAllowlistLeaf(KEY_C)]);
 
   function registrantContract(secretBytes: Uint8Array, index: number) {
@@ -884,7 +886,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
   it('submitBuyCommit accepts a commitment during the Buying sub-phase, discloses nothing about the amount', () => {
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const tokenAmount = 50n;
     const commitment = computeBuyCommit({
       buyerKey,
@@ -910,7 +912,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     // key, so a second submission from the same identity always collides
     // on the same derived nullifier automatically.
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const commitment1 = computeBuyCommit({
       buyerKey,
       launchId: LAUNCH_ID,
@@ -938,7 +940,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     // proves the call is wired in structurally, not that a missing
     // payment is rejected end-to-end against a live network.
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const tokenAmount = 50n;
     const commitment = computeBuyCommit({
       buyerKey,
@@ -1007,7 +1009,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const r2 = contract.circuits.startBuying(ctxReg);
     const ctx2 = nextContext(contractAddress, r2.context);
 
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const tokenAmount = 50n; // exceeds tightCap (40)
     const commitment = computeBuyCommit({
       buyerKey,
@@ -1036,7 +1038,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     // driven specifically by baseSlot, not incidentally by the wallet cap
     // (unlike the tightCap test above).
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const tokenAmount = 50n; // exceeds baseSlot (40) but well within dvAllocation (500) and WALLET_CAP (50,000,000)
     const commitment = computeBuyCommit({
       buyerKey,
@@ -1062,7 +1064,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     // followed by a public buy for the SAME identity must respect the
     // combined total.
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const dvAmount = 30n;
     const commitment = computeBuyCommit({
       buyerKey,
@@ -1104,7 +1106,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
   it('cancelBuyCommit works before DarkVeil closes, decrements participant count', () => {
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const commitment = computeBuyCommit({
       buyerKey,
       launchId: LAUNCH_ID,
@@ -1160,7 +1162,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
   it('rejects revealBuyCommit before DarkVeil is closed', () => {
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const commitment = computeBuyCommit({
       buyerKey,
       launchId: LAUNCH_ID,
@@ -1179,7 +1181,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
   it('rejects a DarkVeil buy exceeding the total dvAllocation pool', () => {
     const d = deployAndStartDvBuying();
-    const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
     const overAmount = DV_ALLOCATION + 1n;
     const commitment = computeBuyCommit({
       buyerKey,
@@ -1221,7 +1223,7 @@ describe('bonding_curve.compact — ratio-based NIGHT bond refund', () => {
     let ctx = nextContext(d.contractAddress, r3.context);
 
     if (purchased > 0n) {
-      const buyerKey = deriveUserPublicKey(fakeBytes32(3));
+      const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
       const commitment = computeBuyCommit({
         buyerKey,
         launchId: LAUNCH_ID,

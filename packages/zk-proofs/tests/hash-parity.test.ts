@@ -33,7 +33,11 @@ type PrivateState = undefined;
 describe('eligibility-gate.ts — parity with the compiled circuit', () => {
   it('deriveUserPublicKey matches the key registerForDarkVeil derives and locks the bond under', () => {
     const sk = fakeBytes32(3);
-    const myKey = eligibilityGate.deriveUserPublicKey(sk);
+    // Must be the SAME launchId this contract is deployed with below —
+    // identity is scoped per launch, so deriving under any other value
+    // produces a key the contract never locks a bond under.
+    const launchId = fakeBytes32(9);
+    const myKey = eligibilityGate.deriveUserPublicKey(sk, launchId);
     // Design requirement: the leaf is no longer a free witness —
     // it must be hashAllowlistLeaf(myKey), matching what verifyAllowlist
     // now derives in-circuit from the caller's own identity.
@@ -58,7 +62,7 @@ describe('eligibility-gate.ts — parity with the compiled circuit', () => {
     const { contractAddress, ctx } = deployForTest(
       contract,
       undefined,
-      fakeBytes32(9), // launchId
+      launchId,
       tree.root, // allowlistRoot
       1_000_000_000n, // totalSupply
       5n, // maxWalletPercent
@@ -91,7 +95,10 @@ describe('eligibility-gate.ts — parity with the compiled circuit', () => {
 describe('cto-governance.ts — parity with the compiled circuit', () => {
   it('deriveUserPublicKey + computeVoteNullifier match what castVote derives and hasVoted checks', () => {
     const sk = fakeBytes32(11);
-    const myVoterKey = ctoGovernance.deriveUserPublicKey(sk);
+    // Same launchId the contract is deployed with below — see the
+    // eligibility-gate test above for why that has to match.
+    const launchId = fakeBytes32(9);
+    const myVoterKey = ctoGovernance.deriveUserPublicKey(sk, launchId);
     const voteWeight = 1000n;
 
     // Design requirement: castVote now requires a real
@@ -113,7 +120,6 @@ describe('cto-governance.ts — parity with the compiled circuit', () => {
       getBalanceProof: (_ctx) => [undefined, tree.getProof(0)],
     };
     const contract = new CtoGovernanceContract<PrivateState>(witnesses);
-    const launchId = fakeBytes32(9);
     const { contractAddress, ctx } = deployForTest(
       contract,
       undefined,

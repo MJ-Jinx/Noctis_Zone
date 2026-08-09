@@ -194,11 +194,16 @@ witness getRewardLeafAmount(): Uint<128>;
 // HELPER CIRCUITS
 // ============================================================================
 
-pure circuit deriveUserPublicKey(sk: UserSecretKey): UserPublicKey {
+// A staker's identity is scoped to ONE launch: the same secret derives a
+// different key under every launchId, so the key that stakes here cannot be
+// recognised as the same person staking on another launch. `launchId` is
+// sealed, so a launch cannot move a staker's identity after deployment.
+pure circuit deriveUserPublicKey(sk: UserSecretKey, launchId_: Bytes<32>): UserPublicKey {
   return UserPublicKey {
-    bytes: persistentHash<Vector<2, Bytes<32>>>([
+    bytes: persistentHash<Vector<3, Bytes<32>>>([
       pad(32, "noctis:staking:user:pk:v1"),
-      sk.bytes
+      sk.bytes,
+      launchId_
     ])
   };
 }
@@ -433,7 +438,7 @@ export circuit updateClaimFee(newAmount: Uint<128>): [] {
 // the governor's published snapshot) — NOT required by claimRewards below.
 export circuit proveStake(): Uint<128> {
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
   return verifyStakeMembership(caller.bytes);
 }
@@ -459,7 +464,7 @@ export circuit proveStake(): Uint<128> {
 // delta — not implemented here since it changes this circuit's signature.
 export circuit claimRewards(recipientAddr: Bytes<32>): [] {
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
   assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
 

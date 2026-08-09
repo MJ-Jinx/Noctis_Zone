@@ -472,11 +472,16 @@ witness getBuyNonce(): Bytes<32>;
 // Derive user public key from secret (domain-separated, same pattern as
 // FungibleToken). ONE identity for this whole merged contract now — see
 // file header's identity note.
-pure circuit deriveUserPublicKey(sk: UserSecretKey): UserPublicKey {
+// A registrant's identity is scoped to ONE launch: the same secret derives a
+// different key under every launchId, so the key that registers here cannot
+// be recognised as the same person registering for another launch. `launchId`
+// is sealed, so a launch cannot move a registrant's identity after deployment.
+pure circuit deriveUserPublicKey(sk: UserSecretKey, launchId_: Bytes<32>): UserPublicKey {
   return UserPublicKey {
-    bytes: persistentHash<Vector<2, Bytes<32>>>([
+    bytes: persistentHash<Vector<3, Bytes<32>>>([
       pad(32, "noctis:user:pk:v1"),
-      sk.bytes
+      sk.bytes,
+      launchId_
     ])
   };
 }
@@ -847,7 +852,7 @@ export circuit registerForDarkVeil(
   // Derive caller identity (before verifyAllowlist — the design requirement needs the
   // caller bytes to derive the allowlist leaf)
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
 
   // Verify allowlist membership, bound to this specific caller
@@ -930,7 +935,7 @@ export circuit claimBondRefund(recipientAddr: Bytes<32>): [] {
 
   // Derive caller identity
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
   // Phase 5 hygiene fix (2026-07-12): sanity-check the caller-supplied
   // payout destination isn't the empty/all-zero address — guards against a
@@ -972,7 +977,7 @@ export circuit claimRatioBondRefund(
   );
 
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
   // Phase 5 hygiene fix: same empty-recipient guard as claimBondRefund above.
   assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
@@ -1049,7 +1054,7 @@ export circuit submitBuyCommit(
   assert(disclose(dvState == DarkVeilState.Buying), "DarkVeil buying not active");
 
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   verifyRegistrant(caller.bytes);
 
   assert(
@@ -1122,7 +1127,7 @@ export circuit revealBuyCommit(
 
   // Verify the caller owns this commitment by recomputing it
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   const nonce = getBuyNonce();
   const recomputed = computeBuyCommit(
     caller.bytes,
@@ -1458,7 +1463,7 @@ export circuit disputeRegistrantExclusion(currentTimestamp: Uint<64>): [] {
   );
 
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
 
   assert(lockedBonds.member(disclose(caller.bytes)), "No locked bond found for caller");
@@ -1515,7 +1520,7 @@ export circuit claimDisputedBond(
   assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
 
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
 
   assert(disputedExclusions.member(disclose(caller.bytes)), "No open dispute for this registrant");

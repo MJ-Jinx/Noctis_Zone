@@ -46,8 +46,11 @@ export interface CtoSession {
   privateStore: CtoPrivateStore;
   /** Cached after first getOrCreateIdentity() call. */
   getIdentity(): Promise<CtoIdentity>;
-  /** The identity's derived public key under cto_governance.compact's own domain — this is the value createProposal/castVote will see as proposerKey/voterKey. */
-  getIdentityPublicKey(): Promise<UserPublicKey>;
+  /** The identity's derived public key for ONE launch, under
+   *  cto_governance.compact's own domain — this is the value createProposal/
+   *  castVote will see as proposerKey/voterKey. Scoped per launch, so a
+   *  voter's key on one ballot cannot be matched to their key on another. */
+  getIdentityPublicKey(launchId: Uint8Array): Promise<UserPublicKey>;
 }
 
 /** Detects available Cardano wallets for a CTO connect UI to list. */
@@ -109,9 +112,9 @@ export async function startCtoSession(cardanoWalletId: string): Promise<CtoSessi
     return identityPromise;
   }
 
-  async function getIdentityPublicKey(): Promise<UserPublicKey> {
+  async function getIdentityPublicKey(launchId: Uint8Array): Promise<UserPublicKey> {
     const identity = await getIdentity();
-    return deriveUserPublicKey(identity.userSecretKey, DOMAINS.CTO_USER);
+    return deriveUserPublicKey(identity.userSecretKey, DOMAINS.CTO_USER, launchId);
   }
 
   return { cardano, privateStore, getIdentity, getIdentityPublicKey };

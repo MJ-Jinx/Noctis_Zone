@@ -18,6 +18,10 @@ import { deployForTest, fakeBytes32, nextContext, nextContextAtTime } from './he
 
 type PrivateState = undefined;
 
+// The launch every contract in this file is deployed with. Identity is scoped
+// per launch, so a key derived under any other value matches nothing on-chain.
+const LAUNCH_ID = fakeBytes32(9);
+
 // Fix (2026-07-09): verifyAllowlist() now does real Merkle verification
 // (see contracts/midnight/eligibility_gate.compact and
 // packages/zk-proofs/tests/allowlist-merkle.test.ts for the dedicated
@@ -28,7 +32,7 @@ type PrivateState = undefined;
 // derived in-circuit as hashAllowlistLeaf(caller), so the tree must be
 // built with that same formula for the registrant's real derived identity
 // (fakeBytes32(3)), not an arbitrary opaque value.
-const REGISTRANT_KEY = deriveUserPublicKey(fakeBytes32(3));
+const REGISTRANT_KEY = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
 const ALLOWLIST_LEAF = hashAllowlistLeaf(REGISTRANT_KEY);
 const ALLOWLIST_TREE = buildAllowlistTree([ALLOWLIST_LEAF]);
 const BUY_NONCE = fakeBytes32(8);
@@ -67,14 +71,13 @@ const REGISTRATION_CLOSE_TIME = 1_000_000n;
 // minimum-participant floor. Dedicated tests further down deploy with a
 // real threshold to exercise the floor itself.
 const MIN_DV_PARTICIPANTS_TEST = 1n;
-const LAUNCH_ID = fakeBytes32(9);
 
 // The creator's identity, distinct from the regular registrant secret
 // (fakeBytes32(3)) every other test in this file uses. deriveUserPublicKey
 // here is the raw off-chain mirror (Uint8Array in, Uint8Array out) — not
 // the UserSecretKey/UserPublicKey struct wrapper the witness type uses.
 const CREATOR_SECRET_BYTES = fakeBytes32(42);
-const CREATOR_KEY = deriveUserPublicKey(CREATOR_SECRET_BYTES);
+const CREATOR_KEY = deriveUserPublicKey(CREATOR_SECRET_BYTES, LAUNCH_ID);
 
 // Equivalent fix: fixed payout addresses for the forfeited portion of a
 // ratio-based bond refund — real unshielded addresses, not derived
@@ -187,7 +190,7 @@ describe('eligibility_gate.compact — wallet cap enforcement via revealBuyCommi
     allowlistIndex: number,
     allowlistSize: bigint,
   ) {
-    const buyerKey = deriveUserPublicKey(secretBytes);
+    const buyerKey = deriveUserPublicKey(secretBytes, LAUNCH_ID);
     // Fix: each call registers exactly one fresh registrant (this
     // secretBytes) in a freshly deployed contract, so its registrant tree
     // always has exactly one leaf at index 0.
@@ -246,13 +249,13 @@ describe('eligibility_gate.compact — wallet cap enforcement via revealBuyCommi
   }
 
   it('accepts a reveal at exactly the 5% wallet cap boundary', () => {
-    const tree = buildAllowlistTree([hashAllowlistLeaf(deriveUserPublicKey(fakeBytes32(20)))]);
+    const tree = buildAllowlistTree([hashAllowlistLeaf(deriveUserPublicKey(fakeBytes32(20), LAUNCH_ID))]);
     const doReveal = revealAt(tree, fakeBytes32(20), CORRECT_WALLET_CAP, 0, 1n);
     expect(doReveal()).toBeDefined();
   });
 
   it('rejects a reveal exceeding the 5% wallet cap by even 1 token', () => {
-    const tree = buildAllowlistTree([hashAllowlistLeaf(deriveUserPublicKey(fakeBytes32(21)))]);
+    const tree = buildAllowlistTree([hashAllowlistLeaf(deriveUserPublicKey(fakeBytes32(21), LAUNCH_ID))]);
     const doReveal = revealAt(tree, fakeBytes32(21), CORRECT_WALLET_CAP + 1n, 0, 1n);
     expect(doReveal).toThrow('Purchase exceeds 5% wallet cap');
   });
@@ -267,8 +270,8 @@ describe('eligibility_gate.compact — wallet cap enforcement via revealBuyCommi
     const secretA = fakeBytes32(22);
     const secretB = fakeBytes32(23);
     const tree = buildAllowlistTree([
-      hashAllowlistLeaf(deriveUserPublicKey(secretA)),
-      hashAllowlistLeaf(deriveUserPublicKey(secretB)),
+      hashAllowlistLeaf(deriveUserPublicKey(secretA, LAUNCH_ID)),
+      hashAllowlistLeaf(deriveUserPublicKey(secretB, LAUNCH_ID)),
     ]);
     const doRevealA = revealAt(tree, secretA, CORRECT_WALLET_CAP, 0, 2n);
     const doRevealB = revealAt(tree, secretB, CORRECT_WALLET_CAP, 1, 2n);
@@ -535,9 +538,9 @@ describe('eligibility_gate.compact — minimum DarkVeil participant floor', () =
   const SECRET_A = fakeBytes32(101);
   const SECRET_B = fakeBytes32(102);
   const SECRET_C = fakeBytes32(103);
-  const KEY_A = deriveUserPublicKey(SECRET_A);
-  const KEY_B = deriveUserPublicKey(SECRET_B);
-  const KEY_C = deriveUserPublicKey(SECRET_C);
+  const KEY_A = deriveUserPublicKey(SECRET_A, LAUNCH_ID);
+  const KEY_B = deriveUserPublicKey(SECRET_B, LAUNCH_ID);
+  const KEY_C = deriveUserPublicKey(SECRET_C, LAUNCH_ID);
   const FLOOR_TREE = buildAllowlistTree([hashAllowlistLeaf(KEY_A), hashAllowlistLeaf(KEY_B), hashAllowlistLeaf(KEY_C)]);
   // Fix: separate registrant tree (same 3 leaves, different domain —
   // see registrantRoot's own comment) — published by the governor at
@@ -758,7 +761,7 @@ describe('eligibility_gate.compact — merged DarkVeil private buy (Phase 2)', (
     // taken as a free witness.
     const d = deployAndStartDvBuying();
     const outsiderSecret = fakeBytes32(88);
-    const outsiderKey = deriveUserPublicKey(outsiderSecret);
+    const outsiderKey = deriveUserPublicKey(outsiderSecret, LAUNCH_ID);
     const outsider = new Contract<PrivateState>({
       getUserSecret: (_ctx) => [undefined, { bytes: outsiderSecret }],
       getMerkleProof: (_ctx) => [undefined, ALLOWLIST_TREE.getProof(0)],
@@ -1049,7 +1052,7 @@ describe('eligibility_gate.compact — merged DarkVeil private buy (Phase 2)', (
     const r2 = contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(contractAddress, r2.context);
 
-    const buyerKey = deriveUserPublicKey(CREATOR_SECRET_BYTES);
+    const buyerKey = deriveUserPublicKey(CREATOR_SECRET_BYTES, LAUNCH_ID);
     const tokenAmount = 10n;
     const pricePerToken = DV_PRICE;
     const commitment = computeBuyCommit({
@@ -1426,8 +1429,8 @@ describe('eligibility_gate.compact — Phase 2: claimRatioBondRefund (previously
 describe('eligibility_gate.compact — registrant exclusion dispute', () => {
   const SECRET_INCL = fakeBytes32(111);
   const SECRET_EXCL = fakeBytes32(112);
-  const KEY_INCL = deriveUserPublicKey(SECRET_INCL);
-  const KEY_EXCL = deriveUserPublicKey(SECRET_EXCL);
+  const KEY_INCL = deriveUserPublicKey(SECRET_INCL, LAUNCH_ID);
+  const KEY_EXCL = deriveUserPublicKey(SECRET_EXCL, LAUNCH_ID);
 
   // Both are genuinely on the allowlist and both genuinely register. The
   // difference between them is made afterwards, by which leaves go into the

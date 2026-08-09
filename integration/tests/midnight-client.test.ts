@@ -211,14 +211,22 @@ describe('checkTreasuryHealth', () => {
 });
 
 // ============================================================================
-// NoctisMidnightClient — callerPublicKey
+// NoctisMidnightClient — callerPublicKeyFor
 // ============================================================================
 
-describe('NoctisMidnightClient.callerPublicKey', () => {
+describe('NoctisMidnightClient.callerPublicKeyFor', () => {
+  const LAUNCH_ID = new Uint8Array(32).fill(0x09);
+
   it('derives the caller public key under the ELIGIBILITY_USER domain', () => {
     const client = new NoctisMidnightClient(USER_SK);
-    const expected = deriveUserPublicKey(USER_SK, DOMAINS.ELIGIBILITY_USER).bytes;
-    expect(client.callerPublicKey).toEqual(expected);
+    const expected = deriveUserPublicKey(USER_SK, DOMAINS.ELIGIBILITY_USER, LAUNCH_ID).bytes;
+    expect(client.callerPublicKeyFor(LAUNCH_ID)).toEqual(expected);
+  });
+
+  it('derives a DIFFERENT key for a different launch, from the same secret', () => {
+    const client = new NoctisMidnightClient(USER_SK);
+    const other = new Uint8Array(32).fill(0x0a);
+    expect(client.callerPublicKeyFor(LAUNCH_ID)).not.toEqual(client.callerPublicKeyFor(other));
   });
 
   it('defaults governorSecretKey to userSecretKey when omitted', () => {
@@ -226,7 +234,9 @@ describe('NoctisMidnightClient.callerPublicKey', () => {
     // userSecretKey as the governor witness too (see eligibilityGateWitnesses'
     // own `governorSk ?? userSk` fallback, exercised end-to-end below).
     const client = new NoctisMidnightClient(USER_SK);
-    expect(client.callerPublicKey).toEqual(deriveUserPublicKey(USER_SK, DOMAINS.ELIGIBILITY_USER).bytes);
+    expect(client.callerPublicKeyFor(LAUNCH_ID)).toEqual(
+      deriveUserPublicKey(USER_SK, DOMAINS.ELIGIBILITY_USER, LAUNCH_ID).bytes,
+    );
   });
 });
 

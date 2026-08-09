@@ -29,9 +29,14 @@ import {
 
 type PrivateState = undefined;
 
+/** The launch every contract in this file is deployed with. Identity is
+ *  scoped per launch, so every leaf here must derive under this same value
+ *  or it will not match what the contract computes. */
+const LAUNCH_ID = fakeBytes32(9);
+
 /** Builds the leaf for a registrant identified by their secret-key fill. */
 function leafForFill(fill: number): Uint8Array {
-  return hashAllowlistLeaf(deriveUserPublicKey(fakeBytes32(fill)));
+  return hashAllowlistLeaf(deriveUserPublicKey(fakeBytes32(fill), LAUNCH_ID));
 }
 
 // Phase 2 security-audit fix (2026-07-11): darkveil.compact merged into
@@ -61,7 +66,7 @@ function deployWithRoot(root: Uint8Array, witnesses: Witnesses<PrivateState>) {
   const { contractAddress, ctx } = deployForTest(
     contract,
     undefined,
-    fakeBytes32(9), // launchId
+    LAUNCH_ID,
     root, // allowlistRoot
     1_000_000_000n, // totalSupply
     5n, // maxWalletPercent

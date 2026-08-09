@@ -116,19 +116,44 @@ function pad32(s: string): Uint8Array {
 
 const bytes32Type = new CompactTypeBytes(32);
 const domainKeyVectorType = new CompactTypeVector(2, bytes32Type);
+const scopedKeyVectorType = new CompactTypeVector(3, bytes32Type);
 
 /**
- * Domain-separated key derivation — matches every PSM's
+ * Domain-separated key derivation for the platform's fixed roles — matches
  * `persistentHash<Vector<2, Bytes<32>>>([pad(32, domain), sk.bytes])`
- * pattern exactly (verified against `@midnight-ntwrk/compact-runtime`'s
- * `persistentHash`, the same primitive packages/zk-proofs/src/compact-
- * types.ts's `hashDomainKey` uses and hash-parity.test.ts proves correct
- * against real compiled circuits). Security-audit fix: this used to be a
- * non-hashing byte-slice stub, silently wrong for any real on-chain
- * comparison — integration/midnight-client.ts calls this for real.
+ * (verified against `@midnight-ntwrk/compact-runtime`'s `persistentHash`,
+ * the same primitive packages/zk-proofs/src/compact-types.ts's
+ * `hashDomainKey` uses and hash-parity.test.ts proves correct against real
+ * compiled circuits). Security-audit fix: this used to be a non-hashing
+ * byte-slice stub, silently wrong for any real on-chain comparison —
+ * integration/midnight-client.ts calls this for real.
+ *
+ * Governor, creator, and community keys derive this way: those identities
+ * are the same party across every launch by definition, so there is nothing
+ * to scope. A USER's identity is a different case — see
+ * `deriveUserPublicKey` below.
  */
-export function deriveUserPublicKey(sk: UserSecretKey, domain: string): UserPublicKey {
+export function deriveRoleKey(sk: UserSecretKey, domain: string): UserPublicKey {
   return { bytes: persistentHash(domainKeyVectorType, [pad32(domain), sk.bytes]) };
+}
+
+/**
+ * A user's identity, scoped to one launch — matches every PSM's
+ * `persistentHash<Vector<3, Bytes<32>>>([pad(32, domain), sk.bytes,
+ * launchId])`.
+ *
+ * The same secret derives a DIFFERENT key under every `launchId`, so one
+ * person's participation in two launches cannot be linked by comparing the
+ * keys those launches publish. Each contract's `launchId` is a sealed
+ * ledger field, so the scope is fixed at deployment and a launch cannot
+ * move an identity afterwards.
+ *
+ * `launchId` must be the same 32 bytes the target contract was deployed
+ * with; a key derived under any other value will not match anything
+ * on-chain.
+ */
+export function deriveUserPublicKey(sk: UserSecretKey, domain: string, launchId: Uint8Array): UserPublicKey {
+  return { bytes: persistentHash(scopedKeyVectorType, [pad32(domain), sk.bytes, launchId]) };
 }
 
 // NOTE: there are deliberately no random secret/nonce generators here.

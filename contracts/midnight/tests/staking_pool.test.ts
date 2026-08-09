@@ -20,6 +20,10 @@ const CREATOR_FILL = 3;
 // — the deployer computes deriveCreatorKey(realSecret) off-chain and supplies
 // the resulting public key directly, same convention as
 // cto_governance.compact's creatorPubKey_ constructor argument.
+// The launch every contract in this file is deployed with. Identity is scoped
+// per launch, so a key derived under any other value matches nothing on-chain.
+const LAUNCH_ID = fakeBytes32(9);
+
 const CREATOR_PUBKEY = deriveCreatorKey(fakeBytes32(CREATOR_FILL));
 
 function makeWitnesses(
@@ -58,7 +62,7 @@ function deploy() {
   const { init, contractAddress, ctx } = deployForTest(
     contract,
     undefined,
-    fakeBytes32(9), // launchId
+    LAUNCH_ID,
     CREATOR_PUBKEY,
     PLATFORM_ADDR,
     INITIAL_CLAIM_FEE,
@@ -71,7 +75,7 @@ function deploy() {
 function publishStakeSnapshot(d: ReturnType<typeof deploy>, entries: Array<{ fill: number; stakedAmount: bigint }>) {
   const keyed = entries.map((e) => ({
     fill: e.fill,
-    stakerKey: deriveUserPublicKey(fakeBytes32(e.fill)),
+    stakerKey: deriveUserPublicKey(fakeBytes32(e.fill), LAUNCH_ID),
     stakedAmount: e.stakedAmount,
   }));
   const tree = buildStakeSnapshotTree(keyed.map(({ stakerKey, stakedAmount }) => ({ stakerKey, stakedAmount })));
@@ -99,7 +103,7 @@ function publishRewardRoot(
 ) {
   const keyed = entries.map((e) => ({
     fill: e.fill,
-    stakerKey: deriveUserPublicKey(fakeBytes32(e.fill)),
+    stakerKey: deriveUserPublicKey(fakeBytes32(e.fill), LAUNCH_ID),
     cumulativeAmount: e.cumulativeAmount,
   }));
   const tree = buildRewardTree(keyed.map(({ stakerKey, cumulativeAmount }) => ({ stakerKey, cumulativeAmount })));
@@ -291,7 +295,7 @@ describe('staking_pool.compact — claimRewards', () => {
     const r = staker.circuits.claimRewards(ctx, STAKER_ADDR);
     const state = ledger(r.context.currentQueryContext.state);
     expect(state.poolBalance).toBe(7_000n); // 10_000 - 3_000
-    expect(state.claimedRewards.lookup(deriveUserPublicKey(fakeBytes32(STAKER_FILL)))).toBe(3_000n);
+    expect(state.claimedRewards.lookup(deriveUserPublicKey(fakeBytes32(STAKER_FILL), LAUNCH_ID))).toBe(3_000n);
   });
 
   it('rejects a tampered reward proof', () => {
@@ -332,7 +336,7 @@ describe('staking_pool.compact — claimRewards', () => {
     const r2 = staker2.circuits.claimRewards(ctx3, STAKER_ADDR);
     const state = ledger(r2.context.currentQueryContext.state);
     // Delta claimed this time: 5,000 - 3,000 = 2,000
-    expect(state.claimedRewards.lookup(deriveUserPublicKey(fakeBytes32(STAKER_FILL)))).toBe(5_000n);
+    expect(state.claimedRewards.lookup(deriveUserPublicKey(fakeBytes32(STAKER_FILL), LAUNCH_ID))).toBe(5_000n);
     expect(state.poolBalance).toBe(5_000n); // 10_000 - 3_000 (1st) - 2_000 (2nd)
   });
 

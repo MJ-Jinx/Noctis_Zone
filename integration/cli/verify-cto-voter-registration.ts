@@ -24,18 +24,22 @@ interface VerifyRegistrationInput {
   cardanoAddress: string;
   cip8SignatureHex: string;
   cip8KeyHex: string;
+  /** The launch whose ballot this registration is for — a voter's identity is
+   *  scoped per launch, so the derived key differs for each. */
+  launchIdHex: string;
 }
 
 async function main() {
   const raw = await readStdin();
   const input = parseJsonStdin<VerifyRegistrationInput>(raw);
 
-  requireFieldsFalsy(input, ['cardanoAddress', 'cip8SignatureHex', 'cip8KeyHex']);
+  requireFieldsFalsy(input, ['cardanoAddress', 'cip8SignatureHex', 'cip8KeyHex', 'launchIdHex']);
 
   const result = verifyAndDeriveCtoVoterIdentity({
     cardanoAddress: input.cardanoAddress,
     cip8SignatureHex: input.cip8SignatureHex,
     cip8KeyHex: input.cip8KeyHex,
+    launchIdHex: input.launchIdHex,
   });
 
   process.stdout.write(JSON.stringify({ verified: true, ...result }));

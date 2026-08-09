@@ -59,8 +59,11 @@ export interface DarkVeilSession {
   privateStore: DarkVeilPrivateStore;
   /** Cached after first getOrCreateIdentity() call. */
   getIdentity(): Promise<DarkVeilIdentity>;
-  /** The identity's derived public key under the shared eligibility/curve domain — this is the value that becomes an allowlist leaf. */
-  getIdentityPublicKey(): Promise<UserPublicKey>;
+  /** The identity's derived public key for ONE launch, under the shared
+   *  eligibility/curve domain — this is the value that becomes an allowlist
+   *  leaf. Scoped per launch, so the same wallet presents a different key to
+   *  each one and two registrations cannot be matched to the same person. */
+  getIdentityPublicKey(launchId: Uint8Array): Promise<UserPublicKey>;
   getBuyNonce(launchContractAddressHex: string): Promise<Uint8Array>;
 }
 
@@ -139,9 +142,9 @@ export async function startDarkVeilSession(
     return identityPromise;
   }
 
-  async function getIdentityPublicKey(): Promise<UserPublicKey> {
+  async function getIdentityPublicKey(launchId: Uint8Array): Promise<UserPublicKey> {
     const identity = await getIdentity();
-    return deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER);
+    return deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER, launchId);
   }
 
   async function getBuyNonce(launchContractAddressHex: string): Promise<Uint8Array> {

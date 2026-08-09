@@ -487,11 +487,16 @@ witness getBalanceProof(): Vector<20, MerkleProofEntry>;
 // HELPER CIRCUITS
 // ============================================================================
 
-pure circuit deriveUserPublicKey(sk: UserSecretKey): UserPublicKey {
+// A voter's identity is scoped to ONE launch: the same secret derives a
+// different key under every launchId, so the key that votes here cannot be
+// recognised as the same person voting on another launch. `launchId` is
+// sealed, so a launch cannot move a voter's identity after deployment.
+pure circuit deriveUserPublicKey(sk: UserSecretKey, launchId_: Bytes<32>): UserPublicKey {
   return UserPublicKey {
-    bytes: persistentHash<Vector<2, Bytes<32>>>([
+    bytes: persistentHash<Vector<3, Bytes<32>>>([
       pad(32, "noctis:cto:user:pk:v1"),
-      sk.bytes
+      sk.bytes,
+      launchId_
     ])
   };
 }
@@ -850,7 +855,7 @@ export circuit createProposal(
 
   // Derive proposer identity
   const sk = getUserSecret();
-  const proposer = deriveUserPublicKey(sk);
+  const proposer = deriveUserPublicKey(sk, launchId);
 
   // Compute proposal ID
   const proposalId = computeProposalId(
@@ -938,7 +943,7 @@ export circuit castVote(
 
   // Derive voter identity
   const sk = getUserSecret();
-  const voter = deriveUserPublicKey(sk);
+  const voter = deriveUserPublicKey(sk, launchId);
 
   // Compute vote nullifier — prevents double-voting
   const nullifier = computeVoteNullifier(sk.bytes, launchId, proposalId);
@@ -1297,7 +1302,7 @@ export circuit bondedSilenceChallenge(
   assert(disclose(elapsed >= silenceThreshold), "Creator not silent long enough");
 
   const sk = getUserSecret();
-  const challenger = deriveUserPublicKey(sk);
+  const challenger = deriveUserPublicKey(sk, launchId);
   assert(disclose(challenger.bytes != pad(32, "")), "Invalid challenger key");
 
   // Real, ledger-enforced NIGHT bond — same receiveUnshielded pattern as
@@ -1403,7 +1408,7 @@ export circuit claimBreakGlassBondRefund(recipientAddr: Bytes<32>): [] {
   assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
 
   const sk = getUserSecret();
-  const caller = deriveUserPublicKey(sk);
+  const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(caller.bytes == breakGlassChallenge.challenger), "Only the original challenger can claim this refund");
 
   const bond = breakGlassChallenge.bondAmount;
@@ -1457,7 +1462,7 @@ export circuit claimProposalBond(proposalId: Bytes<32>, recipientAddr: Bytes<32>
   assert(disclose(proposalBonds.member(disclose(proposalId))), "No bond to claim");
 
   const sk = getUserSecret();
-  const claimant = deriveUserPublicKey(sk);
+  const claimant = deriveUserPublicKey(sk, launchId);
   assert(disclose(claimant.bytes == proposal.proposerKey), "Only the proposer can reclaim this bond");
   assert(disclose(proposalDrewQuorum(proposal)), "This ballot drew no quorum — its bond is forfeit");
   assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");

@@ -1,10 +1,18 @@
 // Mirrors the `pure circuit` helpers in contracts/midnight/cto_governance.compact.
 
-import { bytes32Type, hashDomainKey, pad32, persistentHash, structType, uintType } from './compact-types.js';
+import {
+  bytes32Type,
+  hashDomainKey,
+  hashDomainKeyScoped,
+  pad32,
+  persistentHash,
+  structType,
+  uintType,
+} from './compact-types.js';
 
 /** cto_governance.compact:158 — `deriveUserPublicKey`. */
-export function deriveUserPublicKey(secretKeyBytes: Uint8Array): Uint8Array {
-  return hashDomainKey('noctis:cto:user:pk:v1', secretKeyBytes);
+export function deriveUserPublicKey(secretKeyBytes: Uint8Array, launchId: Uint8Array): Uint8Array {
+  return hashDomainKeyScoped('noctis:cto:user:pk:v1', secretKeyBytes, launchId);
 }
 
 /** cto_governance.compact:167 — `deriveGovernorKey`. */

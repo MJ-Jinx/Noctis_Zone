@@ -49,7 +49,7 @@
 import { getAddressDetails, verifyData } from '@lucid-evolution/lucid';
 import { DOMAINS, deriveUserPublicKey, type UserSecretKey } from '../contracts/midnight/witnesses.js';
 import { CTO_MASTER_SIGNATURE_DOMAIN, CTO_SK_DOMAIN } from './cto-private-state-store.js';
-import { bytesToHex, deriveFromSignature } from './private-state-store.js';
+import { bytesToHex, deriveFromSignature, hexToBytes } from './private-state-store.js';
 
 function toUtf8Hex(s: string): string {
   return Array.from(new TextEncoder().encode(s))
@@ -64,11 +64,16 @@ export interface RegistrationInput {
   cip8SignatureHex: string;
   /** Hex COSE_Key CBOR — the `key` field CIP-30's signData returned. */
   cip8KeyHex: string;
+  /** The launch whose CTO ballot this identity is for, hex. A voter's
+   *  identity is scoped per launch, so the same wallet registers a different
+   *  key for each one — which is what stops the two registrations being
+   *  matched to the same person. */
+  launchIdHex: string;
 }
 
 export interface VerifiedCtoVoterRegistration {
   cardanoAddress: string;
-  /** deriveUserPublicKey(sk, DOMAINS.CTO_USER).bytes, hex — the Merkle leaf identity the balance-snapshot builder needs. */
+  /** deriveUserPublicKey(sk, DOMAINS.CTO_USER, launchId).bytes, hex — the Merkle leaf identity the balance-snapshot builder needs, for this launch only. */
   ctoVoterPubKeyHex: string;
 }
 
@@ -108,7 +113,7 @@ export function verifyAndDeriveCtoVoterIdentity(input: RegistrationInput): Verif
   const sk: UserSecretKey = {
     bytes: deriveFromSignature(CTO_SK_DOMAIN, input.cip8SignatureHex),
   };
-  const pubKey = deriveUserPublicKey(sk, DOMAINS.CTO_USER);
+  const pubKey = deriveUserPublicKey(sk, DOMAINS.CTO_USER, hexToBytes(input.launchIdHex));
 
   return {
     cardanoAddress: input.cardanoAddress,

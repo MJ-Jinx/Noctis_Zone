@@ -148,7 +148,7 @@ export async function submitRegistrationIntent(
   session: DarkVeilSession,
   launchId: string,
 ): Promise<{ ok: boolean; queued: boolean }> {
-  const pubKey = await session.getIdentityPublicKey();
+  const pubKey = await session.getIdentityPublicKey(hexToBytes(launchId));
   const pubKeyHex = bytesToHex(pubKey.bytes);
   const auth = await buildDarkVeilAuthProof(
     apiBase,
@@ -183,7 +183,7 @@ export async function pollAllowlistProof(
   session: DarkVeilSession,
   launchId: string,
 ): Promise<AllowlistStatus> {
-  const pubKey = await session.getIdentityPublicKey();
+  const pubKey = await session.getIdentityPublicKey(hexToBytes(launchId));
   const pubKeyHex = bytesToHex(pubKey.bytes);
   const res = await getJson<{
     ok: boolean;
@@ -253,7 +253,7 @@ export async function registerOnChain(session: DarkVeilSession, params: Register
     );
   }
 
-  const userPubKey = deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER);
+  const userPubKey = deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER, params.launchIdBytes);
   const bondCommitment = computeRegistrationCommit({
     userKey: userPubKey.bytes,
     launchId: params.launchIdBytes,
