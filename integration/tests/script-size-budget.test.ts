@@ -65,11 +65,17 @@ for (const v of blueprint.validators) {
  * the curve's own value moved by what it claims. Tier A +169, Tier B +174,
  * curve_order +196 — paid knowingly, and partly bought back by routing the
  * batch's value check through the two helpers a single trade already uses.
+ * Most recently, cto_governance +761: AnchorVoteResult now reads the launch's
+ * LP escrow UTXO as a reference input to learn when it graduated, so it
+ * carries the escrow datum's decoder. That is what the size buys — a ballot
+ * that cannot claim a window opening before the launch was eligible to hold
+ * one. Well inside the 16,384 B cap; recorded here so the growth is a
+ * decision rather than a surprise.
  */
 const RECORDED: Record<string, number> = {
   bonding_curve: 10_904,
   bonding_curve_tier_b: 13_709,
-  cto_governance: 6_609,
+  cto_governance: 7_370,
   cto_sybil_challenge: 1_294,
   curve_order: 1_775,
   launch_token_policy: 419,

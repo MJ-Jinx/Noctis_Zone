@@ -39,6 +39,7 @@
 import type { LucidEvolution, Network as LucidNetwork, SpendingValidator, UTxO } from '@lucid-evolution/lucid';
 import { Blockfrost, CredentialSchema, Data, Lucid, validatorToAddress } from '@lucid-evolution/lucid';
 import { selectLaunchUtxo } from './launch-utxo-lookup.js';
+import { LpEscrowDatumSchema } from './tier-a-schemas.js';
 
 // ============================================================================
 // DATA SCHEMAS — mirror the fresh contracts/cardano/plutus.json exactly
@@ -215,6 +216,16 @@ export interface CardanoCtoAnchorSubmitterConfig {
   compiledScriptCbor: string;
   /** Relayer's private key — pays the fee/collateral. AnchorVoteResult itself is permissionless (open relay), so this key is never required as a validator-checked signer, only as the transaction's real payer. */
   relayerPrivateKey: string;
+  /**
+   * lp_escrow.ak's compiled PlutusV3 script CBOR.
+   *
+   * Not spent, and not attached as a validator — only used to derive the
+   * address the launch's LP escrow UTXO sits at, so it can be read as a
+   * reference input. AnchorVoteResult learns when the launch graduated from
+   * that UTXO's `lock_timestamp`, which `SealLock` writes at graduation, and
+   * refuses a ballot that opened before the launch was eligible to hold one.
+   */
+  lpEscrowScriptCbor: string;
   launchId: Uint8Array;
 }
 
@@ -247,14 +258,43 @@ export async function findCtoGovernanceUtxo(
   ).utxo;
 }
 
+/**
+ * The launch's own LP escrow UTXO, for AnchorVoteResult to read graduation
+ * time from.
+ *
+ * Authenticated by the launch's LP escrow thread NFT, which is what
+ * `selectLaunchUtxo` checks — the validator does the same on its side, and it
+ * has to: a reference input is never spent, so no validator runs on it, and
+ * anyone can pay a UTXO carrying a forged datum to that address.
+ */
+export async function findLpEscrowUtxo(
+  lucid: LucidEvolution,
+  lpEscrowAddress: string,
+  launchId: Uint8Array,
+): Promise<UTxO> {
+  const utxos = await lucid.utxosAt(lpEscrowAddress);
+  return selectLaunchUtxo<{ launch_id: string; thread_nft_policy: string }>(
+    utxos,
+    lpEscrowAddress,
+    toHex(launchId),
+    'lpEscrow',
+    LpEscrowDatumSchema as never,
+  ).utxo;
+}
+
 export class CardanoCtoAnchorSubmitter {
   private lucidPromise: Promise<LucidEvolution>;
   private validator: SpendingValidator;
   private scriptAddress: string;
+  private lpEscrowAddress: string;
 
   constructor(private config: CardanoCtoAnchorSubmitterConfig) {
     this.validator = { type: 'PlutusV3', script: config.compiledScriptCbor };
     this.scriptAddress = validatorToAddress(config.network, this.validator);
+    this.lpEscrowAddress = validatorToAddress(config.network, {
+      type: 'PlutusV3',
+      script: config.lpEscrowScriptCbor,
+    });
     this.lucidPromise = Lucid(new Blockfrost(config.blockfrostUrl, config.blockfrostProjectId), config.network).then(
       (lucid) => {
         lucid.selectWallet.fromPrivateKey(config.relayerPrivateKey);
@@ -366,6 +406,8 @@ export class CardanoCtoAnchorSubmitter {
     // ActivateCurve, but bounded much tighter to satisfy the narrow-range
     // check. anchor_timestamp is expected to be the real submission time,
     // so a small symmetric margin around it is sufficient.
+    const lpEscrowUtxo = await findLpEscrowUtxo(lucid, this.lpEscrowAddress, this.config.launchId);
+
     const anchorTimestampMs = Number(params.anchorTimestamp);
     const validFrom = anchorTimestampMs - 60_000;
     const validTo = anchorTimestampMs + 60_000;
@@ -374,6 +416,11 @@ export class CardanoCtoAnchorSubmitter {
       .newTx()
       .collectFrom([anchorUtxo], Data.to<AnchorVoteResultRedeemerData>(redeemerData, AnchorVoteResultRedeemerSchema))
       .attach.SpendingValidator(this.validator)
+      // Read-only: the validator reads graduation time from here and the UTXO
+      // is left untouched. Without it the anchor cannot be built at all,
+      // which is the intended shape — a ballot has no eligibility to check
+      // against if nothing says when the launch graduated.
+      .readFrom([lpEscrowUtxo])
       .pay.ToContract(
         this.scriptAddress,
         {

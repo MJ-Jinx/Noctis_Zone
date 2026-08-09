@@ -20,10 +20,10 @@ vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
   };
 });
 
-import { Lucid } from '@lucid-evolution/lucid';
+import { Data, Lucid } from '@lucid-evolution/lucid';
 import type { VoteResultParams } from '../cardano-cto-anchor-submitter.js';
 import { CardanoCtoAnchorSubmitter, MIN_RELAYER_BOND_LOVELACE, toHex } from '../cardano-cto-anchor-submitter.js';
-import { threadNftAssetName } from '../tier-a-schemas.js';
+import { type LpEscrowDatumData, LpEscrowDatumSchema, threadNftAssetName } from '../tier-a-schemas.js';
 
 function fakeBytes(fill: number, len = 32): Uint8Array {
   return new Uint8Array(len).fill(fill);
@@ -48,6 +48,10 @@ function makeFakeTxBuilder() {
       return builder;
     }),
   };
+  builder.readFrom = vi.fn((...a: unknown[]) => {
+    calls.readFrom = a;
+    return builder;
+  });
   builder.validFrom = vi.fn((...a: unknown[]) => {
     calls.validFrom = a;
     return builder;
@@ -74,6 +78,41 @@ const LAUNCH_ID_HEX = toHex(LAUNCH_ID_BYTES);
 // one describes a UTXO that cannot exist.
 const THREAD_POLICY = 'c0ffee'.padEnd(56, '0');
 const THREAD_UNIT = THREAD_POLICY + threadNftAssetName('ctoGovernance', LAUNCH_ID_HEX);
+const LP_THREAD_UNIT = THREAD_POLICY + threadNftAssetName('lpEscrow', LAUNCH_ID_HEX);
+
+/**
+ * The launch's LP escrow UTXO, which AnchorVoteResult now reads graduation
+ * time from. `lock_timestamp` is what SealLock writes at graduation; the
+ * ballot in these tests opens well after the 90-day delay that follows it.
+ */
+const LP_ESCROW_UTXO = {
+  txHash: 'ee'.repeat(32),
+  outputIndex: 0,
+  assets: { [LP_THREAD_UNIT]: 1n, lovelace: 2_000_000n },
+  datum: Data.to<LpEscrowDatumData>(
+    {
+      launch_id: LAUNCH_ID_HEX,
+      lock_timestamp: 1_000n,
+      lock_duration: 31_536_000_000n,
+      lp_state: 'Locked',
+      governor_pub_key_hash: toHex(fakeBytes(2)),
+      community_wallet_hash: toHex(fakeBytes(1)),
+      cto_triggered: false,
+      fee_recipient_pub_key_hash: toHex(fakeBytes(3)),
+      dex_whitelist: [],
+      multisig_signers: [],
+      multisig_threshold: 1n,
+      pending_dex_change: null,
+      lp_token_policy_id: toHex(fakeBytes(4)),
+      lp_token_name: toHex(fakeBytes(5)),
+      lp_token_amount: 1_000n,
+      cto_governance_credential: { PubKeyCredential: [toHex(fakeBytes(6))] },
+      thread_nft_policy: THREAD_POLICY,
+      last_migration_timestamp: 0n,
+    },
+    LpEscrowDatumSchema,
+  ),
+};
 // A real UTXO always has a reference, and settlement outputs are tagged with
 // it — a fixture without one describes a UTXO the chain cannot produce, and
 // hides every code path that reads it.
@@ -113,7 +152,11 @@ function makeSubmitter(
 ) {
   const fakeLucid = {
     selectWallet: { fromPrivateKey: vi.fn() },
-    utxosAt: vi.fn().mockResolvedValue(withThreadNft(utxos)),
+    // Both UTXOs are returned for any address: selectLaunchUtxo picks by
+    // datum shape and role thread NFT, not by address, so each lookup finds
+    // its own and ignores the other — the same discrimination the validator
+    // makes.
+    utxosAt: vi.fn().mockResolvedValue([...withThreadNft(utxos), LP_ESCROW_UTXO]),
     newTx: () => builder,
   };
   vi.mocked(Lucid).mockResolvedValue(fakeLucid as never);
@@ -123,6 +166,9 @@ function makeSubmitter(
     blockfrostUrl: 'https://cardano-preprod.blockfrost.io/api/v0',
     network: 'Preprod',
     compiledScriptCbor: '590000',
+    // Not spent — only used to derive the address the launch's LP escrow sits
+    // at, so AnchorVoteResult can read graduation time from it.
+    lpEscrowScriptCbor: '590001',
     relayerPrivateKey: 'ed25519_sk1fakefakefake',
     launchId: LAUNCH_ID_BYTES,
   });

@@ -10,7 +10,7 @@
 //
 // Every field name/order/constructor-index mirrors contracts/cardano/
 // plutus.json's real definitions as of 2026-07-17 (bonding_curve/
-// BondingCurveDatum, vesting/VestingDatum, lp_escrow/LpEscrowDatum + their
+// BondingCurveDatum, vesting/VestingDatum, noctis/lp_escrow_datum/LpEscrowDatum + their
 // *State enums) — not .ak source comments, which can drift. Re-verify
 // against a freshly-regenerated plutus.json if any of the 3 .ak files
 // change after this date.

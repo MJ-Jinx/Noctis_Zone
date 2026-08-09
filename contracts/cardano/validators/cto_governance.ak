@@ -48,9 +48,10 @@ use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
 use aiken/interval
 use aiken/interval.{Interval, IntervalBoundType}
-use cardano/address.{Address, Credential, from_verification_key}
+use cardano/address.{Address, Credential, VerificationKey, from_verification_key}
 use cardano/assets.{PolicyId}
 use cardano/transaction.{Input, InlineDatum, Output, OutputReference, Transaction}
+use noctis/lp_escrow_datum.{Locked, LpEscrowDatum}
 use noctis/settlement
 use noctis/thread_nft
 
@@ -505,6 +506,63 @@ fn governance_nft_preserved(
 // MAIN VALIDATOR
 // ============================================================================
 
+/// CLAUDE.md's CTO_MIN_DAYS_POSTGRD (90 days), in MILLISECONDS to match
+/// Cardano's own validity range and lp_escrow's `lock_timestamp`.
+const min_post_grad_delay_ms: Int = 7_776_000_000
+
+/// Whether this launch graduated long enough ago for a ballot to be eligible.
+///
+/// The delay is a real rule in the product — a healthy launch gets runway
+/// before it can be challenged — and until now it existed only in the Midnight
+/// contract's own `createProposal`. On this side a relayer named
+/// `start_timestamp` freely, so a ballot could describe a window before the
+/// launch had graduated, or before it had graduated for long enough.
+///
+/// Graduation time is not written here and cannot be: this UTXO is created at
+/// mint, when no graduation has happened, so a field for it would sit at 0 and
+/// read as enforcement while enforcing nothing. It is read instead from the
+/// launch's own LP escrow UTXO, whose `lock_timestamp` is set by `SealLock` —
+/// which runs AT graduation, in the same transaction as the curve's
+/// `Graduate`. That makes it the one on-chain record of when this launch
+/// graduated, written by the mechanism that graduates it.
+///
+/// The reference input is authenticated by the launch's own LP escrow thread
+/// NFT, not by address. A reference input is never spent, so no validator runs
+/// on it — anyone can pay a UTXO carrying a forged datum to any address they
+/// like. Only the real escrow can carry the NFT, which is what makes reading
+/// its datum safe. Same reasoning bonding_curve.ak's `cto_vote_verified`
+/// already applies to reading THIS contract.
+fn post_graduation_delay_ok(
+  self: Transaction,
+  datum: CtoGovernanceDatum,
+  start_timestamp: Int,
+) -> Bool {
+  expect Some(lp_ref) =
+    list.find(
+      self.reference_inputs,
+      fn(input) {
+        assets.quantity_of(
+          input.output.value,
+          datum.thread_nft_policy,
+          thread_nft.thread_asset_name(
+            thread_nft.role_lp_escrow,
+            datum.launch_id,
+          ),
+        ) == 1
+      },
+    )
+  expect InlineDatum(lp_raw_datum) = lp_ref.output.datum
+  expect lp_datum: LpEscrowDatum = lp_raw_datum
+
+  and {
+    lp_datum.launch_id == datum.launch_id,
+    // 0 until SealLock runs, so this also refuses a launch that has not
+    // graduated at all — not only one that graduated too recently.
+    lp_datum.lock_timestamp != 0,
+    start_timestamp >= lp_datum.lock_timestamp + min_post_grad_delay_ms,
+  }
+}
+
 validator cto_governance {
   spend(
     datum_opt: Option<CtoGovernanceDatum>,
@@ -631,6 +689,7 @@ validator cto_governance {
           voter_floor_ok,
           quorum_ok,
           ballot_window_ok,
+          post_graduation_delay_ok(self, datum, start_timestamp),
           creator_cap_ok,
           trigger_ok,
           dissolve_ok,
@@ -901,6 +960,24 @@ fn cto_out_value(lovelace: Int) -> assets.Value {
     |> assets.add(mock_cto_nft_policy(), mock_cto_nft_name(#"01"), 1)
 }
 
+/// The same proposal, with the ballot window stated explicitly. Anchor tests
+/// need this because their ballots now sit on a real, eligibility-relative
+/// timescale, while every other consumer of mock_proposal only cares about
+/// the anchor time and is left on the original toy values.
+fn mock_proposal_windowed(
+  outcome: ProposalOutcome,
+  execution_status: ExecutionStatus,
+  start_timestamp: Int,
+  end_timestamp: Int,
+  anchor_timestamp: Int,
+) -> ProposalAnchor {
+  ProposalAnchor {
+    ..mock_proposal(outcome, execution_status, anchor_timestamp),
+    start_timestamp: start_timestamp,
+    end_timestamp: end_timestamp,
+  }
+}
+
 fn mock_proposal(
   outcome: ProposalOutcome,
   execution_status: ExecutionStatus,
@@ -940,6 +1017,93 @@ fn mock_proposal(
 // the shape: a window of the deployed width, closed before it was submitted,
 // and opened no earlier than the launch was eligible to hold a ballot at all.
 
+/// Thread NFT: the LP escrow thread NFT's asset name for a given launch id.
+fn mock_lp_nft_name(launch_id: ByteArray) -> ByteArray {
+  thread_nft.thread_asset_name(thread_nft.role_lp_escrow, launch_id)
+}
+
+/// When the launch in these fixtures graduated — lp_escrow's `lock_timestamp`,
+/// written by `SealLock` in the same transaction as the curve's `Graduate`.
+const mock_grad_ts: Int = 1_000
+
+/// The earliest a ballot may open for that launch. Every anchor fixture below
+/// is expressed relative to this rather than to a bare number, so each one
+/// states the rule it is satisfying instead of carrying a magic timestamp.
+const eligible_start: Int = mock_grad_ts + min_post_grad_delay_ms
+
+/// The launch's LP escrow datum. Only launch_id and lock_timestamp are read
+/// by this contract; the rest are the shape the type requires.
+fn mock_lp_datum(lock_timestamp: Int) -> LpEscrowDatum {
+  LpEscrowDatum {
+    launch_id: #"01",
+    lock_timestamp: lock_timestamp,
+    lock_duration: 31_536_000_000,
+    lp_state: Locked,
+    governor_pub_key_hash: #"11",
+    community_wallet_hash: #"22",
+    cto_triggered: False,
+    fee_recipient_pub_key_hash: #"33",
+    dex_whitelist: [],
+    multisig_signers: [],
+    multisig_threshold: 1,
+    pending_dex_change: None,
+    lp_token_policy_id: #"44",
+    lp_token_name: #"55",
+    lp_token_amount: 1_000,
+    cto_governance_credential: VerificationKey(#"66"),
+    thread_nft_policy: mock_cto_nft_policy(),
+    last_migration_timestamp: 0,
+  }
+}
+
+/// An LP escrow UTXO carrying the RIGHT thread NFT but a datum naming a
+/// different launch. The NFT's asset name only commits to the first 31 bytes
+/// of a launch id, so the NFT alone does not fully bind which launch the datum
+/// describes — the datum's own launch_id is what closes that.
+fn mock_lp_ref_input_foreign_datum() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: #"dd",
+      output_index: 0,
+    },
+    output: Output {
+      address: from_verification_key(#"1e"),
+      value: assets.from_asset(
+        mock_cto_nft_policy(),
+        mock_lp_nft_name(#"01"),
+        1,
+      ),
+      datum: InlineDatum(
+        LpEscrowDatum { ..mock_lp_datum(mock_grad_ts), launch_id: #"99" },
+      ),
+      reference_script: None,
+    },
+  }
+}
+
+/// The launch's real LP escrow UTXO, as a reference input: sealed, carrying
+/// the genuine LP escrow thread NFT. `post_graduation_delay_ok` finds it by
+/// that NFT, so a fixture without it is not merely incomplete — the validator
+/// cannot find a graduation time at all and refuses.
+fn mock_lp_ref_input(lock_timestamp: Int) -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: #"dd",
+      output_index: 0,
+    },
+    output: Output {
+      address: from_verification_key(#"1e"),
+      value: assets.from_asset(
+        mock_cto_nft_policy(),
+        mock_lp_nft_name(#"01"),
+        1,
+      ),
+      datum: InlineDatum(mock_lp_datum(lock_timestamp)),
+      reference_script: None,
+    },
+  }
+}
+
 /// One complete AnchorVoteResult spend, parameterised only by the ballot's own
 /// timestamps, so each test below differs from a known-good anchor by exactly
 /// the thing it is testing. The validity range is built around
@@ -950,6 +1114,53 @@ fn anchor_spend_with_window(
   start_timestamp: Int,
   end_timestamp: Int,
   anchor_timestamp: Int,
+) -> Bool {
+  anchor_spend_with_window_and_grad(
+    datum,
+    start_timestamp,
+    end_timestamp,
+    anchor_timestamp,
+    mock_grad_ts,
+  )
+}
+
+/// The same spend, with the launch's graduation time varied — so a test can
+/// describe a launch that graduated too recently, or never graduated at all.
+fn anchor_spend_with_window_and_grad(
+  datum: CtoGovernanceDatum,
+  start_timestamp: Int,
+  end_timestamp: Int,
+  anchor_timestamp: Int,
+  lp_lock_timestamp: Int,
+) -> Bool {
+  anchor_spend_with_lp_ref(
+    datum,
+    start_timestamp,
+    end_timestamp,
+    anchor_timestamp,
+    mock_lp_ref_input(lp_lock_timestamp),
+  )
+}
+
+/// The known-good anchor with a known-good ballot window, and the LP escrow
+/// reference input supplied directly — so a test can hand it one that is wrong
+/// in exactly one way.
+fn anchor_spend_with_foreign_lp_datum(datum: CtoGovernanceDatum) -> Bool {
+  anchor_spend_with_lp_ref(
+    datum,
+    eligible_start,
+    eligible_start + 500,
+    eligible_start + 500,
+    mock_lp_ref_input_foreign_datum(),
+  )
+}
+
+fn anchor_spend_with_lp_ref(
+  datum: CtoGovernanceDatum,
+  start_timestamp: Int,
+  end_timestamp: Int,
+  anchor_timestamp: Int,
+  lp_ref: Input,
 ) -> Bool {
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
@@ -1002,6 +1213,7 @@ fn anchor_spend_with_window(
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [lp_ref],
       outputs: [continuing_output],
       validity_range: interval.between(anchor_timestamp - 100, anchor_timestamp + 100),
     }
@@ -1032,27 +1244,79 @@ fn anchor_spend_with_window(
 /// The control. Everything below differs from this by its timestamps alone, so
 /// a rejection means the window was rejected and not something incidental.
 test anchor_accepts_a_ballot_that_really_ran() {
-  anchor_spend_with_window(mock_datum(None), 0, 500, 500)
+  anchor_spend_with_window(
+    mock_datum(None),
+    eligible_start,
+    eligible_start + 500,
+    eligible_start + 500,
+  )
 }
 
 /// A ballot scheduled to open long after the result was submitted.
 test anchor_rejects_a_ballot_that_has_not_run() {
-  !anchor_spend_with_window(mock_datum(None), 10_000, 10_500, 500)
+  !anchor_spend_with_window(
+    mock_datum(None),
+    eligible_start + 10_000,
+    eligible_start + 10_500,
+    eligible_start + 500,
+  )
 }
 
 /// A ballot of the right width, anchored while it was still open. Voting had
 /// not finished, so the tally being claimed was not final.
 test anchor_rejects_a_result_submitted_before_the_ballot_closed() {
-  !anchor_spend_with_window(mock_datum(None), 0, 500, 450)
+  !anchor_spend_with_window(
+    mock_datum(None),
+    eligible_start,
+    eligible_start + 500,
+    eligible_start + 450,
+  )
 }
 
 /// A window narrower than the one this launch deploys with — a shortened
 /// ballot that real holders had less time to reach.
 test anchor_rejects_a_ballot_window_of_the_wrong_width() {
-  !anchor_spend_with_window(mock_datum(None), 100, 500, 500)
+  !anchor_spend_with_window(
+    mock_datum(None),
+    eligible_start + 100,
+    eligible_start + 500,
+    eligible_start + 500,
+  )
 }
 
 
+
+test anchor_rejects_graduation_time_from_another_launch() {
+  // Same known-good anchor, with the escrow reference input swapped for one
+  // that carries the right NFT and another launch's datum. Without the
+  // launch_id comparison this would be accepted, and a ballot could borrow a
+  // graduation time from a launch that graduated earlier.
+  !anchor_spend_with_foreign_lp_datum(mock_datum(None))
+}
+
+test anchor_rejects_a_ballot_opened_before_the_launch_was_eligible() {
+  // The launch graduated, but this ballot opened one millisecond inside the
+  // 90-day delay. Everything else about it is a known-good anchor.
+  !anchor_spend_with_window(
+    mock_datum(None),
+    eligible_start - 1,
+    eligible_start + 499,
+    eligible_start + 499,
+  )
+}
+
+test anchor_rejects_a_ballot_for_a_launch_that_never_graduated() {
+  // lock_timestamp is 0 until SealLock runs at graduation, so this is a
+  // launch with no graduation to measure a delay from — not merely one that
+  // graduated too recently.
+  !anchor_spend_with_window_and_grad(
+    mock_datum(None),
+    eligible_start,
+    eligible_start + 500,
+    eligible_start + 500,
+    0,
+  )
+}
 
 test anchor_vote_result_succeeds_with_quorum_met() {
   let datum = mock_datum(None)
@@ -1069,7 +1333,14 @@ test anchor_vote_result_succeeds_with_quorum_met() {
       },
     }
   // 70_000 total votes out of 1_000_000 supply = 7% > 5% quorum. Yes > No.
-  let proposal = mock_proposal(Passed, PendingExecution, 500)
+  let proposal =
+    mock_proposal_windowed(
+      Passed,
+      PendingExecution,
+      eligible_start,
+      eligible_start + 500,
+      eligible_start + 500,
+    )
   // AnchorVoteResult no longer mutates cto_state/community_wallet_hash
   // directly (that's ExecuteProposal's job now, after the challenge window)
   // — it only records the pending proposal + the relayer's posted bond.
@@ -1092,8 +1363,9 @@ test anchor_vote_result_succeeds_with_quorum_met() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1106,9 +1378,9 @@ test anchor_vote_result_succeeds_with_quorum_met() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1163,8 +1435,9 @@ test anchor_vote_result_rejects_dropping_thread_nft() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1177,9 +1450,9 @@ test anchor_vote_result_rejects_dropping_thread_nft() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1230,8 +1503,9 @@ test anchor_vote_result_rejects_wrong_launch_nft() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1244,9 +1518,9 @@ test anchor_vote_result_rejects_wrong_launch_nft() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1293,8 +1567,9 @@ test anchor_vote_result_rejects_underfunded_bond() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1307,9 +1582,9 @@ test anchor_vote_result_rejects_underfunded_bond() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1359,8 +1634,9 @@ test anchor_vote_result_rejects_unpaid_bond() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1373,9 +1649,9 @@ test anchor_vote_result_rejects_unpaid_bond() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1426,8 +1702,9 @@ test anchor_vote_result_rejects_wide_validity_range() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(0, 700_000),
+      validity_range: interval.between(eligible_start, eligible_start + 700_000),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1440,9 +1717,9 @@ test anchor_vote_result_rejects_wide_validity_range() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1488,8 +1765,9 @@ test anchor_vote_result_fails_without_quorum() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1505,9 +1783,9 @@ test anchor_vote_result_fails_without_quorum() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1557,8 +1835,9 @@ test anchor_vote_result_fails_when_voter_count_below_minimum() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -1571,9 +1850,9 @@ test anchor_vote_result_fails_when_voter_count_below_minimum() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1602,8 +1881,9 @@ test anchor_vote_result_fails_when_creator_cap_exceeded() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   // Creator cap is 1% of 1_000_000 = 10_000 (anti-whale-takeover fix,
   // 2026-07-28 — was 2% = 20_000). Creator voted 25_000 total, still over
@@ -1621,9 +1901,9 @@ test anchor_vote_result_fails_when_creator_cap_exceeded() {
       creator_yes_votes: 25_000,
       creator_no_votes: 0,
       outcome: Passed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
@@ -1677,6 +1957,7 @@ test execute_proposal_succeeds_by_governor_within_window() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
       extra_signatories: [#"22"],
@@ -1730,6 +2011,7 @@ test execute_proposal_rejects_before_challenge_window_elapsed() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
     }
@@ -1777,6 +2059,7 @@ test execute_proposal_fails_after_window_expired() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
       extra_signatories: [#"22"],
@@ -1831,6 +2114,7 @@ test execute_proposal_rejects_within_challenge_window_even_for_stranger() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
       // no signature at all — permissionless, but still inside the window
@@ -1875,6 +2159,7 @@ test expire_proposal_succeeds_after_window() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
     }
@@ -1921,6 +2206,7 @@ test expire_proposal_rejects_wide_validity_range() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       validity_range: interval.between(0, current_timestamp + 100),
     }
@@ -1963,6 +2249,7 @@ test expire_proposal_fails_before_window() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
     }
@@ -2074,6 +2361,7 @@ test void_pending_proposal_succeeds_and_slashes_bond() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output, treasury_output, ops_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
       extra_signatories: [#"22"],
@@ -2136,6 +2424,7 @@ test void_pending_proposal_rejects_for_non_governor() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output, treasury_output, ops_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
       // not the governor
@@ -2200,6 +2489,7 @@ test void_pending_proposal_rejects_after_challenge_window_elapsed() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output, treasury_output, ops_output],
       validity_range: interval.between(current_timestamp - 100, current_timestamp + 100),
       extra_signatories: [#"22"],
@@ -2248,6 +2538,7 @@ test reclaim_relayer_bond_succeeds_after_execution() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output, relayer_output],
     }
 
@@ -2313,6 +2604,7 @@ test clear_proposal_rejects_with_pending_relayer_bond() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       extra_signatories: [#"22"],
     }
@@ -2347,6 +2639,7 @@ test clear_proposal_succeeds_once_bond_settled() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
       extra_signatories: [#"22"],
     }
@@ -2383,9 +2676,9 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Failed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       execution_status: PendingExecution,
       target_dex_credential: None,
       allocation_amount: 0,
@@ -2414,8 +2707,9 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
     Transaction {
       ..transaction.placeholder,
       inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
       outputs: [continuing_output],
-      validity_range: interval.between(400, 600),
+      validity_range: interval.between(eligible_start + 400, eligible_start + 600),
     }
   let redeemer =
     AnchorVoteResult {
@@ -2428,9 +2722,9 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
       creator_yes_votes: 0,
       creator_no_votes: 0,
       outcome: Failed,
-      start_timestamp: 0,
-      end_timestamp: 500,
-      anchor_timestamp: 500,
+      start_timestamp: eligible_start,
+      end_timestamp: eligible_start + 500,
+      anchor_timestamp: eligible_start + 500,
       target_dex_credential: None,
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",

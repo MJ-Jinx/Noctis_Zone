@@ -241,7 +241,7 @@ const CASES: Array<{ name: string; shape: unknown; definition: string }> = [
     shape: OutputReferenceShape,
     definition: 'cardano/transaction/OutputReference',
   },
-  { name: 'LpEscrowDatum', shape: LpEscrowDatumShape, definition: 'lp_escrow/LpEscrowDatum' },
+  { name: 'LpEscrowDatum', shape: LpEscrowDatumShape, definition: 'noctis/lp_escrow_datum/LpEscrowDatum' },
   { name: 'StakingPoolDatum', shape: StakingPoolDatumShape, definition: 'staking_pool/StakingPoolDatum' },
   {
     name: 'StakingPositionDatum',
