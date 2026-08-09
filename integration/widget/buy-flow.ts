@@ -110,8 +110,7 @@ export async function revealBuyCommit(
     // there.
     tierCFees?: {
       claimedCreatorFee: bigint;
-      claimedTreasuryFee: bigint;
-      claimedOpsFee: bigint;
+      claimedPlatformFee: bigint;
     };
   },
 ) {

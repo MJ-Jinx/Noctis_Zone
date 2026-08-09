@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { computeBuyCommit } from '../../../packages/zk-proofs/src/darkveil.js';
 import {
   buildAllowlistTree,
+  buildRegistrantTree,
   deriveUserPublicKey,
   hashAllowlistLeaf,
+  hashRegistrantLeaf,
 } from '../../../packages/zk-proofs/src/eligibility-gate.js';
 import {
   Contract,
@@ -50,12 +52,18 @@ const LAUNCH_ID = fakeBytes32(9);
 const BUYER_KEY = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
 const ALLOWLIST_LEAF = hashAllowlistLeaf(BUYER_KEY);
 const ALLOWLIST_TREE = buildAllowlistTree([ALLOWLIST_LEAF]);
+
+// Which registrant is BUYING must stay private, so submitBuyCommit proves
+// membership in this tree rather than checking a registration nullifier that
+// would name them. Published by startBuying once registration has closed.
+const REGISTRANT_TREE = buildRegistrantTree([hashRegistrantLeaf(BUYER_KEY)]);
 const BUY_NONCE = fakeBytes32(8);
 
 const witnesses: Witnesses<PrivateState> = {
   getUserSecret: (_ctx) => [undefined, { bytes: fakeBytes32(3) }],
   getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
   getMerkleProof: (_ctx) => [undefined, ALLOWLIST_TREE.getProof(0)],
+  getRegistrantMerkleProof: (_ctx) => [undefined, REGISTRANT_TREE.getProof(0)],
   getBuyNonce: (_ctx) => [undefined, BUY_NONCE],
 };
 
@@ -505,6 +513,7 @@ describe('bonding_curve.compact — quadratic pricing', () => {
       ...witnesses,
       getUserSecret: (_ctx) => [undefined, { bytes: CREATOR_SECRET_BYTES }],
       getMerkleProof: (_ctx) => [undefined, creatorAllowlistTree.getProof(0)],
+      getRegistrantMerkleProof: (_ctx) => [undefined, REGISTRANT_TREE.getProof(0)],
     };
     const contract = new Contract<PrivateState>(creatorWitnesses);
     const { contractAddress, ctx } = deployForTest(
@@ -731,6 +740,7 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
       getUserSecret: (_ctx) => [undefined, { bytes: secretBytes }],
       getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
       getMerkleProof: (_ctx) => [undefined, FLOOR_TREE.getProof(index)],
+      getRegistrantMerkleProof: (_ctx) => [undefined, REGISTRANT_TREE.getProof(0)],
       getBuyNonce: (_ctx) => [undefined, BUY_NONCE],
     });
   }
@@ -740,6 +750,7 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
       getUserSecret: (_ctx) => [undefined, { bytes: SECRET_A }],
       getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
       getMerkleProof: (_ctx) => [undefined, FLOOR_TREE.getProof(0)],
+      getRegistrantMerkleProof: (_ctx) => [undefined, REGISTRANT_TREE.getProof(0)],
       getBuyNonce: (_ctx) => [undefined, BUY_NONCE],
     });
     const { contractAddress, ctx } = deployForTest(
@@ -781,7 +792,7 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
     const ctxB = nextContext(contractAddress, rB.context);
 
     expect(ledger(ctxB.currentQueryContext.state).registrationCount).toBe(2n);
-    expect(() => governorContract.circuits.startBuying(ctxB)).toThrow(
+    expect(() => governorContract.circuits.startBuying(ctxB, REGISTRANT_TREE.root)).toThrow(
       'Below minimum DarkVeil participant threshold — cancel instead',
     );
 
@@ -833,7 +844,7 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
     const ctxC = nextContext(contractAddress, rC.context);
 
     expect(ledger(ctxC.currentQueryContext.state).registrationCount).toBe(3n);
-    const rBuy = governorContract.circuits.startBuying(ctxC);
+    const rBuy = governorContract.circuits.startBuying(ctxC, REGISTRANT_TREE.root);
     const ctxBuying = nextContext(contractAddress, rBuy.context);
     expect(ledger(ctxBuying.currentQueryContext.state).dvState).toBe(DarkVeilState.Buying);
   });
@@ -889,7 +900,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     // dvState == Registration, so this must happen after startRegistration.
     const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg = nextContext(d.contractAddress, rReg.context);
-    const r2 = d.contract.circuits.startBuying(ctxReg);
+    const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(d.contractAddress, r2.context);
     return { ...d, ctx: ctx2 };
   }
@@ -966,7 +977,15 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
     const grossPayment = tokenAmount * DV_PRICE;
     const { creator, platform } = fees(grossPayment);
-    const r3 = d.contract.circuits.revealBuyCommit(ctx2, commitment, tokenAmount, DV_PRICE, creator, platform);
+    const r3 = d.contract.circuits.revealBuyCommit(
+      nextContextAtTime(d.contractAddress, ctx2, 3),
+      commitment,
+      tokenAmount,
+      DV_PRICE,
+      creator,
+      platform,
+      3n,
+    );
     const state = ledger(r3.context.currentQueryContext.state);
     expect(state.totalTokensCommitted).toBe(tokenAmount);
     expect(state.totalRaisedCommitted).toBe(grossPayment);
@@ -1016,7 +1035,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     // dvState == Registration, so this must happen after startRegistration.
     const rReg = contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg = nextContext(contractAddress, rReg.context);
-    const r2 = contract.circuits.startBuying(ctxReg);
+    const r2 = contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(contractAddress, r2.context);
 
     const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
@@ -1035,7 +1054,15 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
     const { creator: tightCreator, platform: tightPlatform } = fees(tokenAmount * DV_PRICE);
     expect(() =>
-      contract.circuits.revealBuyCommit(ctx4, commitment, tokenAmount, DV_PRICE, tightCreator, tightPlatform),
+      contract.circuits.revealBuyCommit(
+        nextContextAtTime(contractAddress, ctx4, 3),
+        commitment,
+        tokenAmount,
+        DV_PRICE,
+        tightCreator,
+        tightPlatform,
+        3n,
+      ),
     ).toThrow('Purchase exceeds 5% wallet cap');
   });
 
@@ -1064,7 +1091,15 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
     const { creator: baseSlotCreator, platform: baseSlotPlatform } = fees(tokenAmount * DV_PRICE);
     expect(() =>
-      d.contract.circuits.revealBuyCommit(ctx2, commitment, tokenAmount, DV_PRICE, baseSlotCreator, baseSlotPlatform),
+      d.contract.circuits.revealBuyCommit(
+        nextContextAtTime(d.contractAddress, ctx2, 3),
+        commitment,
+        tokenAmount,
+        DV_PRICE,
+        baseSlotCreator,
+        baseSlotPlatform,
+        3n,
+      ),
     ).toThrow('Exceeds per-registrant DarkVeil allocation');
   });
 
@@ -1088,7 +1123,15 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const r2 = d.contract.circuits.closeDarkVeil(ctx1, 2n, 100n);
     const ctx2 = nextContext(d.contractAddress, r2.context);
     const { creator: dvCreator, platform: dvPlatform } = fees(dvAmount * DV_PRICE);
-    const r3 = d.contract.circuits.revealBuyCommit(ctx2, commitment, dvAmount, DV_PRICE, dvCreator, dvPlatform);
+    const r3 = d.contract.circuits.revealBuyCommit(
+      nextContextAtTime(d.contractAddress, ctx2, 3),
+      commitment,
+      dvAmount,
+      DV_PRICE,
+      dvCreator,
+      dvPlatform,
+      3n,
+    );
     const ctx3 = nextContext(d.contractAddress, r3.context);
 
     // checkCap (read-only) confirms the DV reveal already counted toward
@@ -1158,12 +1201,13 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const ctx1 = nextContext(d.contractAddress, r1.context);
     const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg = nextContext(d.contractAddress, rReg.context);
-    const rBuying = d.contract.circuits.startBuying(ctxReg);
+    const rBuying = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctxBuying = nextContext(d.contractAddress, rBuying.context);
 
     const lateRegistrant = new Contract<PrivateState>({
       getUserSecret: (_ctx) => [undefined, { bytes: fakeBytes32(3) }],
       getMerkleProof: (_ctx) => [undefined, ALLOWLIST_TREE.getProof(0)],
+      getRegistrantMerkleProof: (_ctx) => [undefined, REGISTRANT_TREE.getProof(0)],
       getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
       getBuyNonce: (_ctx) => [undefined, BUY_NONCE],
     });
@@ -1187,7 +1231,15 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
 
     const { creator: notClosedCreator, platform: notClosedPlatform } = fees(50n * DV_PRICE);
     expect(() =>
-      d.contract.circuits.revealBuyCommit(ctx1, commitment, 50n, DV_PRICE, notClosedCreator, notClosedPlatform),
+      d.contract.circuits.revealBuyCommit(
+        nextContextAtTime(d.contractAddress, ctx1, 3),
+        commitment,
+        50n,
+        DV_PRICE,
+        notClosedCreator,
+        notClosedPlatform,
+        3n,
+      ),
     ).toThrow('DarkVeil not closed');
   });
 
@@ -1214,7 +1266,15 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
       // pool-wide dvAllocation (500) check this test's own name names —
       // confirmed by running it, same class of ordering nuance found in
       // eligibility_gate.test.ts's analogous test.
-      d.contract.circuits.revealBuyCommit(ctx2, commitment, overAmount, DV_PRICE, overCreator, overPlatform),
+      d.contract.circuits.revealBuyCommit(
+        nextContextAtTime(d.contractAddress, ctx2, 3),
+        commitment,
+        overAmount,
+        DV_PRICE,
+        overCreator,
+        overPlatform,
+        3n,
+      ),
     ).toThrow('Exceeds per-registrant DarkVeil allocation');
   });
 });
@@ -1231,7 +1291,7 @@ describe('bonding_curve.compact — ratio-based NIGHT bond refund', () => {
     // dvState == Registration, so this must happen after startRegistration.
     const rReg1 = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg1 = nextContext(d.contractAddress, rReg1.context);
-    const r3 = d.contract.circuits.startBuying(ctxReg1);
+    const r3 = d.contract.circuits.startBuying(ctxReg1, REGISTRANT_TREE.root);
     let ctx = nextContext(d.contractAddress, r3.context);
 
     if (purchased > 0n) {
@@ -1249,12 +1309,13 @@ describe('bonding_curve.compact — ratio-based NIGHT bond refund', () => {
       ctx = nextContext(d.contractAddress, r5.context);
       const { creator: purchasedCreator, platform: purchasedPlatform } = fees(purchased * DV_PRICE);
       const r6 = d.contract.circuits.revealBuyCommit(
-        ctx,
+        nextContextAtTime(d.contractAddress, ctx, 3),
         commitment,
         purchased,
         DV_PRICE,
         purchasedCreator,
         purchasedPlatform,
+        3n,
       );
       ctx = nextContext(d.contractAddress, r6.context);
     } else {
@@ -1364,7 +1425,7 @@ describe('bonding_curve.compact — ratio-based NIGHT bond refund', () => {
     const ctx1 = nextContext(d.contractAddress, r1.context);
     const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg = nextContext(d.contractAddress, rReg.context);
-    const r3 = d.contract.circuits.startBuying(ctxReg);
+    const r3 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx3 = nextContext(d.contractAddress, r3.context);
 
     expect(() => d.contract.circuits.claimRatioBondRefund(ctx3, fakeBytes32(5), 0n)).toThrow(
@@ -1686,7 +1747,7 @@ describe('bonding_curve.compact — lifecycle and range guards', () => {
     const ctx1 = nextContext(d.contractAddress, r1.context);
     const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg = nextContext(d.contractAddress, rReg.context);
-    const r2 = d.contract.circuits.startBuying(ctxReg);
+    const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(d.contractAddress, r2.context);
 
     expect(() => d.contract.circuits.closeDarkVeil(ctx2, 1n, 1099511627776n)).toThrow(
@@ -1715,7 +1776,7 @@ describe('bonding_curve.compact — revealing after cancellation', () => {
     const ctx1 = nextContext(d.contractAddress, r1.context);
     const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg = nextContext(d.contractAddress, rReg.context);
-    const r2 = d.contract.circuits.startBuying(ctxReg);
+    const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     let ctx = nextContext(d.contractAddress, r2.context);
 
     const purchased = 100n;
@@ -1738,7 +1799,7 @@ describe('bonding_curve.compact — revealing after cancellation', () => {
     ctx = nextContext(d.contractAddress, r5.context);
     const r6 = d.contract.circuits.activateCurve(ctx, 1000n);
     ctx = nextContext(d.contractAddress, r6.context);
-    const afterMaxDuration = 1000n + 7776000n + 1n;
+    const afterMaxDuration = 1000 + 7776000 + 1;
     const r7 = d.contract.circuits.expireCurve(nextContextAtTime(d.contractAddress, ctx, afterMaxDuration));
     ctx = nextContext(d.contractAddress, r7.context);
 
@@ -1755,13 +1816,21 @@ describe('bonding_curve.compact — revealing after cancellation', () => {
     // ghost recovering everything at no cost, which is exactly what the
     // forfeiture is there to prevent.
     expect(() =>
-      g.contract.circuits.revealBuyCommit(g.ctx, g.commitment, g.purchased, DV_PRICE, creator, platform),
+      g.contract.circuits.revealBuyCommit(
+        nextContextAtTime(g.contractAddress, g.ctx, 3),
+        g.commitment,
+        g.purchased,
+        DV_PRICE,
+        creator,
+        platform,
+        3n,
+      ),
     ).toThrow('Curve is cancelled');
   });
 
   it('still allows a reveal while the curve is running', () => {
     // The control: the deadline must not close the ordinary path.
-    const { contract, ctx } = registerBuyAndCloseForReveal(100n);
+    const { contract, contractAddress, ctx } = registerBuyAndCloseForReveal(100n);
     const { creator, platform } = fees(100n * DV_PRICE);
     const commitment = computeBuyCommit({
       buyerKey: deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID),
@@ -1770,7 +1839,17 @@ describe('bonding_curve.compact — revealing after cancellation', () => {
       pricePerToken: DV_PRICE,
       nonce: BUY_NONCE,
     });
-    expect(() => contract.circuits.revealBuyCommit(ctx, commitment, 100n, DV_PRICE, creator, platform)).not.toThrow();
+    expect(() =>
+      contract.circuits.revealBuyCommit(
+        nextContextAtTime(contractAddress, ctx, 3),
+        commitment,
+        100n,
+        DV_PRICE,
+        creator,
+        platform,
+        3n,
+      ),
+    ).not.toThrow();
   });
 });
 
@@ -1783,7 +1862,7 @@ function registerBuyAndCloseForReveal(purchased: bigint) {
   const ctx1 = nextContext(d.contractAddress, r1.context);
   const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
   const ctxReg = nextContext(d.contractAddress, rReg.context);
-  const r2 = d.contract.circuits.startBuying(ctxReg);
+  const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
   let ctx = nextContext(d.contractAddress, r2.context);
 
   const commitment = computeBuyCommit({
@@ -1814,11 +1893,186 @@ describe('bonding_curve.compact — a closed DarkVeil cannot be marked failed', 
     const ctx1 = nextContext(d.contractAddress, r1.context);
     const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
     const ctxReg = nextContext(d.contractAddress, rReg.context);
-    const r2 = d.contract.circuits.startBuying(ctxReg);
+    const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(d.contractAddress, r2.context);
     const r3 = d.contract.circuits.closeDarkVeil(ctx2, 2n, 100n);
     const ctx3 = nextContext(d.contractAddress, r3.context);
 
     expect(() => d.contract.circuits.markDarkVeilFailed(ctx3)).toThrow('DarkVeil already closed normally');
+  });
+});
+
+// ============================================================================
+// Registrant proof — buying does not name which registrant is buying
+// ============================================================================
+
+describe('bonding_curve.compact — registrant membership proof', () => {
+  /** Register, open buying under a chosen registrant root. */
+  function toBuying(root: Uint8Array = REGISTRANT_TREE.root) {
+    const { contract, contractAddress, ctx: ctx0 } = deploy();
+    const r0 = contract.circuits.advancePhase(ctx0, LaunchPhase.DarkVeil);
+    const ctx1 = nextContext(contractAddress, r0.context);
+    const r1 = contract.circuits.startRegistration(ctx1);
+    const ctx2 = nextContext(contractAddress, r1.context);
+    const rReg = contract.circuits.registerForDarkVeil(ctx2, fakeBytes32(7));
+    const ctx3 = nextContext(contractAddress, rReg.context);
+    const r2 = contract.circuits.startBuying(ctx3, root);
+    return { contract, contractAddress, ctx: nextContext(contractAddress, r2.context) };
+  }
+
+  it('publishes the registrant root when buying opens', () => {
+    const b = toBuying();
+    expect(ledger(b.ctx.currentQueryContext.state).registrantRoot).toEqual(REGISTRANT_TREE.root);
+  });
+
+  it('accepts a commitment from a registrant who can prove membership', () => {
+    const b = toBuying();
+    const commitment = computeBuyCommit({
+      buyerKey: BUYER_KEY,
+      launchId: LAUNCH_ID,
+      tokenAmount: 50n,
+      pricePerToken: DV_PRICE,
+      nonce: BUY_NONCE,
+    });
+    expect(() => b.contract.circuits.submitBuyCommit(b.ctx, commitment, 1n)).not.toThrow();
+  });
+
+  it('refuses a commitment when the published root does not contain the caller', () => {
+    // The whole point of the proof: membership is what authorises a commit,
+    // and a root built from somebody else cannot be walked to.
+    const otherTree = buildRegistrantTree([hashRegistrantLeaf(fakeBytes32(77))]);
+    const b = toBuying(otherTree.root);
+    const commitment = computeBuyCommit({
+      buyerKey: BUYER_KEY,
+      launchId: LAUNCH_ID,
+      tokenAmount: 50n,
+      pricePerToken: DV_PRICE,
+      nonce: BUY_NONCE,
+    });
+    expect(() => b.contract.circuits.submitBuyCommit(b.ctx, commitment, 1n)).toThrow('Invalid registrant proof');
+  });
+});
+
+// ============================================================================
+// Registrant exclusion dispute
+// ============================================================================
+// A published root and the bond ledger are written by different parties, so
+// nothing forces them to agree. A registrant left out of the root cannot
+// prove membership, cannot buy, and settles against a purchase of zero —
+// which by state alone looks exactly like someone who chose not to buy.
+//
+// These tests pin the difference: the evidence that can be produced.
+
+describe('bonding_curve.compact — registrant exclusion dispute', () => {
+  const CLOSE_TS = 2n;
+  const REVEAL_WINDOW = 2592000n; // 30 days
+  const DISPUTE_WINDOW = 259200n; // 72 hours
+
+  /** Register, open buying under `root`, then close DarkVeil. */
+  function registeredAndClosed(root: Uint8Array) {
+    const { contract, contractAddress, ctx: ctx0 } = deploy();
+    const r0 = contract.circuits.advancePhase(ctx0, LaunchPhase.DarkVeil);
+    const c1 = nextContext(contractAddress, r0.context);
+    const r1 = contract.circuits.startRegistration(c1);
+    const c2 = nextContext(contractAddress, r1.context);
+    const rReg = contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    const c3 = nextContext(contractAddress, rReg.context);
+    const r2 = contract.circuits.startBuying(c3, root);
+    const c4 = nextContext(contractAddress, r2.context);
+    const r3 = contract.circuits.closeDarkVeil(c4, CLOSE_TS, 100n);
+    return { contract, contractAddress, ctx: nextContext(contractAddress, r3.context) };
+  }
+
+  /** A root that omits the real registrant. */
+  const EXCLUDING_ROOT = buildRegistrantTree([hashRegistrantLeaf(fakeBytes32(77))]).root;
+
+  it('lets an excluded registrant open a dispute', () => {
+    const d = registeredAndClosed(EXCLUDING_ROOT);
+    const at = nextContextAtTime(d.contractAddress, d.ctx, 10);
+    const r = d.contract.circuits.disputeRegistrantExclusion(at, 10n);
+    const state = ledger(r.context.currentQueryContext.state);
+    expect(state.disputedExclusions.member(BUYER_KEY)).toBe(true);
+    expect(state.disputedExclusions.lookup(BUYER_KEY)).toBe(10n + DISPUTE_WINDOW);
+  });
+
+  it('pays an unanswered dispute back in full once both windows have elapsed', () => {
+    const d = registeredAndClosed(EXCLUDING_ROOT);
+    const at = nextContextAtTime(d.contractAddress, d.ctx, 10);
+    const r = d.contract.circuits.disputeRegistrantExclusion(at, 10n);
+    const c = nextContext(d.contractAddress, r.context);
+
+    const after = CLOSE_TS + REVEAL_WINDOW + 1n;
+    const atLater = nextContextAtTime(d.contractAddress, c, Number(after));
+    const rc = d.contract.circuits.claimDisputedBond(atLater, fakeBytes32(5), after);
+
+    // Paid out means the bond is cleared, not merely marked.
+    expect(ledger(rc.context.currentQueryContext.state).lockedBonds.lookup(BUYER_KEY)).toBe(0n);
+  });
+
+  it('refuses the payout while the reveal window is still open', () => {
+    // A reveal can still land, so concluding this registrant bought nothing
+    // is not safe yet — paying in full here would pay where a ratio refund
+    // was owed.
+    const d = registeredAndClosed(EXCLUDING_ROOT);
+    const at = nextContextAtTime(d.contractAddress, d.ctx, 10);
+    const r = d.contract.circuits.disputeRegistrantExclusion(at, 10n);
+    const c = nextContext(d.contractAddress, r.context);
+
+    const early = 10n + DISPUTE_WINDOW + 1n; // dispute window elapsed, reveal window has not
+    const atEarly = nextContextAtTime(d.contractAddress, c, Number(early));
+    expect(() => d.contract.circuits.claimDisputedBond(atEarly, fakeBytes32(5), early)).toThrow(
+      'Reveal window has not closed yet',
+    );
+  });
+
+  it('refuses the payout before the dispute window has elapsed', () => {
+    const d = registeredAndClosed(EXCLUDING_ROOT);
+    const late = CLOSE_TS + REVEAL_WINDOW + 1n;
+    const at = nextContextAtTime(d.contractAddress, d.ctx, Number(late));
+    const r = d.contract.circuits.disputeRegistrantExclusion(at, late);
+    const c = nextContext(d.contractAddress, r.context);
+
+    const stillEarly = late + 1n; // reveal window closed, dispute window has not run
+    const atStillEarly = nextContextAtTime(d.contractAddress, c, Number(stillEarly));
+    expect(() => d.contract.circuits.claimDisputedBond(atStillEarly, fakeBytes32(5), stillEarly)).toThrow(
+      'Dispute window has not elapsed',
+    );
+  });
+
+  it('lets ANYONE answer a dispute by producing the registrant path, and that closes the payout', () => {
+    // Permissionless on purpose: the tree is public, so recovery never waits
+    // on the key that published the root.
+    const d = registeredAndClosed(REGISTRANT_TREE.root); // registrant IS in the tree
+    const at = nextContextAtTime(d.contractAddress, d.ctx, 10);
+    const r = d.contract.circuits.disputeRegistrantExclusion(at, 10n);
+    const c = nextContext(d.contractAddress, r.context);
+
+    const rr = d.contract.circuits.rebutRegistrantExclusion(c, BUYER_KEY);
+    const c2 = nextContext(d.contractAddress, rr.context);
+    expect(ledger(c2.currentQueryContext.state).rebuttedExclusions.member(BUYER_KEY)).toBe(true);
+
+    const after = CLOSE_TS + REVEAL_WINDOW + 1n;
+    const atLater = nextContextAtTime(d.contractAddress, c2, Number(after));
+    expect(() => d.contract.circuits.claimDisputedBond(atLater, fakeBytes32(5), after)).toThrow(
+      'membership in the tree was shown',
+    );
+  });
+
+  it('cannot answer a dispute without a real path', () => {
+    const d = registeredAndClosed(EXCLUDING_ROOT);
+    const at = nextContextAtTime(d.contractAddress, d.ctx, 10);
+    const r = d.contract.circuits.disputeRegistrantExclusion(at, 10n);
+    const c = nextContext(d.contractAddress, r.context);
+
+    expect(() => d.contract.circuits.rebutRegistrantExclusion(c, BUYER_KEY)).toThrow('Invalid registrant proof');
+  });
+
+  it('refuses a second dispute from the same registrant', () => {
+    const d = registeredAndClosed(EXCLUDING_ROOT);
+    const at = nextContextAtTime(d.contractAddress, d.ctx, 10);
+    const r = d.contract.circuits.disputeRegistrantExclusion(at, 10n);
+    const c = nextContext(d.contractAddress, r.context);
+    const at2 = nextContextAtTime(d.contractAddress, c, 11);
+    expect(() => d.contract.circuits.disputeRegistrantExclusion(at2, 11n)).toThrow('Exclusion already disputed');
   });
 });

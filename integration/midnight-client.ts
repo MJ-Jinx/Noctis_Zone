@@ -893,12 +893,14 @@ export class NoctisLaunchManager {
    * itself is still payment-free by design — real Tier B settlement
    * happens on Cardano via ClaimDarkVeilTokens, not here.
    *
-   * Fix (2026-07-30): Tier B's revealBuyCommit now takes a real
-   * currentTimestamp, bound to real chain time (blockTimeGte/blockTimeLte),
-   * enforcing a 30-day reveal window after DarkVeil closes — an unrevealed
-   * Open commitment could otherwise sit forever. `currentTimestamp` is a
-   * required param here for that reason; Tier C's revealBuyCommit doesn't
-   * take one (unchanged in this pass) and simply ignores it.
+   * Both tiers take a real currentTimestamp, bound to real chain time
+   * (blockTimeGte/blockTimeLte), enforcing a 30-day reveal window after
+   * DarkVeil closes — an unrevealed Open commitment could otherwise sit
+   * forever, and nothing downstream could conclude a registrant did not buy.
+   *
+   * Tier C's fee arguments are creator and platform. The treasury/ops pair
+   * they used to be became one platform slice, and this pass-through still
+   * named the old three when it was reached.
    */
   async revealDarkVeilBuyCommit(
     commitment: Uint8Array,
@@ -907,14 +909,13 @@ export class NoctisLaunchManager {
     currentTimestamp: bigint,
     tierCFees?: {
       claimedCreatorFee: bigint;
-      claimedTreasuryFee: bigint;
-      claimedOpsFee: bigint;
+      claimedPlatformFee: bigint;
     },
   ) {
     if (this.client.bondingCurve && !this.client.eligibilityGate) {
       if (!tierCFees) {
         throw new Error(
-          "Tier C revealBuyCommit requires tierCFees (claimedCreatorFee/claimedTreasuryFee/claimedOpsFee) — see this method's own comment.",
+          "Tier C revealBuyCommit requires tierCFees (claimedCreatorFee/claimedPlatformFee) — see this method's own comment.",
         );
       }
       return this.client.bondingCurve.callTx.revealBuyCommit(
@@ -922,8 +923,8 @@ export class NoctisLaunchManager {
         tokenAmount,
         pricePerToken,
         tierCFees.claimedCreatorFee,
-        tierCFees.claimedTreasuryFee,
-        tierCFees.claimedOpsFee,
+        tierCFees.claimedPlatformFee,
+        currentTimestamp,
       );
     }
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;

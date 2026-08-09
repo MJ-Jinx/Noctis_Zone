@@ -887,7 +887,7 @@ describe('NoctisLaunchManager.revealDarkVeilBuyCommit', () => {
     expect(revealBuyCommit).toHaveBeenCalledWith(fakeBytes32(120), 500n, 10n, 9_000n);
   });
 
-  it('Tier C path (bondingCurve only, no eligibilityGate): requires tierCFees and calls with the 6-arg fee-bearing signature', async () => {
+  it('Tier C path (bondingCurve only, no eligibilityGate): passes creator and platform fees plus the reveal timestamp', async () => {
     const revealBuyCommit = vi.fn().mockResolvedValue({ ok: true });
     const client = new NoctisMidnightClient(USER_SK);
     client.bondingCurve = fakeHandle({ revealBuyCommit });
@@ -895,11 +895,12 @@ describe('NoctisLaunchManager.revealDarkVeilBuyCommit', () => {
 
     await manager.revealDarkVeilBuyCommit(fakeBytes32(121), 500n, 10n, 9_000n, {
       claimedCreatorFee: 5n,
-      claimedTreasuryFee: 3n,
-      claimedOpsFee: 2n,
+      claimedPlatformFee: 3n,
     });
 
-    expect(revealBuyCommit).toHaveBeenCalledWith(fakeBytes32(121), 500n, 10n, 5n, 3n, 2n);
+    // The timestamp is what the contract measures the reveal window against,
+    // so it has to reach the circuit rather than being dropped here.
+    expect(revealBuyCommit).toHaveBeenCalledWith(fakeBytes32(121), 500n, 10n, 5n, 3n, 9_000n);
   });
 
   it('Tier C path without tierCFees throws before ever calling the circuit', async () => {

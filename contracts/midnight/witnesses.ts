@@ -296,6 +296,9 @@ export type BondingCurveWitnesses = {
   getUserSecret: WitnessFn<UserSecretKey>;
   getGovernorSecret: WitnessFn<UserSecretKey>;
   getMerkleProof: WitnessFn<MerkleProofEntry[]>; // Vector<20, MerkleProofEntry>
+  // Membership in the REGISTRANT tree, which is a different tree published at
+  // a different time from the allowlist — see the twin builder above.
+  getRegistrantMerkleProof: WitnessFn<MerkleProofEntry[]>; // Vector<20, MerkleProofEntry>
   getRegistrationNonce: WitnessFn<Uint8Array>; // Bytes<32>
   getBuyNonce: WitnessFn<Uint8Array>; // Bytes<32>
 };
@@ -306,11 +309,18 @@ export function bondingCurveWitnesses(
   registrationNonce: Uint8Array,
   buyNonce: Uint8Array,
   governorSk?: UserSecretKey,
+  registrantMerkleProof?: MerkleProofEntry[],
 ): BondingCurveWitnesses {
   return {
     getUserSecret: () => [undefined, userSk],
     getGovernorSecret: () => [undefined, governorSk ?? userSk],
     getMerkleProof: () => [undefined, merkleProof],
+    // Same shape and same fallback as the Tier B builder above, deliberately:
+    // the two contracts carry the same DarkVeil circuits and their witness
+    // builders should not diverge. A proof for the wrong tree does not pass
+    // silently — verifyRegistrant recomputes the published root or the call
+    // fails.
+    getRegistrantMerkleProof: () => [undefined, registrantMerkleProof ?? merkleProof],
     getRegistrationNonce: () => [undefined, registrationNonce],
     getBuyNonce: () => [undefined, buyNonce],
   };

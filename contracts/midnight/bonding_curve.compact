@@ -216,6 +216,14 @@ struct AllowlistNodeInput {
   right: Bytes<32>;
 }
 
+// The same shape for the REGISTRANT tree. A distinct domain, so a proof built
+// for one tree can never recompute the other's root.
+struct RegistrantNodeInput {
+  domain: Bytes<32>;
+  left: Bytes<32>;
+  right: Bytes<32>;
+}
+
 // --- from darkveil.compact ---
 
 // DarkVeil's own sub-phase within the overall LaunchPhase.DarkVeil period
@@ -311,6 +319,38 @@ export ledger allowlistRoot: Bytes<32>;
 // allowlist invalidates every earlier verification on its own, with
 // nothing to clear.
 export ledger verifiedBuyers: Map<Bytes<32>, Bytes<32>>;
+
+// Merkle root over everyone who registered, published once when buying opens.
+//
+// Registering is public — lockedBonds records the key — but which registrant
+// is BUYING must not be. Proving membership in this root says "I am one of
+// the registrants" without saying which, where checking a registration
+// nullifier directly would name them.
+export ledger registrantRoot: Bytes<32>;
+
+// Registrants who have said, on chain, that they hold a bond with no path in
+// registrantRoot — mapped to the time from which they may take that bond back.
+// See the REGISTRANT EXCLUSION DISPUTE section for what this is for.
+export ledger disputedExclusions: Map<Bytes<32>, Uint<64>>;
+
+// Disputes answered by a real inclusion proof. Membership here is permanent
+// and is what separates a registrant the tree does contain — whose bond
+// forfeits on the ordinary terms — from one it does not. Kept as its own set
+// rather than by clearing the dispute, so an answered dispute cannot simply be
+// reopened and made to cost another answer.
+export ledger rebuttedExclusions: Set<Bytes<32>>;
+
+// How long an unanswered dispute must stand before the bond behind it can be
+// taken back: 72 hours, the same window a governance challenge already runs
+// for. Hardcoded rather than a constructor argument, matching
+// revealWindowSeconds' convention for a platform-wide policy constant.
+sealed ledger exclusionDisputeWindow: Uint<64>;
+
+// How long after DarkVeil closes a commitment may still be revealed: 30 days,
+// CLAUDE.md's DV_REVEAL_WINDOW_DAYS. Without a deadline an Open commitment
+// could sit in `commitments` forever with no expiry path, and nothing could
+// ever conclude that a registrant did not buy.
+sealed ledger revealWindowSeconds: Uint<64>;
 
 // Current phase of the launch (DarkVeil registration/buying vs public curve)
 export ledger phase: LaunchPhase;
@@ -551,6 +591,12 @@ witness getGovernorSecret(): UserSecretKey;
 // registrants is far beyond any realistic DarkVeil round (bond + wallet-age
 // gated), for 37.5% fewer hash operations per proof than the original 32.
 witness getMerkleProof(): Vector<20, MerkleProofEntry>;
+
+// Merkle proof for REGISTRANT tree membership — private, stays with the
+// prover. Same shape and depth as getMerkleProof, but a distinct witness: it
+// proves membership in a different tree (registrantRoot, not allowlistRoot),
+// built at a different time (registration freeze, not deploy).
+witness getRegistrantMerkleProof(): Vector<20, MerkleProofEntry>;
 
 // Random nonce for registration commitment — private, prevents replay
 witness getRegistrationNonce(): Bytes<32>;
@@ -915,6 +961,9 @@ constructor(
   assert(disclose(minDvParticipants_ > 0), "minDvParticipants must be positive");
   minDvParticipants = disclose(minDvParticipants_);
   dvState = DarkVeilState.Inactive;
+  registrantRoot = disclose(pad(32, "")); // meaningless until startBuying sets it
+  exclusionDisputeWindow = disclose(259200); // 72 hours — see ledger comment
+  revealWindowSeconds = disclose(2592000); // 30 days — see ledger comment
   totalTokensCommitted = 0;
   totalRaisedCommitted = 0;
   baseSlot = 0; // meaningless until closeDarkVeil sets it
@@ -971,6 +1020,42 @@ circuit verifyAllowlist(caller: Bytes<32>): [] {
   );
 
   assert(disclose(recomputedRoot == allowlistRoot), "Invalid allowlist proof");
+}
+
+// Prove the caller registered, without revealing WHICH registrant they are.
+//
+// The alternative — recomputing the caller's registration nullifier and
+// checking it against the public registrationNullifiers set — has to disclose
+// that nullifier to do the lookup. Every registrant's key is already public
+// from registration, and launchId and bondAmount are constants, so an observer
+// can precompute each registrant's nullifier in advance and match it the
+// moment it appears. That names the buyer at commit time, which is the one
+// thing the commit phase exists to hide.
+//
+// A membership proof against registrantRoot discloses nothing about which leaf
+// it walked.
+circuit verifyRegistrant(caller: Bytes<32>): [] {
+  const leaf = persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "noctis:registrant:leaf:v1"),
+    caller
+  ]);
+  const proof = getRegistrantMerkleProof();
+
+  const recomputedRoot = fold(
+    (acc: Bytes<32>, entry: MerkleProofEntry): Bytes<32> => {
+      const left = disclose(entry.goesLeft) ? acc : entry.sibling;
+      const right = disclose(entry.goesLeft) ? entry.sibling : acc;
+      return persistentHash<RegistrantNodeInput>(RegistrantNodeInput {
+        domain: pad(32, "noctis:registrant:node:v1"),
+        left: left,
+        right: right
+      });
+    },
+    leaf,
+    proof
+  );
+
+  assert(disclose(recomputedRoot == registrantRoot), "Invalid registrant proof");
 }
 
 // ============================================================================
@@ -1060,13 +1145,7 @@ export circuit submitBuyCommit(
 
   const sk = getUserSecret();
   const caller = deriveUserPublicKey(sk, launchId);
-  // Fix (2026-07-21): no longer takes a regNonce, see
-  // computeRegistrationCommit's own comment.
-  const regNullifier = computeRegistrationCommit(caller.bytes, launchId, bondAmount);
-  assert(
-    disclose(registrationNullifiers.member(disclose(regNullifier))),
-    "Not a registered DarkVeil participant"
-  );
+  verifyRegistrant(caller.bytes);
 
   assert(
     !commitments.member(disclose(commitment)),
@@ -1134,9 +1213,26 @@ export circuit revealBuyCommit(
   tokenAmount: Uint<128>,
   pricePerToken: Uint<128>,
   claimedCreatorFee: Uint<128>,
-  claimedPlatformFee: Uint<128>
+  claimedPlatformFee: Uint<128>,
+  currentTimestamp: Uint<64>
 ): [] {
+  // Same one-hour band on a caller-supplied timestamp used everywhere else a
+  // deadline is enforced — without it the caller could simply declare a time
+  // inside the window.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
   assert(disclose(dvState == DarkVeilState.Closed), "DarkVeil not closed");
+
+  // The window closes revealWindowSeconds after the real, on-chain-recorded
+  // close time, set once by closeDarkVeil. It is what lets anything downstream
+  // conclude that a registrant did not buy: while a reveal can still land, no
+  // such conclusion is safe.
+  const revealDeadline = (fairLaunchCert.closeTimestamp + revealWindowSeconds) as Uint<64>;
+  assert(disclose(currentTimestamp <= revealDeadline), "Reveal window has closed");
 
   // A cancelled curve refunds what buyers paid, and this circuit records a
   // payment. Revealing into that state turns an unrevealed commitment into a
@@ -1378,7 +1474,10 @@ export circuit startRegistration(): [] {
 }
 
 // Start DarkVeil buying — governor only.
-export circuit startBuying(): [] {
+// Takes the registrant tree's root, built off-chain once registration has
+// closed and the registrant set is final. It cannot be known any earlier,
+// which is why it is published here rather than at deploy.
+export circuit startBuying(registrantRoot_: Bytes<32>): [] {
   const govSecret = getGovernorSecret();
   const govKey = deriveGovernorKey(govSecret);
   assert(disclose(govKey == governorKey), "Only governor can start buying");
@@ -1389,6 +1488,7 @@ export circuit startBuying(): [] {
     disclose(registrationCount.read() >= minDvParticipants),
     "Below minimum DarkVeil participant threshold — cancel instead"
   );
+  registrantRoot = disclose(registrantRoot_);
   dvState = DarkVeilState.Buying;
 }
 
@@ -1540,13 +1640,145 @@ export circuit claimRatioBondRefund(
   const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
   sendUnshielded(nativeToken(), disclose(claimedRefund), dest);
 
-  // Route the forfeited remainder — 60% treasury / 40% ops, matching
-  // the existing launch-fee-split ratio.
-  // One destination, so the forfeited amount is whatever the bond and the
-  // already-verified refund leave over — nothing for a caller to claim.
+  // Route the forfeited remainder to the platform wallet. One destination,
+  // so the forfeited amount is whatever the bond and the already-verified
+  // refund leave over — nothing for a caller to choose.
   const forfeited = (bond - claimedRefund) as Uint<128>;
   const platformDest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: platformAddr }));
   sendUnshielded(nativeToken(), disclose(forfeited), platformDest);
+}
+
+// ============================================================================
+// REGISTRANT EXCLUSION DISPUTE
+// ============================================================================
+//
+// registrantRoot is published by one key, while lockedBonds is written by each
+// registrant's own call. Nothing on chain forces the two to agree, so a root
+// that simply omits a registrant's leaf would leave them unable to prove
+// membership, unable to buy, and holding a bond that settles against a
+// purchase of zero — indistinguishable, by state alone, from someone who
+// registered and chose not to buy.
+//
+// These circuits make the two records answer to each other. A registrant
+// holding a real bond may dispute, which starts a fixed window. Anyone at all
+// may end that window by producing the disputant's path: the tree is public,
+// so a registrant it really does contain can be answered by any observer, not
+// only by the key that published the root.
+//
+// That is what separates the two outcomes. Someone who simply bought nothing
+// is in the tree, is answered, and forfeits on the ordinary terms. Someone
+// with no path has nothing that can be produced against them, and takes their
+// bond back in full. The state is identical; the evidence that can be produced
+// is not, and the mechanism turns on the evidence.
+//
+// Identity: disputing discloses caller.bytes, exactly as both refund circuits
+// already do. lockedBonds has carried that key publicly since registration and
+// buying is long over by this point, so this spends no privacy the refund path
+// does not spend already.
+
+// Open a dispute: a bond is held for this caller, and they hold no path in
+// registrantRoot.
+export circuit disputeRegistrantExclusion(currentTimestamp: Uint<64>): [] {
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  assert(
+    disclose(phase != LaunchPhase.Cancelled && !dvFailed && dvState == DarkVeilState.Closed),
+    "Only disputable after a normally-closed, non-cancelled, non-failed DarkVeil"
+  );
+
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk, launchId);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+
+  assert(lockedBonds.member(disclose(caller.bytes)), "No locked bond found for caller");
+  const bond = lockedBonds.lookup(disclose(caller.bytes));
+  assert(disclose(bond > 0), "Bond already claimed");
+
+  // Answered first, open second. An answered dispute is still an open one —
+  // rebutRegistrantExclusion records the answer rather than clearing the
+  // dispute — so checking the other order would leave this unreachable and
+  // report the vaguer of the two refusals.
+  assert(
+    !rebuttedExclusions.member(disclose(caller.bytes)),
+    "This registrant's membership in the tree has already been shown"
+  );
+  assert(!disputedExclusions.member(disclose(caller.bytes)), "Exclusion already disputed");
+
+  const claimableFrom = (currentTimestamp + exclusionDisputeWindow) as Uint<64>;
+  disputedExclusions.insert(disclose(caller.bytes), disclose(claimableFrom));
+}
+
+// Answer a dispute by producing the disputant's own path in registrantRoot.
+//
+// Permissionless, and deliberately so: the tree is published, so whoever holds
+// it can answer, and an answer never depends on one key staying available. The
+// proof is the entire authorization — it recomputes the published root or the
+// transaction fails — so calling this confers nothing on the caller.
+export circuit rebutRegistrantExclusion(registrantKey: Bytes<32>): [] {
+  assert(disputedExclusions.member(disclose(registrantKey)), "No open dispute for this registrant");
+  assert(!rebuttedExclusions.member(disclose(registrantKey)), "Dispute already answered");
+
+  verifyRegistrant(registrantKey);
+
+  rebuttedExclusions.insert(disclose(registrantKey));
+}
+
+// Take back a bond behind a dispute that stood unanswered for the full window.
+//
+// Gated on the reveal window having closed, not merely on the dispute window:
+// while a reveal can still land this registrant might yet record a purchase,
+// and paying the bond back in full here would pay where a ratio refund was
+// owed. Tier B gates the same payout on its settlement record being finalized,
+// for the same reason — on this tier the reveal deadline IS that record
+// closing, because the purchase is recorded here rather than on Cardano.
+export circuit claimDisputedBond(
+  recipientAddr: Bytes<32>,
+  currentTimestamp: Uint<64>
+): [] {
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  const revealDeadline = (fairLaunchCert.closeTimestamp + revealWindowSeconds) as Uint<64>;
+  assert(disclose(currentTimestamp > revealDeadline), "Reveal window has not closed yet");
+
+  assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
+
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk, launchId);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+
+  assert(disputedExclusions.member(disclose(caller.bytes)), "No open dispute for this registrant");
+  assert(
+    !rebuttedExclusions.member(disclose(caller.bytes)),
+    "This registrant's membership in the tree was shown; the bond forfeits on the ordinary terms"
+  );
+
+  const claimableFrom = disputedExclusions.lookup(disclose(caller.bytes));
+  assert(disclose(currentTimestamp >= claimableFrom), "Dispute window has not elapsed");
+
+  // A registrant who bought was never excluded — the ratio refund is theirs to
+  // claim and pays them what they are actually owed.
+  const purchased = dvTokensPurchased.member(disclose(caller.bytes))
+    ? dvTokensPurchased.lookup(disclose(caller.bytes))
+    : 0;
+  assert(disclose(purchased == 0), "Registrant bought part of their allocation; claim the ratio refund instead");
+
+  assert(lockedBonds.member(disclose(caller.bytes)), "No locked bond found for caller");
+  const bond = lockedBonds.lookup(disclose(caller.bytes));
+  assert(disclose(bond > 0), "Bond already claimed");
+
+  // Clear before paying out (checks-effects-interactions).
+  lockedBonds.insert(disclose(caller.bytes), disclose(0));
+
+  const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
+  sendUnshielded(nativeToken(), disclose(bond), dest);
 }
 
 // ============================================================================
