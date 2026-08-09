@@ -138,6 +138,10 @@ export interface BuildSnapshotConfig {
   policyIdHex: string;
   assetNameHex: string;
   creatorAddress: string;
+  /** The launch this snapshot is for. Voter identities are scoped per launch,
+   *  so the registry is queried under this value — a holder registered only
+   *  for some other launch has no leaf here. */
+  launchIdHex: string;
   /** 90 days per CLAUDE.md's own DarkVeil eligibility check #5 (no direct ADA flow lookback) — reused for consistency, same underlying concern. */
   adaFlowLookbackDays?: number;
 }
@@ -192,7 +196,7 @@ export async function buildCtoBalanceSnapshot(
       const sybilFilterPassed = stakeMatch.eligible && adaFlow.eligible;
 
       const [registration, heldSinceTimestamp] = await Promise.all([
-        sybilFilterPassed ? registry.lookup(holder.address) : Promise.resolve(null),
+        sybilFilterPassed ? registry.lookup(holder.address, config.launchIdHex) : Promise.resolve(null),
         sybilFilterPassed ? getHeldSinceTimestamp(blockfrostClient, holder.address, asset) : Promise.resolve(null),
       ]);
 

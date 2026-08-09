@@ -15,19 +15,35 @@
 
 export interface CtoVoterBinding {
   cardanoAddress: string;
-  /** hex — deriveUserPublicKey(sk, DOMAINS.CTO_USER).bytes, as produced by cto-voter-registration.ts */
+  /** The launch this binding is for. A voter's identity is scoped per launch,
+   *  so one wallet holds a DIFFERENT binding for every launch it registers
+   *  with — which is what keeps its ballots unlinkable across them. This is
+   *  half of the key: a binding is identified by (cardanoAddress, launchIdHex),
+   *  never by address alone. */
+  launchIdHex: string;
+  /** hex — deriveUserPublicKey(sk, DOMAINS.CTO_USER, launchId).bytes, as produced by cto-voter-registration.ts */
   ctoVoterPubKeyHex: string;
   /** Unix seconds this binding was verified and recorded. */
   registeredAt: number;
 }
 
 export interface CtoVoterRegistry {
-  /** Records a verified binding — overwrites any prior binding for the same cardanoAddress (a wallet re-registering, e.g. after rotating its CIP-8 signature for any reason, always reflects its current identity). */
+  /** Records a verified binding — overwrites any prior binding for the same
+   *  (cardanoAddress, launchIdHex) pair (a wallet re-registering for the same
+   *  launch, e.g. after rotating its CIP-8 signature, always reflects its
+   *  current identity). A registration for a DIFFERENT launch is a separate
+   *  binding and never displaces this one. */
   record(binding: CtoVoterBinding): Promise<void>;
-  /** Looks up the CTO voter pubkey for a specific Cardano address, or null if never registered. */
-  lookup(cardanoAddress: string): Promise<CtoVoterBinding | null>;
-  /** All bindings currently on record — what the balance-snapshot builder iterates to resolve holder addresses into Merkle leaf identities. */
-  all(): Promise<CtoVoterBinding[]>;
+  /** Looks up one wallet's CTO voter pubkey for ONE launch, or null if that
+   *  wallet never registered for it. Registering for another launch does not
+   *  satisfy this lookup — the derived key would be a different one. */
+  lookup(cardanoAddress: string, launchIdHex: string): Promise<CtoVoterBinding | null>;
+  /** Every binding recorded for ONE launch — what that launch's
+   *  balance-snapshot builder iterates to resolve holder addresses into
+   *  Merkle leaf identities. Scoped by launch because a snapshot is built
+   *  for a single ballot, and another launch's identities are not valid
+   *  leaves in it. */
+  all(launchIdHex: string): Promise<CtoVoterBinding[]>;
 }
 
 /**
@@ -37,16 +53,17 @@ export interface CtoVoterRegistry {
  */
 export function createInMemoryCtoVoterRegistry(): CtoVoterRegistry {
   const bindings = new Map<string, CtoVoterBinding>();
+  const keyOf = (cardanoAddress: string, launchIdHex: string) => `${launchIdHex}:${cardanoAddress}`;
 
   return {
     async record(binding: CtoVoterBinding): Promise<void> {
-      bindings.set(binding.cardanoAddress, binding);
+      bindings.set(keyOf(binding.cardanoAddress, binding.launchIdHex), binding);
     },
-    async lookup(cardanoAddress: string): Promise<CtoVoterBinding | null> {
-      return bindings.get(cardanoAddress) ?? null;
+    async lookup(cardanoAddress: string, launchIdHex: string): Promise<CtoVoterBinding | null> {
+      return bindings.get(keyOf(cardanoAddress, launchIdHex)) ?? null;
     },
-    async all(): Promise<CtoVoterBinding[]> {
-      return Array.from(bindings.values());
+    async all(launchIdHex: string): Promise<CtoVoterBinding[]> {
+      return Array.from(bindings.values()).filter((b) => b.launchIdHex === launchIdHex);
     },
   };
 }

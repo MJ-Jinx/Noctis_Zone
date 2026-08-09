@@ -77,6 +77,7 @@ describe('cto-sybil-challenge-evidence.ts — gatherSybilChallengeEvidence (I/O 
       accusedCardanoAddress: 'addr_test1_never_registered',
       creatorAddress: 'addr_test1_creator',
       challengedProposalIdHex: 'cc'.repeat(32),
+      launchIdHex: '09'.repeat(32),
     });
     expect(result).toBeNull();
   });

@@ -62,6 +62,9 @@ export interface GatherEvidenceParams {
   accusedCardanoAddress: string;
   creatorAddress: string;
   challengedProposalIdHex: string;
+  /** The launch whose ballot is being challenged — the accused wallet's voter
+   *  identity only exists relative to it. */
+  launchIdHex: string;
   adaFlowLookbackDays?: number;
 }
 
@@ -71,7 +74,7 @@ export async function gatherSybilChallengeEvidence(
   registry: CtoVoterRegistry,
   params: GatherEvidenceParams,
 ): Promise<SybilChallengeEvidence | null> {
-  const registration = await registry.lookup(params.accusedCardanoAddress);
+  const registration = await registry.lookup(params.accusedCardanoAddress, params.launchIdHex);
   if (!registration) return null;
 
   const [stakeKeyMatch, adaFlowMatch] = await Promise.all([
