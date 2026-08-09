@@ -101,7 +101,7 @@ function baseDatum(overrides: Record<string, unknown> = {}): Record<string, unkn
     max_price: 1000n,
     curve_supply: 1_000_000n,
     curve_state: 'Inactive',
-    activated_at: 0n,
+    phase_started_at: 0n,
     tokens_sold: 0n,
     total_raised: 0n,
     creator_fees_accrued: 0n,
@@ -280,7 +280,7 @@ describe('LucidTierACurveSubmitter.activateCurve', () => {
     ).rejects.toThrow(/Curve is not Inactive/);
   });
 
-  it('sets curve_state to Active and stamps activated_at with the given timestamp', async () => {
+  it('sets curve_state to Active and stamps phase_started_at with the given timestamp', async () => {
     const { builder, calls } = makeFakeTxBuilder();
     const { submitter } = makeSubmitter(builder, [{ datum: baseDatum(), assets: {} }]);
 
@@ -290,7 +290,7 @@ describe('LucidTierACurveSubmitter.activateCurve', () => {
       value: Record<string, unknown>;
     };
     expect(payload.value.curve_state).toBe('Active');
-    expect(payload.value.activated_at).toBe(1_753_000_000_000n);
+    expect(payload.value.phase_started_at).toBe(1_753_000_000_000n);
   });
 
   it('sets a validity range spanning both the claimed timestamp and the real current time (supports legitimate backdating)', async () => {
@@ -627,12 +627,23 @@ describe('LucidTierACurveSubmitter.sellTokens', () => {
 // ============================================================================
 
 describe('LucidTierACurveSubmitter.expireCurve', () => {
-  it('rejects when the curve is not Active', async () => {
+  it('rejects a curve that is neither Active nor Inactive', async () => {
     const { builder } = makeFakeTxBuilder();
     const { submitter } = makeSubmitter(builder, [{ datum: baseDatum({ curve_state: 'Cancelled' }), assets: {} }]);
     await expect(submitter.expireCurve(REAL_EXTENDED_KEY_HEX, addrFor(fakeKeyHash(0x11)))).rejects.toThrow(
-      /Curve is not Active/,
+      /Curve is Cancelled/,
     );
+  });
+
+  it('expires a curve that was minted and never activated', async () => {
+    // The client mirrors the validator's expirable states, so this has to
+    // move whenever that does — otherwise the client answers "no" to a
+    // transaction the chain would accept.
+    const { builder, calls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, [{ datum: baseDatum({ curve_state: 'Inactive' }), assets: {} }]);
+    await submitter.expireCurve(REAL_EXTENDED_KEY_HEX, addrFor(fakeKeyHash(0x11)));
+    const payload = calls.payToContract![1] as { value: Record<string, unknown> };
+    expect(payload.value.curve_state).toBe('Cancelled');
   });
 
   it('sets curve_state to Cancelled', async () => {

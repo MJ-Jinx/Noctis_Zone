@@ -2188,3 +2188,32 @@ describe('bonding_curve.compact — permissionless DarkVeil expiry', () => {
     expect(() => d.contract.circuits.expireDarkVeil(late)).toThrow('DarkVeil already closed or cancelled');
   });
 });
+
+describe('bonding_curve.compact — the allowlist is fixed once the launch is decided', () => {
+  it('still accepts a late addition while the public curve is trading', () => {
+    // Wider than Tier B on purpose: this contract gates public buying behind
+    // the allowlist too, so an eligible buyer must be able to join a curve
+    // that is already running.
+    const { contract, ctx } = deployAndActivate();
+    const r = contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123));
+    expect(ledger(r.context.currentQueryContext.state).allowlistRoot).toEqual(fakeBytes32(123));
+  });
+
+  it('rejects an update once the launch has graduated', () => {
+    const d = deployAndActivate();
+    const rg = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.Graduated);
+    const ctxG = nextContext(d.contractAddress, rg.context);
+    expect(() => d.contract.circuits.updateAllowlistRoot(ctxG, fakeBytes32(123))).toThrow(
+      'Allowlist is fixed once the launch has graduated or been cancelled',
+    );
+  });
+
+  it('rejects an update once the launch is cancelled, while the refund paths are still open', () => {
+    const d = deployAndActivate();
+    const rc = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.Cancelled);
+    const ctxC = nextContext(d.contractAddress, rc.context);
+    expect(() => d.contract.circuits.updateAllowlistRoot(ctxC, fakeBytes32(123))).toThrow(
+      'Allowlist is fixed once the launch has graduated or been cancelled',
+    );
+  });
+});

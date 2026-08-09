@@ -2063,11 +2063,30 @@ export circuit getFees(): FeeConfig {
 // CIRCUITS — ADMIN / GOVERNOR
 // ============================================================================
 
-// Update allowlist root (for late additions)
+// Update allowlist root, for late additions.
+//
+// The window is wider here than in eligibility_gate.compact, and deliberately
+// so: on Tier B the allowlist gates registration alone, but this merged
+// contract also gates the PUBLIC phase behind it (see buyTokens and
+// verifiedBuyers), so eligible buyers must still be able to join a curve that
+// is already trading. The gate is therefore the launch being live at all.
+//
+// What that guarantees: once a launch reaches a terminal phase, the set it
+// settled under is the set it keeps. Graduation reads participation figures
+// and cancellation opens the refund paths, and neither should be able to move
+// underneath a launch whose outcome is already decided.
+//
+// A buyer's own verification is unaffected by any of this — verifiedBuyers
+// records the root each buyer proved against, so a genuine change invalidates
+// earlier verifications on its own rather than leaving them silently stale.
 export circuit updateAllowlistRoot(newRoot: Bytes<32>): [] {
   const govSecret = getGovernorSecret();
   const govKey = deriveGovernorKey(govSecret);
   assert(disclose(govKey == governorKey), "Only governor can update allowlist");
+  assert(
+    disclose(phase != LaunchPhase.Graduated && phase != LaunchPhase.Cancelled),
+    "Allowlist is fixed once the launch has graduated or been cancelled"
+  );
   allowlistRoot = disclose(newRoot);
 }
 

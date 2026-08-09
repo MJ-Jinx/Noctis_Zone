@@ -71,10 +71,16 @@ for (const v of blueprint.validators) {
  * that cannot claim a window opening before the launch was eligible to hold
  * one. Well inside the 16,384 B cap; recorded here so the growth is a
  * decision rather than a surprise.
+ *
+ * Last moved by letting ExpireCurve reach a curve that was minted and never
+ * activated: Tier A +24, Tier B +16, for one extra state in each arm's
+ * disjunction. Both ways out of that state are governor-signed, so the cost
+ * buys a launch's whole supply a way out that does not depend on one key
+ * still answering.
  */
 const RECORDED: Record<string, number> = {
-  bonding_curve: 10_904,
-  bonding_curve_tier_b: 13_709,
+  bonding_curve: 10_928,
+  bonding_curve_tier_b: 13_725,
   cto_governance: 7_370,
   cto_sybil_challenge: 1_294,
   curve_order: 1_775,

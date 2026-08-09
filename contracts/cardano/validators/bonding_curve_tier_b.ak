@@ -205,9 +205,13 @@ pub type BondingCurveTierBDatum {
   // Mirrors lp_escrow.ak's cto_triggered/community_wallet_hash.
   community_pub_key_hash: VerificationKeyHash,
   cto_triggered: Bool,
-  // Posix time (seconds) the curve was activated — 0 while still
-  // Inactive. Used by ExpireCurve to detect a stalled curve.
-  activated_at: Int,
+  // Posix time (ms) the curve entered the state it is in: the mint, written
+  // at genesis, and then the activation, written by ActivateCurve. See Tier
+  // A's bonding_curve.ak for the full reasoning — it is the clock ExpireCurve
+  // measures its stall window from, on both tiers, and it is set from genesis
+  // so that a curve waiting on activation has the same backstop as one that
+  // is trading.
+  phase_started_at: Int,
   // Fix (2026-07-19, Tier B cross-chain audit): whether
   // dv_allocation_root has been anchored to a real, governor-computed
   // value yet. Starts False at genesis (real value unknown at mint time —
@@ -300,7 +304,7 @@ pub type BatchOrder {
 }
 
 pub type BondingCurveTierBRedeemer {
-  /// `current_timestamp` stamped into `activated_at`, verified against the
+  /// `current_timestamp` stamped into `phase_started_at`, verified against the
   /// tx's validity range (same pattern as Tier A).
   ActivateCurve { current_timestamp: Int }
   /// The caller names only how much they want and who they are; the contract
@@ -470,7 +474,7 @@ const min_platform_claim_fee_lovelace = 200_000
 ///
 /// Fix (2026-07-17): same bug, same fix, as Tier A's bonding_curve.ak
 /// own `max_curve_duration` — this file's `ActivateCurve`/
-/// `ExpireCurve` bind `current_timestamp`/`activated_at` to
+/// `ExpireCurve` bind `current_timestamp`/`phase_started_at` to
 /// `interval.contains(self.validity_range, ...)` identically, so the same
 /// ms-vs-seconds mismatch applied here too, never separately checked when
 /// the Tier A bug was fixed. Found during Phase 5b research.
@@ -1232,7 +1236,7 @@ validator bonding_curve_tier_b {
           new_datum == BondingCurveTierBDatum {
             ..datum,
             curve_state: Active,
-            activated_at: current_timestamp,
+            phase_started_at: current_timestamp,
             // No claim can execute once Active, so the nullifier has served
             // its whole purpose. Emptying it here keeps the datum that every
             // public trade carries free of claim state entirely, whatever the
@@ -1761,11 +1765,28 @@ validator bonding_curve_tier_b {
       ExpireCurve { current_timestamp } -> {
         let new_datum = own_continuing_datum(self, own_ref)
         and {
-          datum.curve_state == Active,
+          // Active and Inactive, and deliberately NOT DvClaim.
+          //
+          // Including Inactive is what guarantees every state a Tier B curve
+          // can rest in has an exit reachable without the governor. The two
+          // forward moves out of Inactive (OpenDvClaim, AnchorDvAllocationRoot)
+          // are governor-signed, so this arm is the one that answers for a
+          // launch holding its whole supply while it waits.
+          //
+          // DvClaim does not: ActivateCurve out of it is permissionless once
+          // the claim and settlement windows have passed, and dv_settled was
+          // already required before the window could open, so that state
+          // always has an exit that does not depend on anyone in particular.
+          // Adding it here would let a curve be cancelled out from under
+          // registrants who have paid for allocations they can still claim.
+          or {
+            datum.curve_state == Active,
+            datum.curve_state == Inactive,
+          },
           interval.contains(self.validity_range, current_timestamp),
           // Bound the declared validity range's own width.
           validity_range_is_narrow(self.validity_range, max_validity_range_width),
-          current_timestamp > datum.activated_at + max_curve_duration,
+          current_timestamp > datum.phase_started_at + max_curve_duration,
           new_datum == BondingCurveTierBDatum { ..datum, curve_state: Cancelled },
           curve_own_output_clean(self, own_ref),
           // curve_own_output_clean bounds how MANY assets the output carries;
@@ -2043,7 +2064,7 @@ fn mock_datum(
     max_price: 1000,
     curve_supply: 1000,
     curve_state: curve_state,
-    activated_at: 0,
+    phase_started_at: 0,
     tokens_sold: tokens_sold,
     total_raised: 0,
     creator_fees_accrued: 0,
@@ -4783,7 +4804,7 @@ fn run_activate(
     BondingCurveTierBDatum {
       ..datum,
       curve_state: Active,
-      activated_at: now,
+      phase_started_at: now,
       claimed_bits: #"",
     }
   let continuing_output =
@@ -4879,7 +4900,7 @@ test activate_curve_clears_the_claim_bitmap() {
         BondingCurveTierBDatum {
           ..datum,
           curve_state: Active,
-          activated_at: test_curve_opens,
+          phase_started_at: test_curve_opens,
         }
       let self =
         Transaction {
@@ -4936,7 +4957,7 @@ test activate_curve_rejects_when_dv_not_settled_from_inactive() {
       },
     }
   let new_datum =
-    BondingCurveTierBDatum { ..datum, curve_state: Active, activated_at: 500 }
+    BondingCurveTierBDatum { ..datum, curve_state: Active, phase_started_at: 500 }
   let continuing_output =
     Output {
       address: own_address,
@@ -5092,7 +5113,7 @@ test anchor_dv_allocation_root_rejects_after_curve_active() {
 
 test expire_curve_succeeds_after_deadline_with_no_signature() {
   let datum =
-    BondingCurveTierBDatum { ..mock_datum(Active, 100), activated_at: 0 }
+    BondingCurveTierBDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -5136,7 +5157,7 @@ test expire_curve_succeeds_after_deadline_with_no_signature() {
 
 test expire_curve_rejects_padded_continuing_output() {
   let datum =
-    BondingCurveTierBDatum { ..mock_datum(Active, 100), activated_at: 0 }
+    BondingCurveTierBDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -5188,7 +5209,7 @@ test expire_curve_rejects_padded_continuing_output() {
 // explanation.
 test expire_curve_rejects_wide_validity_range() {
   let datum =
-    BondingCurveTierBDatum { ..mock_datum(Active, 100), activated_at: 0 }
+    BondingCurveTierBDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -5228,7 +5249,7 @@ test expire_curve_rejects_wide_validity_range() {
 
 test expire_curve_rejects_before_deadline() {
   let datum =
-    BondingCurveTierBDatum { ..mock_datum(Active, 100), activated_at: 0 }
+    BondingCurveTierBDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -6911,7 +6932,7 @@ test query_state_rejects_unauthenticated_drain_attempt() {
 // token reserve to a third party — and both must be rejected.
 
 test tier_b_expire_curve_rejects_value_drain() {
-  let datum = BondingCurveTierBDatum { ..mock_datum(Active, 100), activated_at: 0 }
+  let datum = BondingCurveTierBDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -6997,4 +7018,134 @@ test tier_b_cancel_curve_rejects_value_drain() {
     }
 
   !bonding_curve_tier_b.spend(Some(datum), CancelCurve, own_ref, self)
+}
+
+// Inactive is the state a Tier B curve can be stranded in: both ways out of
+// it (AnchorDvAllocationRoot, OpenDvClaim) are governor-signed, so a governor
+// who stops answering leaves the whole supply sitting here.
+test tier_b_expire_curve_succeeds_from_inactive_after_deadline() {
+  let datum =
+    BondingCurveTierBDatum { ..mock_datum(Inactive, 0), phase_started_at: 0 }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_curve_funded(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum = BondingCurveTierBDatum { ..datum, curve_state: Cancelled }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: mock_curve_funded(),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let past_deadline = 7_776_000_001
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      validity_range: interval.between(past_deadline - 100, past_deadline + 100),
+    }
+
+  bonding_curve_tier_b.spend(
+    Some(datum),
+    ExpireCurve { current_timestamp: past_deadline },
+    own_ref,
+    self,
+  )
+}
+
+test tier_b_expire_curve_rejects_from_inactive_before_deadline() {
+  let datum =
+    BondingCurveTierBDatum { ..mock_datum(Inactive, 0), phase_started_at: 0 }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_curve_funded(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum = BondingCurveTierBDatum { ..datum, curve_state: Cancelled }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: mock_curve_funded(),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let before_deadline = 7_775_999_999
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      validity_range: interval.between(
+        before_deadline - 100,
+        before_deadline + 100,
+      ),
+    }
+
+  !bonding_curve_tier_b.spend(
+    Some(datum),
+    ExpireCurve { current_timestamp: before_deadline },
+    own_ref,
+    self,
+  )
+}
+
+// The state deliberately left out. Registrants inside the claim window have
+// paid bonds against allocations they can still settle, and ActivateCurve out
+// of DvClaim is already permissionless once the windows pass — so there is
+// nothing to rescue here and something real to destroy.
+test tier_b_expire_curve_rejects_from_dv_claim_even_past_the_deadline() {
+  let datum =
+    BondingCurveTierBDatum { ..mock_datum(DvClaim, 0), phase_started_at: 0 }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_curve_funded(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum = BondingCurveTierBDatum { ..datum, curve_state: Cancelled }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: mock_curve_funded(),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let past_deadline = 7_776_000_001
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      validity_range: interval.between(past_deadline - 100, past_deadline + 100),
+    }
+
+  !bonding_curve_tier_b.spend(
+    Some(datum),
+    ExpireCurve { current_timestamp: past_deadline },
+    own_ref,
+    self,
+  )
 }

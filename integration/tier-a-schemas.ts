@@ -60,7 +60,7 @@ export const BondingCurveDatumShape = Data.Object({
   cap_root: Data.Bytes(),
   community_pub_key_hash: Data.Bytes(),
   cto_triggered: Data.Boolean(),
-  activated_at: Data.Integer(),
+  phase_started_at: Data.Integer(),
   lp_seeded: Data.Boolean(),
   staking_seeded: Data.Boolean(),
   launch_id: Data.Bytes(),
@@ -110,7 +110,7 @@ export const BondingCurveTierBDatumShape = Data.Object({
   dv_claim_opened_at: Data.Integer(),
   community_pub_key_hash: Data.Bytes(),
   cto_triggered: Data.Boolean(),
-  activated_at: Data.Integer(),
+  phase_started_at: Data.Integer(),
   // (2026-07-19, Tier B cross-chain audit): whether
   // dv_allocation_root has been anchored to a real value yet — see
   // bonding_curve_tier_b.ak's own field comment for the full reasoning.

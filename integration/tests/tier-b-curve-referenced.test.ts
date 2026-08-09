@@ -123,7 +123,7 @@ function activeDatum(): Record<string, unknown> {
     max_price: 1000n,
     curve_supply: 1000n,
     curve_state: 'Active',
-    activated_at: 0n,
+    phase_started_at: 0n,
     tokens_sold: 0n,
     total_raised: 0n,
     creator_fees_accrued: 0n,

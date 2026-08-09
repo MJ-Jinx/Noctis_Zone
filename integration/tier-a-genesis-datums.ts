@@ -82,7 +82,7 @@ import { Data, validatorToAddress, validatorToScriptHash } from '@lucid-evolutio
 import { calculateMinLovelaceFromUTxO, PROTOCOL_PARAMETERS_DEFAULT } from '@lucid-evolution/utils';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { CAP_EMPTY_ROOT, bytesToHex as capBytesToHex } from './cap-accumulator-tree.js';
-import { CARDANO_NETWORK_MAP, loadPlutusBlueprint, requireFieldsStrict } from './cli/cli-io.js';
+import { CARDANO_NETWORK_MAP, loadPlutusBlueprint, type PlutusBlueprint, requireFieldsStrict } from './cli/cli-io.js';
 import {
   assertValidCip68BaseName,
   type BondingCurveDatumData,
@@ -224,6 +224,17 @@ export interface BuildGenesisDatumsInput {
   quorumBps?: number;
   creatorVoteCapBps?: number;
   minVoterCount?: number;
+  /**
+   * The compiled blueprint to read validators from. Defaults to the one on
+   * disk beside the bundled CLI.
+   *
+   * Exposed because the default resolves relative to the BUNDLE's location,
+   * which is why this function had no test until now: called from anywhere
+   * else — a test, another module — it looked for `plutus.json` in a directory
+   * that does not exist. Passing it explicitly is the only way to exercise
+   * genesis without reproducing the bundle layout.
+   */
+  blueprint?: PlutusBlueprint;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -324,8 +335,9 @@ export async function buildGenesisDatums(input: BuildGenesisDatumsInput) {
 
   // __dirname resolves relative to the BUNDLED .cjs's real location
   // (cli/dist/), not this source file's — same convention already
-  // established and verified by read-tier-a-launch-state.ts.
-  const blueprint = loadPlutusBlueprint(__dirname);
+  // established and verified by read-tier-a-launch-state.ts. A caller that is
+  // not the bundle supplies its own; see the input field's comment.
+  const blueprint = input.blueprint ?? loadPlutusBlueprint(__dirname);
 
   const bondingCurveValidator = loadValidator(
     blueprint,
@@ -390,7 +402,11 @@ export async function buildGenesisDatums(input: BuildGenesisDatumsInput) {
     // 'as const' so this stays the literal the datum's enum expects rather
     // than widening to string, which is a different type to the encoder.
     curve_state: 'Inactive' as const,
-    activated_at: 0n,
+    // The mint IS the start of the Inactive phase, and ExpireCurve measures
+    // its stall window from this field — so a zero here would read as
+    // "expired since 1970" and let anyone cancel the launch before the
+    // governor ever activated it.
+    phase_started_at: BigInt(input.genesisTimestampMs ?? Date.now()),
     tokens_sold: 0n,
     total_raised: 0n,
     creator_fees_accrued: 0n,

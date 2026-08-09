@@ -1933,3 +1933,27 @@ describe('eligibility_gate.compact — permissionless DarkVeil expiry', () => {
     expect(() => d.contract.circuits.expireDarkVeil(late)).toThrow('DarkVeil already closed or cancelled');
   });
 });
+
+describe('eligibility_gate.compact — the allowlist is fixed outside the registration window', () => {
+  it('accepts a late addition while registration is open, which is what the circuit is for', () => {
+    const { contract, ctx } = deployAndStartDarkVeil();
+    const r = contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123));
+    expect(ledger(r.context.currentQueryContext.state).allowlistRoot).toEqual(fakeBytes32(123));
+  });
+
+  it('rejects an update before registration has opened', () => {
+    const { contract, ctx } = deploy();
+    expect(() => contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123))).toThrow(
+      'Allowlist is fixed outside the DarkVeil phase',
+    );
+  });
+
+  it('rejects an update once registration has frozen and buying has begun', () => {
+    // The registrant set is fixed at the freeze and startBuying publishes
+    // registrantRoot over it, so the allowlist decides nothing from here on.
+    const { contract, ctx } = deployAndStartDvBuying();
+    expect(() => contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123))).toThrow(
+      'Allowlist is fixed once registration freezes',
+    );
+  });
+});

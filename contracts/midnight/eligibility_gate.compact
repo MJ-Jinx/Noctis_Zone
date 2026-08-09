@@ -1613,11 +1613,28 @@ export circuit getDvPrice(): Uint<128> {
 // CIRCUITS — ADMIN / GOVERNOR
 // ============================================================================
 
-// Update allowlist root (for late additions)
+// Update allowlist root, for late additions during the registration window.
+//
+// Bounded to exactly the window where the root can still admit anyone:
+// registerForDarkVeil is the only circuit in this contract that reads
+// allowlistRoot, and it requires this same phase and sub-phase pair. Once
+// registration freezes, the registrant set is fixed for the round and
+// startBuying publishes registrantRoot over it — so from that moment the
+// allowlist decides nothing, and this circuit says so rather than leaving a
+// live write path into a field the rest of the launch still reads.
+//
+// The same guarantee stated from the registrant's side: the tree you proved
+// membership in to register is the tree that was in force for the whole
+// registration window, and nothing can replace it afterwards.
 export circuit updateAllowlistRoot(newRoot: Bytes<32>): [] {
   const govSecret = getGovernorSecret();
   const govKey = deriveGovernorKey(govSecret);
   assert(disclose(govKey.bytes == governorKey), "Only governor can update allowlist");
+  assert(disclose(phase == LaunchPhase.DarkVeil), "Allowlist is fixed outside the DarkVeil phase");
+  assert(
+    disclose(dvState == DarkVeilState.Registration),
+    "Allowlist is fixed once registration freezes"
+  );
   allowlistRoot = disclose(newRoot);
 }
 

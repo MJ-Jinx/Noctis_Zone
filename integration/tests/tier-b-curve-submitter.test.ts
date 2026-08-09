@@ -104,7 +104,7 @@ function baseDatum(overrides: Record<string, unknown> = {}): Record<string, unkn
     max_price: 1000n,
     curve_supply: 1000n,
     curve_state: 'Inactive',
-    activated_at: 0n,
+    phase_started_at: 0n,
     tokens_sold: 0n,
     total_raised: 0n,
     creator_fees_accrued: 0n,
@@ -352,7 +352,7 @@ describe('LucidTierBCurveSubmitter.activateCurve', () => {
     ).rejects.toThrow();
   });
 
-  it('sets curve_state to Active and stamps activated_at', async () => {
+  it('sets curve_state to Active and stamps phase_started_at', async () => {
     const { builder, calls } = makeFakeTxBuilder();
     const submitter = makeSubmitter(builder, [{ datum: baseDatum(), assets: {} }]);
     await submitter.activateCurve(REAL_EXTENDED_KEY_HEX, addrFor(fakeKeyHash(0x22)), 1_700_000_000_000);
@@ -360,7 +360,7 @@ describe('LucidTierBCurveSubmitter.activateCurve', () => {
       value: Record<string, unknown>;
     };
     expect(payload.value.curve_state).toBe('Active');
-    expect(payload.value.activated_at).toBe(1_700_000_000_000n);
+    expect(payload.value.phase_started_at).toBe(1_700_000_000_000n);
   });
 });
 
@@ -700,12 +700,31 @@ describe('LucidTierBCurveSubmitter.claimPlatformFees (governor-signed, single-di
 });
 
 describe('LucidTierBCurveSubmitter.expireCurve', () => {
-  it('rejects when the curve is not Active', async () => {
+  it('rejects a curve that is neither Active nor Inactive', async () => {
     const { builder } = makeFakeTxBuilder();
     const submitter = makeSubmitter(builder, [{ datum: baseDatum({ curve_state: 'Cancelled' }), assets: {} }]);
     await expect(submitter.expireCurve(REAL_EXTENDED_KEY_HEX, addrFor(fakeKeyHash(0x11)))).rejects.toThrow(
-      /Curve is not Active/,
+      /Curve is Cancelled/,
     );
+  });
+
+  it('refuses a curve inside the DarkVeil claim window, which the validator refuses too', async () => {
+    // Not stranded: ActivateCurve out of DvClaim is permissionless once the
+    // windows pass. Expiring it would cancel allocations registrants have
+    // already paid bonds for.
+    const { builder } = makeFakeTxBuilder();
+    const submitter = makeSubmitter(builder, [{ datum: baseDatum({ curve_state: 'DvClaim' }), assets: {} }]);
+    await expect(submitter.expireCurve(REAL_EXTENDED_KEY_HEX, addrFor(fakeKeyHash(0x11)))).rejects.toThrow(
+      /Curve is DvClaim/,
+    );
+  });
+
+  it('expires a curve that was minted and never activated', async () => {
+    const { builder, calls } = makeFakeTxBuilder();
+    const submitter = makeSubmitter(builder, [{ datum: baseDatum({ curve_state: 'Inactive' }), assets: {} }]);
+    await submitter.expireCurve(REAL_EXTENDED_KEY_HEX, addrFor(fakeKeyHash(0x11)));
+    const payload = calls.payToContract![1] as { value: Record<string, unknown> };
+    expect(payload.value.curve_state).toBe('Cancelled');
   });
 
   it('sets curve_state to Cancelled and requires no signer at all (permissionless)', async () => {

@@ -100,6 +100,27 @@ export interface ProofBundle {
   participationRate: number;
   closeTimestamp: string;
   certHash: string; // hex — Compact's own persistentHash, included for cross-verification
+  /**
+   * The Merkle root the DarkVeil allocation actually settles against, hex.
+   *
+   * Everything above this line is an AGGREGATE — how many took part, how much
+   * was raised, how many tokens went out. None of it says WHICH allocations
+   * the launch will honour, and on Tier B that is decided entirely by the root
+   * `AnchorDvAllocationRoot` writes into the curve datum, since
+   * `ClaimDarkVeilTokens` pays out against a proof under that root and nothing
+   * else. Committing to it here is what lets a reader check that the
+   * certificate and the money describe the same distribution: read
+   * `dv_allocation_root` off the curve UTXO, compare it to this field, and any
+   * disagreement is visible without trusting the relayer that published both.
+   *
+   * Empty string on Tier C, and that is a real difference rather than an
+   * omission: Tier C allocates every registrant the same `baseSlot`
+   * (`closeDarkVeil` sets one figure for all of them), so there is no
+   * per-registrant tree for a root to summarise. `totalTokensAllocated` and
+   * `totalParticipants` already pin that distribution between them. If Tier C
+   * ever gains per-registrant allocations, this is the field they bind to.
+   */
+  dvAllocationRoot: string;
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -108,7 +129,29 @@ function toHex(bytes: Uint8Array): string {
     .join('');
 }
 
-export function assembleProofBundle(cert: FairLaunchCert, tier: 'B' | 'C'): ProofBundle {
+/**
+ * `dvAllocationRoot` is REQUIRED on Tier B and refused rather than defaulted:
+ * a Tier B certificate that omits it is exactly the certificate that says
+ * nothing about who gets paid, and a silent empty string would produce a
+ * perfectly valid-looking bundle carrying that hole. Tier C passes nothing —
+ * see the field's own comment for why it has no root to bind.
+ */
+export function assembleProofBundle(cert: FairLaunchCert, tier: 'B' | 'C', dvAllocationRoot?: Uint8Array): ProofBundle {
+  if (tier === 'B' && dvAllocationRoot?.length !== 32) {
+    throw new Error(
+      'Cannot assemble a Tier B proof bundle without the DarkVeil allocation root: ' +
+        `expected 32 bytes, got ${dvAllocationRoot ? `${dvAllocationRoot.length} bytes` : 'nothing'}. ` +
+        'This is the root ClaimDarkVeilTokens settles against, so a certificate omitting it ' +
+        'commits to no distribution at all.',
+    );
+  }
+  if (tier === 'C' && dvAllocationRoot) {
+    throw new Error(
+      'Tier C has no DarkVeil allocation root to bind — every registrant receives the same ' +
+        'baseSlot, so there is no per-registrant tree. Passing one means the caller has ' +
+        'confused it with something else.',
+    );
+  }
   return {
     launchId: toHex(cert.launchId),
     tier,
@@ -118,6 +161,7 @@ export function assembleProofBundle(cert: FairLaunchCert, tier: 'B' | 'C'): Proo
     participationRate: cert.participationRate,
     closeTimestamp: cert.closeTimestamp.toString(),
     certHash: toHex(cert.certHash),
+    dvAllocationRoot: dvAllocationRoot ? toHex(dvAllocationRoot) : '',
   };
 }
 
@@ -132,6 +176,10 @@ function canonicalizeProofBundle(bundle: ProofBundle): Uint8Array {
     participationRate: bundle.participationRate,
     closeTimestamp: bundle.closeTimestamp,
     certHash: bundle.certHash,
+    // Appended rather than slotted in beside the allocation figures, so every
+    // field already in this order keeps its position and the only hash change
+    // is the one this addition is meant to cause.
+    dvAllocationRoot: bundle.dvAllocationRoot,
   };
   return new TextEncoder().encode(JSON.stringify(ordered));
 }
@@ -215,6 +263,12 @@ export interface RelayCertificateResult {
 export async function relayCertificate(
   launchManager: NoctisLaunchManager,
   tier: 'B' | 'C',
+  /**
+   * The same 32 bytes `AnchorDvAllocationRoot` writes to the Tier B curve, so
+   * the certificate and the settlement commit to one distribution. Omitted on
+   * Tier C. `assembleProofBundle` refuses a Tier B call without it.
+   */
+  dvAllocationRoot: Uint8Array | undefined,
   ipfsPinner: IpfsPinner,
   cardanoSubmitter: CardanoTxSubmitter,
   relayerAddress: string,
@@ -229,7 +283,7 @@ export async function relayCertificate(
   // means the compiler won't catch a wrong field name here).
   const cert = certResult.private.result as FairLaunchCert;
 
-  const bundle = assembleProofBundle(cert, tier);
+  const bundle = assembleProofBundle(cert, tier, dvAllocationRoot);
   const proofBundleHash = computeProofBundleHash(bundle);
   const metadataHash = computeMetadataHash({ tier, ...extraMetadata });
   const proofIpfsCid = await ipfsPinner.pin(canonicalizeProofBundle(bundle));

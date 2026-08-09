@@ -524,7 +524,7 @@ export class LucidTierBCurveSubmitter {
     const newDatum: BondingCurveTierBDatumData = {
       ...currentDatum,
       curve_state: 'Active',
-      activated_at: currentTimestamp,
+      phase_started_at: currentTimestamp,
       // No claim can execute once Active, so the nullifier has served its
       // whole purpose. The validator requires it emptied here, which keeps the
       // datum every public trade carries free of claim state entirely.
@@ -1290,8 +1290,13 @@ export class LucidTierBCurveSubmitter {
       BondingCurveTierBDatumSchema,
     );
 
-    if (currentDatum.curve_state !== 'Active') {
-      throw new Error(`Curve is not Active (state: ${currentDatum.curve_state}) — cannot expire.`);
+    // Mirrors the validator's own set of expirable states — see the Tier A
+    // submitter's expireCurve for the reasoning. DvClaim is deliberately not
+    // among them on either side: ActivateCurve out of it is permissionless
+    // once the windows pass, so it is not stranded and cancelling it would
+    // take allocations registrants have already paid for.
+    if (currentDatum.curve_state !== 'Active' && currentDatum.curve_state !== 'Inactive') {
+      throw new Error(`Curve is ${currentDatum.curve_state} — only an Active or Inactive curve can be expired.`);
     }
 
     const bech32Key = extendedHexToBech32PrivateKey(governorPrivateKeyExtendedHex);

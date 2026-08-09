@@ -63,7 +63,7 @@
 // Fix (2026-07-10): 100% sell-through with no timeout meant a
 // poorly-marketed or abandoned curve could stall below Graduated forever —
 // no LP ever seeds, so early buyers hold permanently illiquid tokens with
-// no forced resolution if the governor never acts. Added `activated_at`
+// no forced resolution if the governor never acts. Added `phase_started_at`
 // (set when ActivateCurve fires) and a permissionless `ExpireCurve`
 // redeemer, mirroring cto_governance.ak's `ExpireProposal` idiom exactly:
 // a `current_timestamp` redeemer field checked against the tx's actual
@@ -195,9 +195,16 @@ pub type BondingCurveDatum {
   // regardless of governance outcome.
   community_pub_key_hash: VerificationKeyHash,
   cto_triggered: Bool,
-  // Posix time (seconds) the curve was activated — 0 while still
-  // Inactive. Used by ExpireCurve to detect a stalled curve.
-  activated_at: Int,
+  // Posix time (ms) the curve entered the state it is in: the mint, written
+  // at genesis, and then the activation, written by ActivateCurve.
+  //
+  // It is the clock ExpireCurve measures its stall window from, which is why
+  // it has to be set from genesis rather than left at zero until activation.
+  // A curve waiting to be activated is as capable of stalling as one that is
+  // trading — more so, since ActivateCurve is the governor's call — and a
+  // zero here would have meant "expired since 1970" rather than "not yet
+  // started", making the escape a griefing tool instead of a backstop.
+  phase_started_at: Int,
   lp_seeded: Bool,
   staking_seeded: Bool,
   // Identity
@@ -292,7 +299,7 @@ pub type BatchOrder {
 
 pub type BondingCurveRedeemer {
   /// Governor activates the curve (Inactive -> Active). `current_timestamp`
-  /// is stamped into `activated_at`, verified against the tx's actual
+  /// is stamped into `phase_started_at`, verified against the tx's actual
   /// validity range so ExpireCurve has a trustworthy start point.
   ActivateCurve { current_timestamp: Int }
   /// Public buy — no identity proof required, unlike Tier B/C's DarkVeil-
@@ -460,9 +467,9 @@ const min_platform_claim_fee_lovelace = 200_000
 /// `current_timestamp` is checked via `interval.contains(self.validity_range,
 /// current_timestamp)`, and Cardano's real transaction validity range is
 /// natively expressed in MILLISECONDS (confirmed via a real, on-chain-
-/// confirmed `ActivateCurve` transaction recording `activated_at:
+/// confirmed `ActivateCurve` transaction recording `phase_started_at:
 /// 1784273626775`, a 13-digit ms epoch). Adding a seconds-scale constant to
-/// a ms-scale `activated_at` meant the documented "90-day stall window" was
+/// a ms-scale `phase_started_at` meant the documented "90-day stall window" was
 /// actually enforced as ~7,776,000ms ≈ 2.16 real hours. Found while
 /// building Phase 5 of the Tier A Preprod Milestone (see internal tracking)
 /// — fixed here, and the SAME bug pattern was found and fixed in
@@ -1170,7 +1177,7 @@ validator bonding_curve {
           new_datum == BondingCurveDatum {
             ..datum,
             curve_state: Active,
-            activated_at: current_timestamp,
+            phase_started_at: current_timestamp,
           },
         }
       }
@@ -1434,12 +1441,21 @@ validator bonding_curve {
       ExpireCurve { current_timestamp } -> {
         let new_datum = own_continuing_datum(self, own_ref)
         and {
-          datum.curve_state == Active,
+          // Both live states, not just the trading one. ActivateCurve is
+          // governor-signed, so a curve that is minted and never activated
+          // depends on one key to move at all — and everything the launch
+          // holds sits in this UTXO while it waits. Reaching Inactive from
+          // here gives that curve the same 90-day backstop a trading one has,
+          // measured from the same field.
+          or {
+            datum.curve_state == Active,
+            datum.curve_state == Inactive,
+          },
           interval.contains(self.validity_range, current_timestamp),
           // Bound the declared validity range's own width — see this
           // file's own `validity_range_is_narrow` comment for why.
           validity_range_is_narrow(self.validity_range, max_validity_range_width),
-          current_timestamp > datum.activated_at + max_curve_duration,
+          current_timestamp > datum.phase_started_at + max_curve_duration,
           new_datum == BondingCurveDatum { ..datum, curve_state: Cancelled },
           // This redeemer is permissionless by design, so the value check
           // is what keeps "anyone may expire a stalled curve" from also
@@ -1884,7 +1900,7 @@ fn mock_datum(curve_state: CurveState, tokens_sold: Int) -> BondingCurveDatum {
     max_price: 1000,
     curve_supply: 1000,
     curve_state: curve_state,
-    activated_at: 0,
+    phase_started_at: 0,
     tokens_sold: tokens_sold,
     total_raised: 0,
     creator_fees_accrued: 0,
@@ -2047,7 +2063,7 @@ test activate_curve_succeeds_with_governor_signature() {
       },
     }
   let new_datum =
-    BondingCurveDatum { ..datum, curve_state: Active, activated_at: 500 }
+    BondingCurveDatum { ..datum, curve_state: Active, phase_started_at: 500 }
   let continuing_output =
     Output {
       address: own_address,
@@ -2087,7 +2103,7 @@ test activate_curve_fails_without_governor_signature() {
       },
     }
   let new_datum =
-    BondingCurveDatum { ..datum, curve_state: Active, activated_at: 500 }
+    BondingCurveDatum { ..datum, curve_state: Active, phase_started_at: 500 }
   let continuing_output =
     Output {
       address: own_address,
@@ -2113,7 +2129,7 @@ test activate_curve_fails_without_governor_signature() {
 }
 
 test expire_curve_succeeds_after_deadline_with_no_signature() {
-  let datum = BondingCurveDatum { ..mock_datum(Active, 100), activated_at: 0 }
+  let datum = BondingCurveDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -2134,7 +2150,7 @@ test expire_curve_succeeds_after_deadline_with_no_signature() {
       datum: InlineDatum(new_datum),
       reference_script: None,
     }
-  // One ms past the 90-day (7_776_000_000ms) deadline from activated_at: 0
+  // One ms past the 90-day (7_776_000_000ms) deadline from phase_started_at: 0
   let past_deadline = 7_776_000_001
   let self =
     Transaction {
@@ -2164,7 +2180,7 @@ test expire_curve_succeeds_after_deadline_with_no_signature() {
 // interval.contains alone never checked how wide the caller's OWN declared
 // range was.
 test expire_curve_rejects_wide_validity_range() {
-  let datum = BondingCurveDatum { ..mock_datum(Active, 100), activated_at: 0 }
+  let datum = BondingCurveDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -2208,7 +2224,7 @@ test expire_curve_rejects_wide_validity_range() {
 }
 
 test expire_curve_rejects_before_deadline() {
-  let datum = BondingCurveDatum { ..mock_datum(Active, 100), activated_at: 0 }
+  let datum = BondingCurveDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -2254,7 +2270,7 @@ test expire_curve_rejects_already_graduated_curve() {
   // Fully sold-through curve is Graduated, not Active — ExpireCurve should
   // never be usable to retroactively cancel a successful launch.
   let datum =
-    BondingCurveDatum { ..mock_datum(Graduated, 1000), activated_at: 0 }
+    BondingCurveDatum { ..mock_datum(Graduated, 1000), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -5260,7 +5276,7 @@ test spend_rejects_curve_utxo_without_thread_nft() {
       },
     }
   let new_datum =
-    BondingCurveDatum { ..datum, curve_state: Active, activated_at: 500 }
+    BondingCurveDatum { ..datum, curve_state: Active, phase_started_at: 500 }
   let continuing_output =
     Output {
       address: own_address,
@@ -5303,7 +5319,7 @@ test spend_rejects_thread_nft_stripped_from_continuing_output() {
       },
     }
   let new_datum =
-    BondingCurveDatum { ..datum, curve_state: Active, activated_at: 500 }
+    BondingCurveDatum { ..datum, curve_state: Active, phase_started_at: 500 }
   let continuing_output =
     Output {
       address: own_address,
@@ -5346,7 +5362,7 @@ test spend_rejects_wrong_role_thread_nft() {
       },
     }
   let new_datum =
-    BondingCurveDatum { ..datum, curve_state: Active, activated_at: 500 }
+    BondingCurveDatum { ..datum, curve_state: Active, phase_started_at: 500 }
   let continuing_output =
     Output {
       address: own_address,
@@ -6070,7 +6086,7 @@ test tier_a_batch_rejects_one_payment_for_two_of_one_owners_orders() {
 // token reserve to a third party — and both must be rejected.
 
 test expire_curve_rejects_value_drain() {
-  let datum = BondingCurveDatum { ..mock_datum(Active, 100), activated_at: 0 }
+  let datum = BondingCurveDatum { ..mock_datum(Active, 100), phase_started_at: 0 }
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
   let own_input =
@@ -6156,4 +6172,92 @@ test cancel_curve_rejects_value_drain() {
     }
 
   !bonding_curve.spend(Some(datum), CancelCurve, own_ref, self)
+}
+
+// A curve that is minted and never activated depends entirely on the governor
+// to move, because ActivateCurve is the only way out of Inactive and it is
+// governor-signed. These two prove that state has the same 90-day backstop a
+// trading curve has, measured from the genesis-set phase_started_at.
+test expire_curve_succeeds_from_inactive_after_deadline() {
+  let datum = BondingCurveDatum { ..mock_datum(Inactive, 0), phase_started_at: 0 }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_curve_funded(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum = BondingCurveDatum { ..datum, curve_state: Cancelled }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: mock_curve_funded(),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let past_deadline = 7_776_000_001
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      validity_range: interval.between(past_deadline - 100, past_deadline + 100),
+    }
+
+  bonding_curve.spend(
+    Some(datum),
+    ExpireCurve { current_timestamp: past_deadline },
+    own_ref,
+    self,
+  )
+}
+
+// The backstop is a backstop, not a way to kill a launch that is simply
+// waiting to open. Genesis stamps phase_started_at with the mint time for
+// exactly this reason.
+test expire_curve_rejects_from_inactive_before_deadline() {
+  let datum = BondingCurveDatum { ..mock_datum(Inactive, 0), phase_started_at: 0 }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_curve_funded(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum = BondingCurveDatum { ..datum, curve_state: Cancelled }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: mock_curve_funded(),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let before_deadline = 7_775_999_999
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      validity_range: interval.between(
+        before_deadline - 100,
+        before_deadline + 100,
+      ),
+    }
+
+  !bonding_curve.spend(
+    Some(datum),
+    ExpireCurve { current_timestamp: before_deadline },
+    own_ref,
+    self,
+  )
 }

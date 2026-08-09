@@ -25,6 +25,11 @@ function fakeBytes(fill: number, len = 32): Uint8Array {
   return new Uint8Array(len).fill(fill);
 }
 
+/** The 32-byte root a Tier B certificate has to commit to. */
+function dvRoot(fill = 7): Uint8Array {
+  return fakeBytes(fill);
+}
+
 function baseCert(overrides: Partial<FairLaunchCert> = {}): FairLaunchCert {
   return {
     launchId: fakeBytes(1),
@@ -41,7 +46,7 @@ function baseCert(overrides: Partial<FairLaunchCert> = {}): FairLaunchCert {
 describe('assembleProofBundle', () => {
   it('hex-encodes byte fields and stringifies bigints (bigints do not survive JSON.stringify)', () => {
     const cert = baseCert();
-    const bundle = assembleProofBundle(cert, 'B');
+    const bundle = assembleProofBundle(cert, 'B', dvRoot());
     expect(bundle.launchId).toBe('01'.repeat(32));
     expect(bundle.certHash).toBe('02'.repeat(32));
     expect(bundle.totalParticipants).toBe('42');
@@ -55,17 +60,37 @@ describe('assembleProofBundle', () => {
   it('sets tier to FullZKCert-eligible "C" when passed', () => {
     expect(assembleProofBundle(baseCert(), 'C').tier).toBe('C');
   });
+
+  it('carries the DarkVeil allocation root a Tier B certificate settles against', () => {
+    expect(assembleProofBundle(baseCert(), 'B', dvRoot()).dvAllocationRoot).toBe('07'.repeat(32));
+  });
+
+  it('REFUSES a Tier B bundle with no allocation root — the certificate would commit to no distribution', () => {
+    expect(() => assembleProofBundle(baseCert(), 'B')).toThrow(/without the DarkVeil allocation root/);
+  });
+
+  it('refuses a Tier B allocation root that is not 32 bytes, rather than hashing a truncated one', () => {
+    expect(() => assembleProofBundle(baseCert(), 'B', new Uint8Array(31).fill(7))).toThrow(/got 31 bytes/);
+  });
+
+  it('leaves the root empty on Tier C, where every registrant gets the same baseSlot', () => {
+    expect(assembleProofBundle(baseCert(), 'C').dvAllocationRoot).toBe('');
+  });
+
+  it('refuses a root on Tier C rather than silently binding one that gates nothing', () => {
+    expect(() => assembleProofBundle(baseCert(), 'C', dvRoot())).toThrow(/no DarkVeil allocation root to bind/);
+  });
 });
 
 describe('computeProofBundleHash', () => {
   it('produces a real 32-byte Blake2b-256 digest', () => {
-    const hash = computeProofBundleHash(assembleProofBundle(baseCert(), 'B'));
+    const hash = computeProofBundleHash(assembleProofBundle(baseCert(), 'B', dvRoot()));
     expect(hash).toBeInstanceOf(Uint8Array);
     expect(hash.length).toBe(32);
   });
 
   it('is deterministic — the same bundle hashes to the same value every time', () => {
-    const bundle = assembleProofBundle(baseCert(), 'B');
+    const bundle = assembleProofBundle(baseCert(), 'B', dvRoot());
     const h1 = computeProofBundleHash(bundle);
     const h2 = computeProofBundleHash(bundle);
     expect(Array.from(h1)).toEqual(Array.from(h2));
@@ -73,10 +98,13 @@ describe('computeProofBundleHash', () => {
 
   it("is insensitive to the JS object's own key insertion order (canonicalization fixes real key order)", () => {
     const cert = baseCert();
-    const bundleA = assembleProofBundle(cert, 'B');
+    const bundleA = assembleProofBundle(cert, 'B', dvRoot());
     // Same values, deliberately different property insertion order.
     const bundleB: ProofBundle = {
       certHash: bundleA.certHash,
+      // Deliberately not last, though canonicalization puts it last — this
+      // test is worth nothing if the literal happens to match the real order.
+      dvAllocationRoot: bundleA.dvAllocationRoot,
       closeTimestamp: bundleA.closeTimestamp,
       tier: bundleA.tier,
       launchId: bundleA.launchId,
@@ -89,14 +117,24 @@ describe('computeProofBundleHash', () => {
   });
 
   it('produces a DIFFERENT hash when any field differs (real sensitivity, not a constant)', () => {
-    const h1 = computeProofBundleHash(assembleProofBundle(baseCert(), 'B'));
-    const h2 = computeProofBundleHash(assembleProofBundle(baseCert({ totalRaised: 25_000_001n }), 'B'));
+    const h1 = computeProofBundleHash(assembleProofBundle(baseCert(), 'B', dvRoot()));
+    const h2 = computeProofBundleHash(assembleProofBundle(baseCert({ totalRaised: 25_000_001n }), 'B', dvRoot()));
+    expect(Array.from(h1)).not.toEqual(Array.from(h2));
+  });
+
+  it('changes when the allocation root changes, on identical cert figures — the point of binding it', () => {
+    // Same participants, same tokens, same raise. Only the distribution
+    // differs, which is precisely what the aggregates cannot express and what
+    // this field exists to commit to.
+    const cert = baseCert();
+    const h1 = computeProofBundleHash(assembleProofBundle(cert, 'B', dvRoot(7)));
+    const h2 = computeProofBundleHash(assembleProofBundle(cert, 'B', dvRoot(8)));
     expect(Array.from(h1)).not.toEqual(Array.from(h2));
   });
 
   it('produces a different hash for Tier B vs Tier C of the SAME cert data (tier is part of the hashed content)', () => {
     const cert = baseCert();
-    const hB = computeProofBundleHash(assembleProofBundle(cert, 'B'));
+    const hB = computeProofBundleHash(assembleProofBundle(cert, 'B', dvRoot()));
     const hC = computeProofBundleHash(assembleProofBundle(cert, 'C'));
     expect(Array.from(hB)).not.toEqual(Array.from(hC));
   });
@@ -141,6 +179,7 @@ describe('relayCertificate — orchestration', () => {
     const result = await relayCertificate(
       launchManager,
       'B',
+      dvRoot(),
       fakePinner(fakeBytes(9, 34)),
       fakeSubmitter('tx-1'),
       'addr_relayer',
@@ -151,11 +190,25 @@ describe('relayCertificate — orchestration', () => {
   it('maps tier "B" to certType DarkVeilCert and tier "C" to FullZKCert', async () => {
     const cert = baseCert();
     const submitterB = fakeSubmitter('tx-b');
-    await relayCertificate(fakeLaunchManager(cert), 'B', fakePinner(fakeBytes(1)), submitterB, 'addr_relayer');
+    await relayCertificate(
+      fakeLaunchManager(cert),
+      'B',
+      dvRoot(),
+      fakePinner(fakeBytes(1)),
+      submitterB,
+      'addr_relayer',
+    );
     expect(vi.mocked(submitterB.submitAnchorCertificate).mock.calls[0][0].certType).toBe('DarkVeilCert');
 
     const submitterC = fakeSubmitter('tx-c');
-    await relayCertificate(fakeLaunchManager(cert), 'C', fakePinner(fakeBytes(1)), submitterC, 'addr_relayer');
+    await relayCertificate(
+      fakeLaunchManager(cert),
+      'C',
+      undefined,
+      fakePinner(fakeBytes(1)),
+      submitterC,
+      'addr_relayer',
+    );
     expect(vi.mocked(submitterC.submitAnchorCertificate).mock.calls[0][0].certType).toBe('FullZKCert');
   });
 
@@ -165,7 +218,7 @@ describe('relayCertificate — orchestration', () => {
     const pinner = fakePinner(cidBytes);
     const submitter = fakeSubmitter('tx-1');
 
-    const result = await relayCertificate(fakeLaunchManager(cert), 'B', pinner, submitter, 'addr_relayer');
+    const result = await relayCertificate(fakeLaunchManager(cert), 'B', dvRoot(), pinner, submitter, 'addr_relayer');
 
     expect(pinner.pin).toHaveBeenCalledTimes(1);
     expect(Array.from(result.proofIpfsCid)).toEqual(Array.from(cidBytes));
@@ -177,7 +230,14 @@ describe('relayCertificate — orchestration', () => {
     const cert = baseCert({ closeTimestamp: 9_999_999n });
     const submitter = fakeSubmitter('tx-1');
 
-    await relayCertificate(fakeLaunchManager(cert), 'B', fakePinner(fakeBytes(1)), submitter, 'addr_specific_relayer');
+    await relayCertificate(
+      fakeLaunchManager(cert),
+      'B',
+      dvRoot(),
+      fakePinner(fakeBytes(1)),
+      submitter,
+      'addr_specific_relayer',
+    );
 
     const [params, relayerAddr] = vi.mocked(submitter.submitAnchorCertificate).mock.calls[0];
     // zk_anchor.ak checks anchor_timestamp against the transaction's own
@@ -194,12 +254,28 @@ describe('relayCertificate — orchestration', () => {
     const submitter1 = fakeSubmitter('tx-1');
     const submitter2 = fakeSubmitter('tx-2');
 
-    const result1 = await relayCertificate(fakeLaunchManager(cert), 'B', fakePinner(fakeBytes(1)), submitter1, 'addr', {
-      displayName: 'Launch A',
-    });
-    const result2 = await relayCertificate(fakeLaunchManager(cert), 'B', fakePinner(fakeBytes(1)), submitter2, 'addr', {
-      displayName: 'Launch B',
-    });
+    const result1 = await relayCertificate(
+      fakeLaunchManager(cert),
+      'B',
+      dvRoot(),
+      fakePinner(fakeBytes(1)),
+      submitter1,
+      'addr',
+      {
+        displayName: 'Launch A',
+      },
+    );
+    const result2 = await relayCertificate(
+      fakeLaunchManager(cert),
+      'B',
+      dvRoot(),
+      fakePinner(fakeBytes(1)),
+      submitter2,
+      'addr',
+      {
+        displayName: 'Launch B',
+      },
+    );
 
     expect(Array.from(result1.metadataHash)).not.toEqual(Array.from(result2.metadataHash));
   });
@@ -209,6 +285,7 @@ describe('relayCertificate — orchestration', () => {
     const result = await relayCertificate(
       fakeLaunchManager(cert),
       'B',
+      dvRoot(),
       fakePinner(fakeBytes(1)),
       fakeSubmitter('real-tx-hash-99'),
       'addr',

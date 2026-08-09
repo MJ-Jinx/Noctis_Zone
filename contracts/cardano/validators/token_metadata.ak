@@ -446,7 +446,7 @@ fn mock_curve_datum(launch_id: ByteArray, creator_pub_key_hash: VerificationKeyH
     max_price: 1000,
     curve_supply: 1000,
     curve_state: bonding_curve.Active,
-    activated_at: 0,
+    phase_started_at: 0,
     tokens_sold: 0,
     total_raised: 0,
     creator_fees_accrued: 0,

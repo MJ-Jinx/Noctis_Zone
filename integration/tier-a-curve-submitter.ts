@@ -287,7 +287,7 @@ export class LucidTierACurveSubmitter {
     const newDatum: BondingCurveDatumData = {
       ...currentDatum,
       curve_state: 'Active',
-      activated_at: currentTimestamp,
+      phase_started_at: currentTimestamp,
     };
 
     // Redeemer: ActivateCurve is constructor index 0 of 12 — a plain
@@ -634,7 +634,7 @@ export class LucidTierACurveSubmitter {
   // ExecuteDexChange in tier-a-dex-change-submitter.ts. This requires a
   // real, narrow (<=600,000ms), honest-"now" validity range — no
   // backdating here (unlike ActivateCurve, which legitimately backdates
-  // `activated_at` itself to make this reachable without a real 90-day
+  // `phase_started_at` itself to make this reachable without a real 90-day
   // wait).
   // --------------------------------------------------------------------------
 
@@ -658,8 +658,13 @@ export class LucidTierACurveSubmitter {
     const curveUtxo = await this.findCurveUtxo(lucid);
     const currentDatum = Data.from<BondingCurveDatumData>(this.requireDatum(curveUtxo), BondingCurveDatumSchema);
 
-    if (currentDatum.curve_state !== 'Active') {
-      throw new Error(`Curve is not Active (state: ${currentDatum.curve_state}) — cannot expire.`);
+    // Mirrors the validator's own set of expirable states. A curve that was
+    // minted and never activated is stalled in the way this redeemer exists
+    // for — more so than a trading one, since ActivateCurve is governor-signed
+    // — so refusing it here would leave the client answering "no" to a
+    // transaction the chain would accept.
+    if (currentDatum.curve_state !== 'Active' && currentDatum.curve_state !== 'Inactive') {
+      throw new Error(`Curve is ${currentDatum.curve_state} — only an Active or Inactive curve can be expired.`);
     }
 
     const bech32Key = extendedHexToBech32PrivateKey(governorPrivateKeyExtendedHex);
