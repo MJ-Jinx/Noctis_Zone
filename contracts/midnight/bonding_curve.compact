@@ -1122,6 +1122,14 @@ export circuit revealBuyCommit(
 ): [] {
   assert(disclose(dvState == DarkVeilState.Closed), "DarkVeil not closed");
 
+  // A cancelled curve refunds what buyers paid, and this circuit records a
+  // payment. Revealing into that state turns an unrevealed commitment into a
+  // full refund of the purchase AND a full bond refund with nothing
+  // forfeited — a registrant who never bought recovering everything, which
+  // is the outcome the forfeiture exists to make expensive. The window to
+  // reveal closes when the curve does.
+  assert(disclose(curveState != CurveState.Cancelled), "Curve is cancelled");
+
   assert(commitments.member(disclose(commitment)), "Commitment not found");
   const commit = commitments.lookup(disclose(commitment));
   assert(disclose(commit.status == CommitStatus.Open), "Commitment already revealed");

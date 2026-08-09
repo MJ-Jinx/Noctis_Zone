@@ -1694,3 +1694,108 @@ describe('bonding_curve.compact — lifecycle and range guards', () => {
     );
   });
 });
+
+// ============================================================================
+// PoC — a commitment revealed after the curve is cancelled
+// ============================================================================
+// A ghost registrant is supposed to forfeit their bond: they hold an
+// allocation nobody else could take, and never pay for it. The forfeited
+// bond is what makes that cost something.
+//
+// Written to assert the exploit SUCCEEDS, so it is a real reproduction
+// before it is a regression test.
+
+describe('bonding_curve.compact — revealing after cancellation', () => {
+  /** Registers, commits, closes DarkVeil, then activates and expires the curve. */
+  function ghostThroughToExpiredCurve() {
+    const d = deploy();
+    const r0 = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.DarkVeil);
+    const ctx0 = nextContext(d.contractAddress, r0.context);
+    const r1 = d.contract.circuits.startRegistration(ctx0);
+    const ctx1 = nextContext(d.contractAddress, r1.context);
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const ctxReg = nextContext(d.contractAddress, rReg.context);
+    const r2 = d.contract.circuits.startBuying(ctxReg);
+    let ctx = nextContext(d.contractAddress, r2.context);
+
+    const purchased = 100n;
+    const buyerKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
+    const commitment = computeBuyCommit({
+      buyerKey,
+      launchId: LAUNCH_ID,
+      tokenAmount: purchased,
+      pricePerToken: DV_PRICE,
+      nonce: BUY_NONCE,
+    });
+    // Commit, and then simply do not reveal while the phase is open.
+    const r3 = d.contract.circuits.submitBuyCommit(ctx, commitment, 1n);
+    ctx = nextContext(d.contractAddress, r3.context);
+    const r4 = d.contract.circuits.closeDarkVeil(ctx, 2n, purchased);
+    ctx = nextContext(d.contractAddress, r4.context);
+
+    // The launch goes public, stalls, and anyone expires it after 90 days.
+    const r5 = d.contract.circuits.advancePhase(ctx, LaunchPhase.Public);
+    ctx = nextContext(d.contractAddress, r5.context);
+    const r6 = d.contract.circuits.activateCurve(ctx, 1000n);
+    ctx = nextContext(d.contractAddress, r6.context);
+    const afterMaxDuration = 1000n + 7776000n + 1n;
+    const r7 = d.contract.circuits.expireCurve(nextContextAtTime(d.contractAddress, ctx, afterMaxDuration));
+    ctx = nextContext(d.contractAddress, r7.context);
+
+    return { ...d, ctx, commitment, purchased };
+  }
+
+  it('refuses a reveal once the curve is cancelled', () => {
+    const g = ghostThroughToExpiredCurve();
+    const { creator, platform } = fees(g.purchased * DV_PRICE);
+
+    // Were this allowed, the reveal would record the full fee-inclusive
+    // payment in paidByBuyer, claimCurveRefund would hand all of it back,
+    // and the bond would then refund in full with nothing forfeited — a
+    // ghost recovering everything at no cost, which is exactly what the
+    // forfeiture is there to prevent.
+    expect(() =>
+      g.contract.circuits.revealBuyCommit(g.ctx, g.commitment, g.purchased, DV_PRICE, creator, platform),
+    ).toThrow('Curve is cancelled');
+  });
+
+  it('still allows a reveal while the curve is running', () => {
+    // The control: the deadline must not close the ordinary path.
+    const { contract, ctx } = registerBuyAndCloseForReveal(100n);
+    const { creator, platform } = fees(100n * DV_PRICE);
+    const commitment = computeBuyCommit({
+      buyerKey: deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID),
+      launchId: LAUNCH_ID,
+      tokenAmount: 100n,
+      pricePerToken: DV_PRICE,
+      nonce: BUY_NONCE,
+    });
+    expect(() => contract.circuits.revealBuyCommit(ctx, commitment, 100n, DV_PRICE, creator, platform)).not.toThrow();
+  });
+});
+
+/** Register, commit and close, leaving the commitment unrevealed. */
+function registerBuyAndCloseForReveal(purchased: bigint) {
+  const d = deploy();
+  const r0 = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.DarkVeil);
+  const ctx0 = nextContext(d.contractAddress, r0.context);
+  const r1 = d.contract.circuits.startRegistration(ctx0);
+  const ctx1 = nextContext(d.contractAddress, r1.context);
+  const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+  const ctxReg = nextContext(d.contractAddress, rReg.context);
+  const r2 = d.contract.circuits.startBuying(ctxReg);
+  let ctx = nextContext(d.contractAddress, r2.context);
+
+  const commitment = computeBuyCommit({
+    buyerKey: deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID),
+    launchId: LAUNCH_ID,
+    tokenAmount: purchased,
+    pricePerToken: DV_PRICE,
+    nonce: BUY_NONCE,
+  });
+  const r3 = d.contract.circuits.submitBuyCommit(ctx, commitment, 1n);
+  ctx = nextContext(d.contractAddress, r3.context);
+  const r4 = d.contract.circuits.closeDarkVeil(ctx, 2n, purchased);
+  ctx = nextContext(d.contractAddress, r4.context);
+  return { ...d, ctx };
+}
