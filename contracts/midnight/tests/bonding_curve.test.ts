@@ -1799,3 +1799,26 @@ function registerBuyAndCloseForReveal(purchased: bigint) {
   ctx = nextContext(d.contractAddress, r4.context);
   return { ...d, ctx };
 }
+
+describe('bonding_curve.compact — a closed DarkVeil cannot be marked failed', () => {
+  it('refuses markDarkVeilFailed once DarkVeil has closed normally', () => {
+    // Failed and normally-closed are mutually exclusive by design:
+    // claimRatioBondRefund settles a bond against what the registrant
+    // actually bought, while dvFailed opens the full-refund path to
+    // everyone. Allowing both would let a completed phase refund the bonds
+    // it was supposed to settle.
+    const d = deploy();
+    const r0 = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.DarkVeil);
+    const ctx0 = nextContext(d.contractAddress, r0.context);
+    const r1 = d.contract.circuits.startRegistration(ctx0);
+    const ctx1 = nextContext(d.contractAddress, r1.context);
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const ctxReg = nextContext(d.contractAddress, rReg.context);
+    const r2 = d.contract.circuits.startBuying(ctxReg);
+    const ctx2 = nextContext(d.contractAddress, r2.context);
+    const r3 = d.contract.circuits.closeDarkVeil(ctx2, 2n, 100n);
+    const ctx3 = nextContext(d.contractAddress, r3.context);
+
+    expect(() => d.contract.circuits.markDarkVeilFailed(ctx3)).toThrow('DarkVeil already closed normally');
+  });
+});

@@ -6,6 +6,22 @@ import CompactStandardLibrary;
 // ELIGIBILITY GATE + DARKVEIL PSM (merged) — Noctis Protocol, Tier B
 // ============================================================================
 //
+// ---------------------------------------------------------------------------
+// TWIN RULE — read before changing anything in the DarkVeil half of this file
+// ---------------------------------------------------------------------------
+// This contract and bonding_curve.compact (Tier C) are twins: both
+// merge DarkVeil registration, bonding and commit/reveal buying into one
+// contract, and both
+// carry near-identical circuits for it. They drifted once, because a fix
+// applied to one was not applied to the other, and the difference was only
+// visible to someone reading both files side by side.
+//
+// So: any change to a DarkVeil circuit here is either applied in the twin as
+// well, or explicitly declined in writing — a comment at the changed circuit
+// saying which tier it does not apply to and why. "I only needed it here" is
+// how the drift happened; a stated reason is checkable, silence is not.
+// ---------------------------------------------------------------------------
+//
 // This is Tier B's merged DarkVeil contract — eligibility_gate.compact
 // (allowlist, cumulative cap, NIGHT bond lock/refund) folded together with
 // darkveil.compact (private commit/reveal buying, ZK Fair Launch Cert).
@@ -1601,6 +1617,11 @@ export circuit markDarkVeilFailed(): [] {
   const govKey = deriveGovernorKey(govSecret);
   assert(disclose(govKey.bytes == governorKey), "Only governor can mark DarkVeil failed");
   assert(disclose(!dvFailed), "DarkVeil already marked failed");
+  // A normally-closed DarkVeil is not a failed one: claimRatioBondRefund
+  // already treats the two as mutually exclusive, and marking a closed
+  // phase failed would open the full-refund path to registrants whose
+  // bonds are meant to settle against what they actually bought.
+  assert(disclose(dvState != DarkVeilState.Closed), "DarkVeil already closed normally");
   dvFailed = disclose(true);
 }
 

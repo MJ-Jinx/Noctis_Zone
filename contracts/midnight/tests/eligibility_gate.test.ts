@@ -1812,3 +1812,17 @@ describe('eligibility_gate.compact — registrant exclusion dispute', () => {
     ).toThrow('claim the ratio refund instead');
   });
 });
+
+describe('eligibility_gate.compact — a closed DarkVeil cannot be marked failed', () => {
+  it('refuses markDarkVeilFailed once DarkVeil has closed normally', () => {
+    // The twin of the same guard on the Tier C contract. Failed and
+    // normally-closed are mutually exclusive by design: claimRatioBondRefund
+    // settles a bond against what the registrant actually bought, while
+    // dvFailed opens the full-refund path to everyone.
+    const d = deployAndStartDvBuying();
+    const r = d.contract.circuits.closeDarkVeil(d.ctx, 2n, 100n);
+    const ctx = nextContext(d.contractAddress, r.context);
+
+    expect(() => d.contract.circuits.markDarkVeilFailed(ctx)).toThrow('DarkVeil already closed normally');
+  });
+});
