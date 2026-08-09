@@ -277,6 +277,25 @@ sealed ledger launchId: Bytes<32>;
 // Merkle root of the allowlist (governor-updatable for late additions)
 export ledger allowlistRoot: Bytes<32>;
 
+// Buyers who have proven allowlist membership, and the root they proved it
+// against.
+//
+// Why this exists: proving membership folds 20 Merkle levels, and a ZK
+// circuit pays for that fold on every call whether it needs it or not —
+// there is no branch that skips it. Doing it inside buyTokens meant a
+// buyer splitting one purchase into many small calls re-paid the most
+// expensive part of the circuit each time, and on this network the
+// platform sponsors that cost. verifyBuyerEligibility now pays it once per
+// wallet and records the result here; buyTokens does a map lookup.
+//
+// Why the value is the root and not just a flag: allowlistRoot is
+// governor-updatable, so a wallet verified against an older root would
+// otherwise stay verified forever, including after being removed from the
+// allowlist. Storing the root that was proven means a change to the
+// allowlist invalidates every earlier verification on its own, with
+// nothing to clear.
+export ledger verifiedBuyers: Map<Bytes<32>, Bytes<32>>;
+
 // Current phase of the launch (DarkVeil registration/buying vs public curve)
 export ledger phase: LaunchPhase;
 
@@ -830,6 +849,14 @@ constructor(
   assert(disclose(walletCap_ > 0), "walletCap must be positive");
   walletCap = disclose(walletCap_);
 
+  // verifyRatioRefund's own 2^44-1 ceiling on `bonded` would otherwise only
+  // ever be checked the first time claimRatioBondRefund runs — potentially
+  // long after registration, bonding and buying are all committed for this
+  // launch. Checked at deploy instead: a bondAmount above this ceiling means
+  // no bond refund could ever succeed for the whole launch, and that is
+  // worth learning before anyone bonds rather than after.
+  assert(disclose(bondAmount_ <= 17592186044415), "bondAmount exceeds verifyRatioRefund's safe range"); // 2^44 - 1
+
   basePrice = disclose(basePrice_);
   maxPrice = disclose(maxPrice_);
   curveSupply = disclose(curveSupply_);
@@ -847,6 +874,7 @@ constructor(
   const govKey = deriveGovernorKey(govSecret);
   governorKey = disclose(govKey);
   creatorKey = disclose(creatorPubKey_);
+  assert(disclose(platformAddr_ != pad(32, "")), "platformAddr cannot be empty");
   platformAddr = disclose(platformAddr_);
   creatorAddr = disclose(creatorAddr_);
   lpEscrowAddr = disclose(lpEscrowAddr_);
@@ -1248,6 +1276,11 @@ export circuit closeDarkVeil(closeTimestamp: Uint<64>, baseSlot_: Uint<128>): []
   assert(disclose(govKey == governorKey), "Only governor can close DarkVeil");
 
   assert(disclose(baseSlot_ > 0), "baseSlot must be positive");
+  // verifyRatioRefund's own 2^40-1 ceiling on `allocated` (baseSlot)
+  // would otherwise only surface the first time claimRatioBondRefund
+  // runs, after every registrant has already bonded and bought — fail
+  // fast here instead, before any bond refund can be blocked.
+  assert(disclose(baseSlot_ <= 1099511627775), "baseSlot exceeds verifyRatioRefund's safe range"); // 2^40 - 1
   // Fix (2026-07-21, Medium): same unvalidated-baseSlot finding as
   // eligibility_gate.compact — see that circuit's parallel fix comment.
   const totalAllocatedF = ((baseSlot_ as Field) * (registrationCount.read() as Field)) as Field;
@@ -1496,6 +1529,28 @@ export circuit claimRatioBondRefund(
 // CIRCUITS — BONDING CURVE BUY
 // ============================================================================
 
+// Prove allowlist membership once, so that buying does not have to.
+//
+// Separate from buyTokens deliberately: this is the circuit that carries
+// the 20-level Merkle fold, and a ZK circuit pays for its fold on every
+// call regardless of any branch around it. Keeping it here means a buyer
+// pays that cost once per wallet rather than once per purchase, which is
+// what stops many-small-buys from being a way to spend the platform's
+// sponsorship rather than their own money.
+//
+// The caller can only ever verify THEMSELVES: the key recorded is derived
+// in-circuit from their own secret, not supplied as an argument, so this
+// cannot be used to mark anyone else as verified.
+export circuit verifyBuyerEligibility(): [] {
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk, launchId);
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
+
+  verifyAllowlist(caller.bytes);
+
+  verifiedBuyers.insert(disclose(caller.bytes), disclose(allowlistRoot));
+}
+
 // Buy tokens from the bonding curve
 // The caller provides the expected price (computed off-chain) and we verify it
 // via the multiplication invariant (no division needed in circuit)
@@ -1579,11 +1634,19 @@ export circuit buyTokens(
   // real behavior change: the public phase is now allowlist-gated, not
   // open to arbitrary buyers (confirmed as the intended fix, not the
   // alternative of merely correcting the "strong" cap claim).
-  verifyAllowlist(caller.bytes);
-
   // Creator cannot wash-trade their own public bonding curve (e.g. to
   // force last-mile 100% sell-through and start their own vesting clock).
   assert(disclose(caller.bytes != creatorKey), "Creator cannot buy their own bonding curve");
+
+  // Membership was proven once, by verifyBuyerEligibility, under the root
+  // recorded alongside it. Re-running the fold here would charge the
+  // platform the most expensive part of this circuit on every call,
+  // including a call that buys one token — see verifiedBuyers' own note.
+  assert(verifiedBuyers.member(disclose(caller.bytes)), "Buyer has not proven allowlist membership");
+  assert(
+    disclose(verifiedBuyers.lookup(disclose(caller.bytes)) == allowlistRoot),
+    "Allowlist changed since this buyer was verified"
+  );
 
   // Fix (2026-07-10): enforce the 5% cumulative cap atomically, in the
   // same circuit call, against the same cumulativePurchases map DarkVeil
@@ -1704,6 +1767,17 @@ export circuit advancePhase(newPhase: LaunchPhase): [] {
   const govSecret = getGovernorSecret();
   const govKey = deriveGovernorKey(govSecret);
   assert(disclose(govKey == governorKey), "Only governor can advance phase");
+
+  // The four checks below each guard their own forward transition, but none
+  // of them ever matches newPhase == Pending, so the lifecycle could be
+  // driven backwards from any state with no assertion firing. Pending is
+  // only ever the constructor's initial value, never a legitimate target.
+  //
+  // On this tier that ordering is what protects the bonds: refunds are
+  // reachable from Cancelled, so returning to Pending after a cancellation
+  // would strand every bond that had not already been claimed. The phase
+  // only ever moves forward now.
+  assert(disclose(newPhase != LaunchPhase.Pending), "Cannot advance phase back to Pending");
 
   if (disclose(newPhase == LaunchPhase.DarkVeil)) {
     assert(disclose(phase == LaunchPhase.Pending), "Must be in Pending to start DarkVeil");

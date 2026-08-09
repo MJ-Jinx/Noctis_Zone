@@ -142,7 +142,11 @@ function deployAndAdvanceToPublic() {
 function deployAndActivate() {
   const d = deployAndAdvanceToPublic();
   const r = d.contract.circuits.activateCurve(d.ctx, 1000n);
-  const ctx = nextContext(d.contractAddress, r.context);
+  // Proving allowlist membership is its own circuit now, so that buying does
+  // not re-pay for the Merkle fold on every call. A buyer does it once; these
+  // tests do it here so each one starts from a wallet that has.
+  const rv = d.contract.circuits.verifyBuyerEligibility(nextContext(d.contractAddress, r.context));
+  const ctx = nextContext(d.contractAddress, rv.context);
   return { ...d, ctx };
 }
 
@@ -244,9 +248,13 @@ describe('bonding_curve.compact — quadratic pricing', () => {
     const claimedPrice = expectedPrice(0n);
     const grossPayment = 10n * claimedPrice;
     const { creator, platform } = fees(grossPayment);
+    // The proof is checked by verifyBuyerEligibility now, so that is where a
+    // non-member is turned away — before any purchase is priced.
+    expect(() => notAllowlisted.circuits.verifyBuyerEligibility(ctx)).toThrow('Invalid allowlist proof');
+    // And buying stays closed to them, because nothing recorded them.
     expect(() =>
       notAllowlisted.circuits.buyTokens(ctx, 10n, claimedPrice, grossPayment, creator, platform, 1n),
-    ).toThrow('Invalid allowlist proof');
+    ).toThrow('Buyer has not proven allowlist membership');
     void contractAddress;
   });
 
@@ -621,7 +629,9 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
     const r1 = contract.circuits.advancePhase(ctx0, LaunchPhase.Public);
     const ctx1 = nextContext(contractAddress, r1.context);
     const r2 = contract.circuits.activateCurve(ctx1, 1000n);
-    const ctx2 = nextContext(contractAddress, r2.context);
+    const ctx2a = nextContext(contractAddress, r2.context);
+    const rv = contract.circuits.verifyBuyerEligibility(ctx2a);
+    const ctx2 = nextContext(contractAddress, rv.context);
 
     const claimedPrice = expectedPrice(0n);
     const tokenAmount = tightCap + 1n; // exceeds tightCap (5)
@@ -1091,7 +1101,9 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const r4 = d.contract.circuits.advancePhase(ctx3, LaunchPhase.Public);
     const ctx4 = nextContext(d.contractAddress, r4.context);
     const r5 = d.contract.circuits.activateCurve(ctx4, 1000n);
-    const ctx5 = nextContext(d.contractAddress, r5.context);
+    const ctx5a = nextContext(d.contractAddress, r5.context);
+    const rv5 = d.contract.circuits.verifyBuyerEligibility(ctx5a);
+    const ctx5 = nextContext(d.contractAddress, rv5.context);
 
     const claimedPrice = expectedPrice(0n);
     const publicAmount = 10n;
@@ -1576,5 +1588,109 @@ describe('bonding_curve.compact — the design requirement: withdrawFees and gra
   it('graduateLp rejects a curve that has not graduated yet', () => {
     const { contract, ctx } = deployAndActivate(); // not graduated — no buys yet
     expect(() => contract.circuits.graduateLp(ctx)).toThrow('Curve has not graduated');
+  });
+});
+
+// ============================================================================
+// verifyBuyerEligibility — proving membership once, and what invalidates it
+// ============================================================================
+
+describe('bonding_curve.compact — buyer verification is separate from buying', () => {
+  it('records the buyer under the root they actually proved against', () => {
+    const { contract, contractAddress, ctx } = deployAndAdvanceToPublic();
+    const r = contract.circuits.activateCurve(ctx, 1000n);
+    const ctxA = nextContext(contractAddress, r.context);
+
+    const rv = contract.circuits.verifyBuyerEligibility(ctxA);
+    const state = ledger(rv.context.currentQueryContext.state);
+
+    expect(state.verifiedBuyers.member(BUYER_KEY)).toBe(true);
+    expect(state.verifiedBuyers.lookup(BUYER_KEY)).toEqual(state.allowlistRoot);
+  });
+
+  it('lets a verified buyer buy repeatedly without re-proving', () => {
+    // The whole point of the split: the second purchase carries no Merkle
+    // proof of its own, and is still accepted.
+    const { contract, contractAddress, ctx } = deployAndActivate();
+
+    const p1 = expectedPrice(0n);
+    const g1 = 10n * p1;
+    const f1 = fees(g1);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, p1, g1, f1.creator, f1.platform, 1n);
+    const ctx1 = nextContext(contractAddress, r1.context);
+
+    const p2 = expectedPrice(10n);
+    const g2 = 10n * p2;
+    const f2 = fees(g2);
+    const r2 = contract.circuits.buyTokens(ctx1, 10n, p2, g2, f2.creator, f2.platform, 2n);
+
+    expect(ledger(r2.context.currentQueryContext.state).tokensSold).toBe(20n);
+  });
+
+  it('stops honouring a verification once the governor changes the allowlist', () => {
+    // A wallet removed from the allowlist would otherwise stay verified
+    // forever, because nothing clears the record. Binding the record to the
+    // root it was proven against means the change invalidates it by itself.
+    const { contract, contractAddress, ctx } = deployAndActivate();
+
+    const rUpdate = contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123));
+    const ctxU = nextContext(contractAddress, rUpdate.context);
+
+    const price = expectedPrice(0n);
+    const gross = 10n * price;
+    const { creator, platform } = fees(gross);
+    expect(() => contract.circuits.buyTokens(ctxU, 10n, price, gross, creator, platform, 1n)).toThrow(
+      'Allowlist changed since this buyer was verified',
+    );
+  });
+
+  it('a buyer who never verified cannot buy', () => {
+    const { contract, contractAddress, ctx } = deployAndAdvanceToPublic();
+    const r = contract.circuits.activateCurve(ctx, 1000n);
+    const ctxA = nextContext(contractAddress, r.context);
+
+    const price = expectedPrice(0n);
+    const gross = 10n * price;
+    const { creator, platform } = fees(gross);
+    expect(() => contract.circuits.buyTokens(ctxA, 10n, price, gross, creator, platform, 1n)).toThrow(
+      'Buyer has not proven allowlist membership',
+    );
+  });
+});
+
+// ============================================================================
+// Parity with the Tier B twin — guards that existed there and not here
+// ============================================================================
+
+describe('bonding_curve.compact — lifecycle and range guards', () => {
+  it('refuses to move the phase back to Pending', () => {
+    // Refunds are reachable from Cancelled, so a return to Pending after a
+    // cancellation would strand every bond not already claimed.
+    const { contract, contractAddress, ctx } = deployAndAdvanceToPublic();
+    const rc = contract.circuits.advancePhase(ctx, LaunchPhase.Cancelled);
+    const ctxC = nextContext(contractAddress, rc.context);
+
+    expect(() => contract.circuits.advancePhase(ctxC, LaunchPhase.Pending)).toThrow(
+      'Cannot advance phase back to Pending',
+    );
+  });
+
+  it('refuses a baseSlot above the range bond refunds can be computed over', () => {
+    // 2^40 - 1 is verifyRatioRefund's own ceiling on `allocated`. Above it,
+    // every claimRatioBondRefund for the launch would fail — better to learn
+    // that at close than after everyone has bonded.
+    const d = deploy();
+    const r0 = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.DarkVeil);
+    const ctx0 = nextContext(d.contractAddress, r0.context);
+    const r1 = d.contract.circuits.startRegistration(ctx0);
+    const ctx1 = nextContext(d.contractAddress, r1.context);
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const ctxReg = nextContext(d.contractAddress, rReg.context);
+    const r2 = d.contract.circuits.startBuying(ctxReg);
+    const ctx2 = nextContext(d.contractAddress, r2.context);
+
+    expect(() => d.contract.circuits.closeDarkVeil(ctx2, 1n, 1099511627776n)).toThrow(
+      "baseSlot exceeds verifyRatioRefund's safe range",
+    );
   });
 });
