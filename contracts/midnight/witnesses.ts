@@ -53,6 +53,44 @@ import { CompactTypeBytes, CompactTypeVector, persistentHash } from '@midnight-n
 export type PrivateState = undefined;
 
 /**
+ * A privileged secret, or a loud failure — never a quieter secret.
+ *
+ * Governor, creator and community secrets are optional arguments to the
+ * factories below, because most calls never touch them. They used to fall back
+ * to the user secret when absent, which is wrong in a way that does not
+ * announce itself: six of these contracts derive their authority key from this
+ * witness IN THE CONSTRUCTOR, into a SEALED ledger field. A deploy that simply
+ * forgot the argument would therefore bind governor authority to whoever
+ * deployed, permanently, with every later governor check passing for that
+ * person and no signal anywhere that the wrong key is in charge.
+ *
+ * Failing here instead costs nothing: the runtime only invokes a witness the
+ * circuit actually reads, so an ordinary call that never touches governor
+ * authority never reaches this — verified by running the whole suite with
+ * every one of these throwing, which changed no result.
+ *
+ * A test that wants to prove a privileged check REJECTS an impostor should
+ * supply a different secret, not omit this one. Omitting it is a caller bug,
+ * and that is what this reports.
+ */
+function requirePrivileged(
+  secret: UserSecretKey | undefined,
+  argumentName: string,
+  contractName: string,
+): UserSecretKey {
+  if (secret === undefined) {
+    throw new Error(
+      `${contractName} witnesses: this call needs ${argumentName}, which was not supplied. ` +
+        'Privileged secrets do not fall back to the user secret — the authority key is derived ' +
+        'from this witness into a sealed field at deploy, so a fallback would bind that authority ' +
+        'to the caller silently and permanently. Pass the real secret, or, to test that a ' +
+        'privileged check rejects an impostor, pass a DIFFERENT one.',
+    );
+  }
+  return secret;
+}
+
+/**
  * A witness function's real shape, per compactc-generated
  * `Witnesses<PS>` (see any contracts/midnight/compiled/<psm>/contract/index.d.ts):
  * takes a `WitnessContext<Ledger, PS>` and returns `[PS, value]`, NOT a
@@ -268,7 +306,7 @@ export function eligibilityGateWitnesses(
     getMerkleProof: () => [undefined, merkleProof],
     getRegistrantMerkleProof: () => [undefined, registrantMerkleProof ?? merkleProof],
     getRegistrationNonce: () => [undefined, registrationNonce],
-    getGovernorSecret: () => [undefined, governorSk ?? userSk], // fallback for non-admin calls
+    getGovernorSecret: () => [undefined, requirePrivileged(governorSk, 'governorSk', 'eligibilityGateWitnesses')],
     getBuyNonce: () => [undefined, buyNonce],
   };
 }
@@ -313,7 +351,7 @@ export function bondingCurveWitnesses(
 ): BondingCurveWitnesses {
   return {
     getUserSecret: () => [undefined, userSk],
-    getGovernorSecret: () => [undefined, governorSk ?? userSk],
+    getGovernorSecret: () => [undefined, requirePrivileged(governorSk, 'governorSk', 'bondingCurveWitnesses')],
     getMerkleProof: () => [undefined, merkleProof],
     // Same shape and same fallback as the Tier B builder above, deliberately:
     // the two contracts carry the same DarkVeil circuits and their witness
@@ -345,7 +383,7 @@ export function creatorEscrowWitnesses(
   return {
     getCreatorSecret: () => [undefined, creatorSk],
     getGovernorSecret: () => [undefined, governorSk],
-    getCommunitySecret: () => [undefined, communitySk ?? creatorSk], // fallback for non-community calls
+    getCommunitySecret: () => [undefined, requirePrivileged(communitySk, 'communitySk', 'creatorEscrowWitnesses')],
   };
 }
 
@@ -384,7 +422,7 @@ export type LpEscrowWitnesses = {
 export function lpEscrowWitnesses(governorSk: UserSecretKey, communitySk?: UserSecretKey): LpEscrowWitnesses {
   return {
     getGovernorSecret: () => [undefined, governorSk],
-    getCommunitySecret: () => [undefined, communitySk ?? governorSk], // fallback for non-CTO calls
+    getCommunitySecret: () => [undefined, requirePrivileged(communitySk, 'communitySk', 'lpEscrowWitnesses')],
   };
 }
 
@@ -440,7 +478,7 @@ export function ctoGovernanceWitnesses(
 ): CtoGovernanceWitnesses {
   return {
     getUserSecret: () => [undefined, userSk],
-    getGovernorSecret: () => [undefined, governorSk ?? userSk], // fallback for non-admin calls
+    getGovernorSecret: () => [undefined, requirePrivileged(governorSk, 'governorSk', 'ctoGovernanceWitnesses')],
     getBalanceLeafAmount: () => [undefined, balanceLeafAmount],
     getBalanceLeafHeldSince: () => [undefined, balanceLeafHeldSince],
     getBalanceProof: () => [undefined, balanceProof],
@@ -491,8 +529,8 @@ export function stakingPoolWitnesses(
 ): StakingPoolWitnesses {
   return {
     getUserSecret: () => [undefined, userSk],
-    getGovernorSecret: () => [undefined, governorSk ?? userSk], // fallback for non-admin calls
-    getCreatorSecret: () => [undefined, creatorSk ?? userSk], // fallback for non-topUpPool calls
+    getGovernorSecret: () => [undefined, requirePrivileged(governorSk, 'governorSk', 'stakingPoolWitnesses')],
+    getCreatorSecret: () => [undefined, requirePrivileged(creatorSk, 'creatorSk', 'stakingPoolWitnesses')],
     getStakeProof: () => [undefined, stakeProof],
     getStakeLeafAmount: () => [undefined, stakeLeafAmount],
     getRewardProof: () => [undefined, rewardProof],

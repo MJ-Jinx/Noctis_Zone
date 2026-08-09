@@ -38,9 +38,19 @@ for (const v of blueprint.validators) {
 }
 
 /**
- * Measured 2026-08-08. Update in the same commit that moves one.
+ * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
- * Last moved by ordering both curve datums so the fields a redeemer REWRITES
+ * Last moved by requiring a graduating Tier B curve to have raised something:
+ * +18, for the guard Tier A has had since the same audit found it. At zero
+ * raised, both of that arm's value checks stop constraining anything.
+ *
+ * Before that, letting ExpireCurve reach a curve that was minted and never
+ * activated: Tier A +24, Tier B +16, for one extra state in each arm's
+ * disjunction. Both ways out of that state are governor-signed, so the cost
+ * buys a launch's whole supply a way out that does not depend on one key
+ * still answering.
+ *
+ * Before that, ordering both curve datums so the fields a redeemer REWRITES
  * are declared before the fields only read: Tier A −1,258, Tier B −2,253, and
  * token_metadata +27 because it reads Tier A's datum and its fields moved
  * back. A record update walks the field list to reach what it replaces, so
@@ -71,16 +81,10 @@ for (const v of blueprint.validators) {
  * that cannot claim a window opening before the launch was eligible to hold
  * one. Well inside the 16,384 B cap; recorded here so the growth is a
  * decision rather than a surprise.
- *
- * Last moved by letting ExpireCurve reach a curve that was minted and never
- * activated: Tier A +24, Tier B +16, for one extra state in each arm's
- * disjunction. Both ways out of that state are governor-signed, so the cost
- * buys a launch's whole supply a way out that does not depend on one key
- * still answering.
  */
 const RECORDED: Record<string, number> = {
   bonding_curve: 10_928,
-  bonding_curve_tier_b: 13_725,
+  bonding_curve_tier_b: 13_743,
   cto_governance: 7_370,
   cto_sybil_challenge: 1_294,
   curve_order: 1_775,

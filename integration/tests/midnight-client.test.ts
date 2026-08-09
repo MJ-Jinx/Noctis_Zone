@@ -399,7 +399,7 @@ describe('NoctisMidnightClient.deployBondingCurve / connectBondingCurve', () => 
 });
 
 describe('NoctisMidnightClient.deployCreatorEscrow / connectCreatorEscrow', () => {
-  it('passes [launchId, currency] and builds witnesses with a community-secret fallback to creatorSk', async () => {
+  it('passes [launchId, currency] and refuses to answer for a community wallet it was never given', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployCreatorEscrow(FAKE_PROVIDERS, {
       launchId: fakeBytes32(40),
@@ -418,7 +418,10 @@ describe('NoctisMidnightClient.deployCreatorEscrow / connectCreatorEscrow', () =
     const w = call.compiledContract.witnesses;
     expect(w.getCreatorSecret(undefined)[1]).toEqual(USER_SK);
     expect(w.getGovernorSecret(undefined)[1]).toEqual(GOVERNOR_SK);
-    expect(w.getCommunitySecret(undefined)[1]).toEqual(USER_SK); // fallback: no communitySk passed
+    // No communitySk was passed. This used to hand back the creator's secret,
+    // which would have made the CTO redirect answer to the creator it exists
+    // to redirect away from.
+    expect(() => w.getCommunitySecret(undefined)).toThrow(/needs communitySk/);
   });
 
   it('uses an explicit communitySk when provided', async () => {
@@ -464,7 +467,7 @@ describe('NoctisMidnightClient.deployVesting / connectVesting', () => {
 });
 
 describe('NoctisMidnightClient.deployLpEscrow / connectLpEscrow', () => {
-  it('passes [launchId, lockDuration] and defaults getCommunitySecret to governorSk', async () => {
+  it('passes [launchId, lockDuration] and refuses to answer for a community wallet it was never given', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployLpEscrow(FAKE_PROVIDERS, {
       launchId: fakeBytes32(60),
@@ -479,7 +482,10 @@ describe('NoctisMidnightClient.deployLpEscrow / connectLpEscrow', () => {
     }>(vi.mocked(deployContract).mock.calls[0][1]);
     expect(call.privateStateId).toBe('lp_escrow');
     expect(call.args).toEqual([fakeBytes32(60), 31_536_000n]);
-    expect(call.compiledContract.witnesses.getCommunitySecret(undefined)[1]).toEqual(GOVERNOR_SK);
+    // No communitySk was passed. Substituting the governor's secret here
+    // would have let the platform hold the community's authority over a
+    // launch it no longer runs.
+    expect(() => call.compiledContract.witnesses.getCommunitySecret(undefined)).toThrow(/needs communitySk/);
   });
 
   it('connectLpEscrow calls findDeployedContract with the given contractAddress', async () => {

@@ -1833,6 +1833,14 @@ validator bonding_curve_tier_b {
           !datum.lp_seeded,
           !datum.staking_seeded,
           new_datum == expected_datum,
+          // Real, positive backing before a launch can call itself graduated
+          // — see Tier A's own Graduate arm for the full reasoning. Enough
+          // SellTokens activity before the final buy can leave total_raised
+          // non-positive at 100% sell-through, and at zero both of the value
+          // checks below degrade into things any output satisfies. This tier
+          // has the same SellTokens redeemer and reaches the same state the
+          // same way, so it needs the same guard.
+          datum.total_raised > 0,
           graduation_funds_left_curve(self, own_ref, datum, datum.total_raised),
           lp_seeding_output_ok(self, datum, datum.total_raised),
           staking_seeding_output_ok(self, datum),
@@ -7148,4 +7156,70 @@ test tier_b_expire_curve_rejects_from_dv_claim_even_past_the_deadline() {
     own_ref,
     self,
   )
+}
+
+/// The passing graduation above with ONE difference: nothing was actually
+/// raised. Enough SellTokens activity before the final buy can leave
+/// total_raised at zero while tokens_sold still reaches curve_supply, and at
+/// zero both value checks stop meaning anything — the curve need only not
+/// decrease, and the LP need only receive at least nothing. What lands is a
+/// launch labelled Graduated behind an LP with no ada in it, locked for a
+/// year. Tier A has refused this since the same audit; this tier reaches the
+/// state by the same route and now refuses it too.
+test tier_b_graduate_rejects_non_positive_total_raised() {
+  let datum = BondingCurveTierBDatum { ..graduation_datum(), total_raised: 0 }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let lp_address = from_verification_key(#"ff")
+  let base_lovelace = 5_000_000 + 98_000
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_curve_nft(), assets.merge(
+          assets.from_lovelace(base_lovelace),
+          assets.from_asset(#"33", "tok", 150),
+        )),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum =
+    BondingCurveTierBDatum {
+      ..datum,
+      total_raised: 0,
+      lp_seeded: True,
+      staking_seeded: True,
+    }
+  // Nothing moves, because there is nothing to move — which is exactly why
+  // every other check here is satisfied and only the new one is not.
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_curve_nft(), assets.merge(
+        assets.from_lovelace(base_lovelace),
+        assets.from_asset(#"33", "tok", 0),
+      )),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let lp_output =
+    Output {
+      address: lp_address,
+      value: assets.merge(mock_lp_escrow_nft(), assets.merge(
+        assets.from_lovelace(0),
+        assets.from_asset(#"33", "tok", 150),
+      )),
+      datum: transaction.NoDatum,
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output, lp_output],
+    }
+
+  !bonding_curve_tier_b.spend(Some(datum), Graduate, own_ref, self)
 }
