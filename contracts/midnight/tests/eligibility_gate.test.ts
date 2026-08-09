@@ -108,6 +108,28 @@ function deploy(walletCap: bigint = CORRECT_WALLET_CAP) {
   return { contract, init, contractAddress, ctx };
 }
 
+/** Deploys with an explicit registrationCloseTime, for the anchor guard. */
+function deployWithRegistrationCloseTime(closeTime: bigint) {
+  const contract = new Contract<PrivateState>(witnesses);
+  return deployForTest(
+    contract,
+    undefined,
+    LAUNCH_ID,
+    ALLOWLIST_TREE.root,
+    TOTAL_SUPPLY,
+    MAX_WALLET_PERCENT,
+    1000n,
+    CORRECT_WALLET_CAP,
+    DV_ALLOCATION,
+    DV_PRICE,
+    ALLOWLIST_SIZE,
+    closeTime,
+    MIN_DV_PARTICIPANTS_TEST,
+    CREATOR_KEY,
+    PLATFORM_ADDR,
+  );
+}
+
 // Fix (2026-07-21): registerForDarkVeil now requires
 // dvState == Registration (not just phase == DarkVeil), so this helper
 // also calls startRegistration() — every caller of this helper registers
@@ -1824,5 +1846,90 @@ describe('eligibility_gate.compact — a closed DarkVeil cannot be marked failed
     const ctx = nextContext(d.contractAddress, r.context);
 
     expect(() => d.contract.circuits.markDarkVeilFailed(ctx)).toThrow('DarkVeil already closed normally');
+  });
+});
+
+// ============================================================================
+// expireDarkVeil — giving up on a phase the governor stopped moving
+// ============================================================================
+// Every DarkVeil transition is governor-only, and the one existing timeout
+// sits behind a governor-only call, so a governor who goes silent used to
+// freeze the launch with every bond locked inside it.
+
+describe('eligibility_gate.compact — permissionless DarkVeil expiry', () => {
+  const EXPIRY = 604800n; // 7 days, hardcoded in the contract
+  const PAST_DEADLINE = Number(REGISTRATION_CLOSE_TIME + EXPIRY + 1n);
+
+  /** A registrant who has bonded, in a phase that then stops moving. */
+  function bondedThenAbandoned() {
+    const d = deploy();
+    const r0 = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.DarkVeil);
+    const c1 = nextContext(d.contractAddress, r0.context);
+    const r1 = d.contract.circuits.startRegistration(c1);
+    const c2 = nextContext(d.contractAddress, r1.context);
+    const rReg = d.contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    return { ...d, ctx: nextContext(d.contractAddress, rReg.context) };
+  }
+
+  it('refuses before the deadline', () => {
+    const d = bondedThenAbandoned();
+    const tooEarly = nextContextAtTime(d.contractAddress, d.ctx, Number(REGISTRATION_CLOSE_TIME));
+    expect(() => d.contract.circuits.expireDarkVeil(tooEarly)).toThrow(
+      'DarkVeil has not yet exceeded its expiry deadline',
+    );
+  });
+
+  it('lets ANYONE expire it once the deadline passes, and the bond becomes claimable', () => {
+    // The point of the whole circuit: the bond comes back without the
+    // governor doing anything, which was impossible before.
+    const d = bondedThenAbandoned();
+    const late = nextContextAtTime(d.contractAddress, d.ctx, PAST_DEADLINE);
+    const r = d.contract.circuits.expireDarkVeil(late);
+    const after = nextContext(d.contractAddress, r.context);
+
+    const state = ledger(after.currentQueryContext.state);
+    expect(state.dvFailed).toBe(true);
+
+    // And the refund path really pays, rather than merely being unlocked.
+    const rc = d.contract.circuits.claimBondRefund(after, fakeBytes32(5));
+    expect(ledger(rc.context.currentQueryContext.state).lockedBonds.lookup(REGISTRANT_KEY)).toBe(0n);
+  });
+
+  it('is terminal, so a governor who wakes up cannot carry on', () => {
+    const d = bondedThenAbandoned();
+    const late = nextContextAtTime(d.contractAddress, d.ctx, PAST_DEADLINE);
+    const r = d.contract.circuits.expireDarkVeil(late);
+    const after = nextContext(d.contractAddress, r.context);
+
+    // Assert the phase itself, not merely that a later call throws: the
+    // DarkVeil sub-state alone would refuse that call anyway, so a bare throw
+    // would pass with this write removed entirely.
+    expect(ledger(after.currentQueryContext.state).phase).toBe(LaunchPhase.Cancelled);
+    expect(() => d.contract.circuits.startBuying(after, REGISTRANT_TREE.root)).toThrow();
+  });
+
+  it('refuses to deploy without a registration close time to measure from', () => {
+    // A zero anchor puts the deadline in the past at deploy, so the launch
+    // could be expired before it began.
+    expect(() => deployWithRegistrationCloseTime(0n)).toThrow('registrationCloseTime must be set');
+  });
+
+  it('refuses once DarkVeil has closed normally', () => {
+    // A closed phase settles through the ratio refund; expiring it would open
+    // the full-refund path to registrants whose bonds are meant to settle.
+    const d = deploy();
+    const r0 = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.DarkVeil);
+    const c1 = nextContext(d.contractAddress, r0.context);
+    const r1 = d.contract.circuits.startRegistration(c1);
+    const c2 = nextContext(d.contractAddress, r1.context);
+    const rReg = d.contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    const c3 = nextContext(d.contractAddress, rReg.context);
+    const r2 = d.contract.circuits.startBuying(c3, REGISTRANT_TREE.root);
+    const c4 = nextContext(d.contractAddress, r2.context);
+    const r3 = d.contract.circuits.closeDarkVeil(c4, 2n, 100n);
+    const c5 = nextContext(d.contractAddress, r3.context);
+
+    const late = nextContextAtTime(d.contractAddress, c5, PAST_DEADLINE);
+    expect(() => d.contract.circuits.expireDarkVeil(late)).toThrow('DarkVeil already closed or cancelled');
   });
 });

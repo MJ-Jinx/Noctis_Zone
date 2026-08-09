@@ -352,6 +352,15 @@ sealed ledger exclusionDisputeWindow: Uint<64>;
 // ever conclude that a registrant did not buy.
 sealed ledger revealWindowSeconds: Uint<64>;
 
+// How long after registrationCloseTime anyone may give up on a DarkVeil phase
+// that never finished. Seven days: registration close leaves only the buying
+// window and settlement to run, so this is several times the sequence that is
+// legitimately left. Hardcoded rather than a constructor argument, matching
+// revealWindowSeconds' convention for a platform-wide policy constant — and
+// deliberately not governor-chosen, since this is the one deadline a governor
+// should not be able to push out.
+sealed ledger darkVeilExpirySeconds: Uint<64>;
+
 // Current phase of the launch (DarkVeil registration/buying vs public curve)
 export ledger phase: LaunchPhase;
 
@@ -957,6 +966,9 @@ constructor(
   dvAllocation = disclose(dvAllocation_);
   dvPrice = disclose(dvPrice_);
   allowlistSize = disclose(allowlistSize_);
+  // A zero anchor would put expireDarkVeil's deadline in the past at
+  // deploy, so the launch could be expired before it began.
+  assert(disclose(registrationCloseTime_ > 0), "registrationCloseTime must be set");
   registrationCloseTime = disclose(registrationCloseTime_);
   assert(disclose(minDvParticipants_ > 0), "minDvParticipants must be positive");
   minDvParticipants = disclose(minDvParticipants_);
@@ -964,6 +976,7 @@ constructor(
   registrantRoot = disclose(pad(32, "")); // meaningless until startBuying sets it
   exclusionDisputeWindow = disclose(259200); // 72 hours — see ledger comment
   revealWindowSeconds = disclose(2592000); // 30 days — see ledger comment
+  darkVeilExpirySeconds = disclose(604800); // 7 days — see ledger comment
   totalTokensCommitted = 0;
   totalRaisedCommitted = 0;
   baseSlot = 0; // meaningless until closeDarkVeil sets it
@@ -1490,6 +1503,55 @@ export circuit startBuying(registrantRoot_: Bytes<32>): [] {
   );
   registrantRoot = disclose(registrantRoot_);
   dvState = DarkVeilState.Buying;
+}
+
+// Give up on a DarkVeil phase that has stopped moving, without asking the
+// key that stopped moving it.
+//
+// Every transition through this phase — startRegistration, startBuying,
+// closeDarkVeil, advancePhase, activateCurve — is governor-only. A governor
+// who goes silent partway through therefore freezes the launch with every
+// bond locked inside it, and the one existing timeout (expireCurve) sits
+// behind activateCurve, which is itself governor-only. So there was no point
+// before the public phase at which anyone else could act.
+//
+// This is the missing one. Permissionless, because a hatch that needs the
+// governor is not a hatch: the deadline is the entire authorization, the same
+// idiom expireCurve already uses. Calling it confers nothing — it cannot move
+// value, only mark the phase failed, which is what makes every locked bond
+// claimable through the refund path that already exists.
+//
+// The deadline is measured from registrationCloseTime, which is sealed at
+// deploy and therefore fixed before anyone bonds. That is the honest bound on
+// this: the governor chooses that timestamp, so they can set it far out and
+// push the hatch out with it. What they cannot do is move it afterwards, and
+// it is public, so a registrant can see the number before deciding to bond.
+//
+// The grace period on top is deliberately generous. Registration close leaves
+// only the buying window and settlement to run, so a week is several times the
+// remaining legitimate sequence — this should never fire on a governor who is
+// merely slow.
+export circuit expireDarkVeil(): [] {
+  // Only a phase that is still in flight. A closed DarkVeil settles through
+  // the ratio refund, and a cancelled one is already claimable.
+  assert(
+    disclose(dvState != DarkVeilState.Closed && dvState != DarkVeilState.Cancelled),
+    "DarkVeil already closed or cancelled"
+  );
+
+  // Real chain time, never a caller-supplied parameter compared against the
+  // deadline — a bare argument would let any caller name a large value and
+  // expire a healthy launch on demand.
+  assert(
+    blockTimeGt((registrationCloseTime + darkVeilExpirySeconds) as Uint<64>),
+    "DarkVeil has not yet exceeded its expiry deadline"
+  );
+
+  dvState = DarkVeilState.Cancelled;
+  dvFailed = disclose(true);
+  // Terminal, so a governor who wakes up afterwards cannot carry on with a
+  // launch whose registrants have already been refunded.
+  phase = LaunchPhase.Cancelled;
 }
 
 // Cancel DarkVeil (failure path). Bonds are refundable

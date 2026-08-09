@@ -1032,13 +1032,33 @@ export class NoctisLaunchManager {
 
   /**
    * Takes back a bond behind a dispute that stood unanswered for the full
-   * window. Requires the settlement record to be closed first, for the same
-   * reason `sweepForfeitedBond` does.
+   * window. Waits for the settlement record to be closed first — on Tier B
+   * that is `settlementFinalized`, on Tier C the reveal window elapsing,
+   * because the purchase is recorded on Midnight there rather than on
+   * Cardano. Either way the point is the same: nothing should conclude a
+   * registrant did not buy while a purchase can still be recorded.
    */
   async claimDisputedBond(recipientAddr: Uint8Array, currentTimestamp: bigint) {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
     return handle.callTx.claimDisputedBond(recipientAddr, currentTimestamp);
+  }
+
+  /**
+   * Gives up on a DarkVeil phase that stopped moving, marking it failed so
+   * every locked bond becomes claimable.
+   *
+   * Permissionless, and that is the whole point: every transition through
+   * this phase is governor-only, and the curve's own timeout sits behind a
+   * governor-only call, so a registrant had no way to act on their own bond
+   * if the governor went quiet. The deadline is the authorization — this
+   * refuses until real chain time has passed it, so calling it early is not
+   * possible and calling it late confers nothing.
+   */
+  async expireDarkVeil() {
+    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
+    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
+    return handle.callTx.expireDarkVeil();
   }
 
   /**
