@@ -40,6 +40,13 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by requiring a payee to be NET better off by what they are
+ * owed, not merely to hold it in some output: Tier A +201, Tier B +178,
+ * staking_pool +209. An output at the payee's own credential is equally
+ * consistent with their change, and both of these paths are signed by the
+ * payee, so the transaction can contain their own utxos. Netting those out
+ * is what makes the payment check mean the payee gained something.
+ *
  * Last moved by requiring a graduating Tier B curve to have raised something:
  * +18, for the guard Tier A has had since the same audit found it. At zero
  * raised, both of that arm's value checks stop constraining anything.
@@ -83,15 +90,15 @@ for (const v of blueprint.validators) {
  * decision rather than a surprise.
  */
 const RECORDED: Record<string, number> = {
-  bonding_curve: 10_928,
-  bonding_curve_tier_b: 13_743,
+  bonding_curve: 11_129,
+  bonding_curve_tier_b: 13_921,
   cto_governance: 7_370,
   cto_sybil_challenge: 1_294,
   curve_order: 1_775,
   launch_token_policy: 419,
   lp_escrow: 7_201,
   nhop_challenge: 1_274,
-  staking_pool: 3_860,
+  staking_pool: 4_069,
   token_metadata: 4_458,
   vesting: 5_737,
   zk_anchor: 2_634,

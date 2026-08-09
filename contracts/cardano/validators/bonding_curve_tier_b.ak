@@ -1006,7 +1006,16 @@ fn buyback_share_paid(
         }
       },
     )
-  curve_decreased_by_share && buyer_paid
+  // ...and the buyer really is better off by it. This path is signed by the
+  // buyer, so the transaction can spend the buyer's OWN utxos, and an output
+  // at their credential holding the share is then equally consistent with
+  // their own change coming back while the curve's ada goes elsewhere.
+  // Netting their inputs out leaves only what arrived from somewhere else.
+  // See noctis/settlement's net_lovelace_gain, and Tier A's own
+  // lovelace_paid_from_curve.
+  let buyer_gained =
+    settlement.net_lovelace_gain(self, buyer_credential) >= share
+  curve_decreased_by_share && buyer_paid && buyer_gained
 }
 
 /// Fix (2026-07-21): ported from Tier A's bonding_curve.ak — real
@@ -7222,4 +7231,80 @@ test tier_b_graduate_rejects_non_positive_total_raised() {
     }
 
   !bonding_curve_tier_b.spend(Some(datum), Graduate, own_ref, self)
+}
+
+/// Tier A's own claim_buyback_rejects_refunding_the_buyer_with_their_own_ada,
+/// on this tier. The buyer signs this path here too, so the transaction can
+/// spend their utxos and return their own ada as the "refund" while the
+/// curve's ada goes elsewhere. Written out rather than assumed from the other
+/// tier: the two validators have diverged before.
+test tier_b_claim_buyback_rejects_refunding_the_buyer_with_their_own_ada() {
+  let datum = buyback_datum()
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let buyer_address = from_verification_key(#"dd")
+  let attacker_address = from_verification_key(#"ba")
+  let base_lovelace = 5_000_000 + 1000
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_curve_nft(), assets.merge(
+          assets.from_lovelace(base_lovelace),
+          assets.from_asset(#"33", "tok", 0),
+        )),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let buyer_input =
+    Input {
+      output_reference: OutputReference { transaction_id: #"77", output_index: 0 },
+      output: Output {
+        address: buyer_address,
+        value: assets.merge(
+          assets.from_lovelace(2_000_000),
+          assets.from_asset(#"33", "tok", 10),
+        ),
+        datum: transaction.NoDatum,
+        reference_script: None,
+      },
+    }
+  let new_datum =
+    BondingCurveTierBDatum { ..datum, tokens_sold: 90, total_raised: 900 }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_curve_nft(), assets.merge(
+        assets.from_lovelace(base_lovelace - 100),
+        assets.from_asset(#"33", "tok", 10),
+      )),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let buyer_change =
+    Output {
+      address: buyer_address,
+      value: assets.from_lovelace(1_900_000),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let attacker_output =
+    Output {
+      address: attacker_address,
+      value: assets.from_lovelace(100_100),
+      datum: transaction.NoDatum,
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input, buyer_input],
+      outputs: [continuing_output, buyer_change, attacker_output],
+      extra_signatories: [#"dd"],
+    }
+  let redeemer = ClaimBuyback { token_amount: 10, buyer_key_hash: #"dd" }
+
+  !bonding_curve_tier_b.spend(Some(datum), redeemer, own_ref, self)
 }

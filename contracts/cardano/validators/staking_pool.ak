@@ -379,6 +379,21 @@ validator staking_pool {
             },
           )
 
+        // ...and the staker is genuinely better off by it. The check above
+        // asks whether an output at their credential holds the payout, which
+        // their own CHANGE also does. This claim is permissionless, so the
+        // transaction is built for the staker rather than by them; netting
+        // their own inputs out is what stops a builder handing back tokens
+        // the staker already had and sending the pool's payment elsewhere.
+        // See noctis/settlement's net_asset_gain.
+        let staker_gained =
+          settlement.net_asset_gain(
+            self,
+            staker_credential,
+            pool.token_policy_id,
+            pool.token_asset_name,
+          ) >= payout
+
         let new_datum = own_continuing_datum(self, own_ref)
         let expected_datum =
           Pool(StakingPoolDatum { ..pool, claimed_bits: next_bits })
@@ -392,6 +407,7 @@ validator staking_pool {
           verify_reward_merkle_proof(pool.reward_root, leaf, merkle_proof),
           pool_decreased_by_payout,
           staker_paid,
+          staker_gained,
           new_datum == expected_datum,
           // ClaimRewards is permissionless — the pool's own
           // continuing output can't be padded with junk assets. See
@@ -1607,6 +1623,90 @@ test publish_reward_root_clears_a_used_nullifier() {
   staking_pool.spend(
     Some(Pool(pool)),
     PublishRewardRoot { new_root: #"aabb", claimed_bits: #"0000" },
+    own_ref,
+    self,
+  )
+}
+
+/// The staker is paid nothing, and the reward leaves for someone else.
+///
+/// ClaimRewards is permissionless, so the claim transaction is built for the
+/// staker rather than by them. A builder who can get the staker's signature —
+/// the platform's own frontend, or anything that replaces it — can spend a
+/// UTXO the staker already holds, hand those same tokens straight back as
+/// change, and route the pool's actual payout elsewhere. The pool decreases
+/// by the payout, an output at the staker's own credential carries at least
+/// the payout, and the leaf is marked claimed, so the claim cannot be
+/// repeated. Every balance in the transaction is honest; the staker is simply
+/// not the one who ends up better off.
+test claim_rewards_rejects_paying_the_staker_with_their_own_tokens() {
+  let leaf0 = hash_reward_leaf(#"dd", 100, 0)
+  let leaf1 = hash_reward_leaf(#"ee", 50, 1)
+  let root = hash_reward_node(leaf0, leaf1)
+  let proof0 = [MerkleProofStep { sibling: leaf1, goes_left: False }]
+
+  let pool = StakingPoolDatum { ..mock_pool_datum(), reward_root: root }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let staker_address = from_verification_key(#"dd")
+  let attacker_address = from_verification_key(#"ba")
+
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_pool_nft(), assets.merge(assets.from_lovelace(2_000_000), assets.from_asset(#"33", "tok", 1_000))),
+        datum: InlineDatum(Pool(pool)),
+        reference_script: None,
+      },
+    }
+  // The staker's own tokens, spent in the same transaction.
+  let staker_input =
+    Input {
+      output_reference: OutputReference { transaction_id: #"77", output_index: 0 },
+      output: Output {
+        address: staker_address,
+        value: assets.merge(assets.from_lovelace(2_000_000), assets.from_asset(#"33", "tok", 100)),
+        datum: transaction.NoDatum,
+        reference_script: None,
+      },
+    }
+  let new_pool = Pool(StakingPoolDatum { ..pool, claimed_bits: #"8000" })
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_pool_nft(), assets.merge(assets.from_lovelace(2_000_000), assets.from_asset(#"33", "tok", 900))),
+      datum: InlineDatum(new_pool),
+      reference_script: None,
+    }
+  // Change: the staker's own 100 tokens, returned to the staker, tagged as
+  // though the pool had settled them.
+  let staker_change =
+    Output {
+      address: staker_address,
+      value: assets.merge(assets.from_lovelace(2_000_000), assets.from_asset(#"33", "tok", 100)),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  // The pool's real payout, going somewhere else entirely.
+  let attacker_output =
+    Output {
+      address: attacker_address,
+      value: assets.from_asset(#"33", "tok", 100),
+      datum: transaction.NoDatum,
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input, staker_input],
+      outputs: [continuing_output, staker_change, attacker_output],
+    }
+
+  !staking_pool.spend(
+    Some(Pool(pool)),
+    ClaimRewards { staker_vkh: #"dd", payout_amount: 100, leaf_index: 0, merkle_proof: proof0 },
     own_ref,
     self,
   )

@@ -904,6 +904,16 @@ fn lovelace_paid_from_curve(
     // the curve's own reference because a lone payout settles the curve spend
     // itself rather than an order.
     order_proceeds_paid(self, own_ref, recipient_key_hash, share),
+    // ...and the recipient really is better off by it. Unlike a batched fill,
+    // this path is signed by the recipient, so the transaction can spend the
+    // recipient's OWN utxos — and an output at their credential holding the
+    // share is then equally consistent with their change coming back. Netting
+    // their inputs out leaves only what arrived from somewhere else. See
+    // noctis/settlement's net_lovelace_gain.
+    settlement.net_lovelace_gain(
+      self,
+      from_verification_key(recipient_key_hash).payment_credential,
+    ) >= share,
   }
 }
 
@@ -6260,4 +6270,87 @@ test expire_curve_rejects_from_inactive_before_deadline() {
     own_ref,
     self,
   )
+}
+
+/// The buyer returns their tokens and is refunded with their own ada.
+///
+/// Same shape as the staking pool's claim, and reachable for the same reason:
+/// the buyer signs this, so a builder holding that signature can spend a UTXO
+/// they already own, return the refund amount to them as change, tag it as
+/// settling this curve, and send the curve's real ada elsewhere. The curve
+/// decreases by the share, an output at the buyer's credential carries it,
+/// and the datum's accounting is correct — but the buyer has handed over
+/// tokens and received nothing that was not already theirs.
+test claim_buyback_rejects_refunding_the_buyer_with_their_own_ada() {
+  let datum = buyback_datum()
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let buyer_address = from_verification_key(#"dd")
+  let attacker_address = from_verification_key(#"ba")
+  let base_lovelace = 5_000_000 + 1000
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_curve_nft(), assets.merge(
+          assets.from_lovelace(base_lovelace),
+          assets.from_asset(#"33", "tok", 0),
+        )),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  // The buyer's own ada and the tokens they are returning, spent here.
+  let buyer_input =
+    Input {
+      output_reference: OutputReference { transaction_id: #"77", output_index: 0 },
+      output: Output {
+        address: buyer_address,
+        value: assets.merge(
+          assets.from_lovelace(2_000_000),
+          assets.from_asset(#"33", "tok", 10),
+        ),
+        datum: transaction.NoDatum,
+        reference_script: None,
+      },
+    }
+  let new_datum =
+    BondingCurveDatum { ..datum, tokens_sold: 90, total_raised: 900 }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_curve_nft(), assets.merge(
+        assets.from_lovelace(base_lovelace - 100),
+        assets.from_asset(#"33", "tok", 10),
+      )),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  // Change: the buyer's own ada back, tagged as though the curve refunded it.
+  let buyer_change =
+    Output {
+      address: buyer_address,
+      value: assets.from_lovelace(1_900_000),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  // The curve's real refund, going somewhere else.
+  let attacker_output =
+    Output {
+      address: attacker_address,
+      value: assets.from_lovelace(100_100),
+      datum: transaction.NoDatum,
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input, buyer_input],
+      outputs: [continuing_output, buyer_change, attacker_output],
+      extra_signatories: [#"dd"],
+    }
+  let redeemer = ClaimBuyback { token_amount: 10, buyer_key_hash: #"dd" }
+
+  !bonding_curve.spend(Some(datum), redeemer, own_ref, self)
 }
