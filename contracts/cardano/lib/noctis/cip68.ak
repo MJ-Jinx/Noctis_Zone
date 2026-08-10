@@ -17,6 +17,7 @@
 //// CIP's own worked example, because a wrong label is invisible: the mint
 //// succeeds, the token exists, and nothing ever finds its metadata.
 
+use aiken/collection/list
 use aiken/primitive/bytearray
 
 /// CIP-67 label 100 — the reference NFT that carries the metadata datum.
@@ -122,4 +123,60 @@ test a_ticker_has_28_bytes_of_room() {
     bytearray.length(fungible_asset_name(longest)) == 32,
     bytearray.length(reference_asset_name(longest)) == 32,
   }
+}
+
+/// The two keys CIP-68's 333 fungible sub-standard requires every token's
+/// metadata to carry.
+///
+/// Everything else the sub-standard mentions — ticker, url, decimals, logo —
+/// is optional, so only these two are worth a contract's attention.
+pub const required_fungible_keys: List<ByteArray> = ["name", "description"]
+
+/// Whether a metadata map carries both of them.
+///
+/// The genesis builder already refuses to construct a token without them, but
+/// metadata is REVISED by rewriting this map, and a revision that dropped one
+/// would leave the token permanently unreadable to a wallet following the
+/// standard — with the file still describing itself as CIP-68. Conformance
+/// that only holds at genesis is not conformance, so the check belongs where
+/// revisions happen rather than only where the first version is built.
+///
+/// What the values SAY is deliberately not checked. A launch may rename
+/// itself to anything; it may not stop having a name.
+pub fn has_required_fungible_fields(metadata: Pairs<ByteArray, Data>) -> Bool {
+  list.all(
+    required_fungible_keys,
+    fn(required) {
+      list.any(metadata, fn(entry) { entry.1st == required })
+    },
+  )
+}
+
+fn any_value() -> Data {
+  let v: Data = ""
+  v
+}
+
+test required_fields_accepts_a_conformant_map() {
+  has_required_fungible_fields(
+    [
+      Pair("name", any_value()),
+      Pair("description", any_value()),
+      Pair("ticker", any_value()),
+    ],
+  )
+}
+
+test required_fields_rejects_a_map_missing_description() {
+  !has_required_fungible_fields(
+    [Pair("name", any_value()), Pair("logo", any_value())],
+  )
+}
+
+test required_fields_rejects_a_map_missing_name() {
+  !has_required_fungible_fields([Pair("description", any_value())])
+}
+
+test required_fields_rejects_an_empty_map() {
+  !has_required_fungible_fields([])
 }

@@ -40,6 +40,11 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by token_metadata +113: authenticating the curve reference
+ * input by its thread NFT rather than by a large token holding, which a
+ * graduated curve no longer has, and requiring a metadata revision to keep
+ * the two keys CIP-68's fungible sub-standard mandates.
+ *
  * Last moved by the same mint-time authentication reaching the second
  * challenge contract (cto_sybil_challenge +896), by a harvest needing its
  * recipient's signature and their NET gain (lp_escrow +205), and by the
@@ -116,7 +121,7 @@ const RECORDED: Record<string, number> = {
   lp_escrow: 7_418,
   nhop_challenge: 2_157,
   staking_pool: 4_069,
-  token_metadata: 4_458,
+  token_metadata: 4_571,
   vesting: 5_737,
   zk_anchor: 2_634,
 };

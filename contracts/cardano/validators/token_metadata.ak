@@ -41,10 +41,9 @@
 // real creator key, and the same live check is applied at mint time too, so
 // off-chain readers/indexers should treat "was the mint tx itself signed by
 // the live bonding_curve creator key" as the canonical genuineness filter.
-// Tier B (bonding_curve_tier_b.ak) needs the identical treatment before
-// Tier B launches can safely use this feature — not yet done, since Tier B
-// itself doesn't have real sell support wired yet at time of writing (see
-// the Tier B test plan's own Phase 1).
+//
+// SCOPE: this validator serves Tier A launches. It reads a Tier A curve datum
+// to derive live creator authority, and that is the launch shape it accepts.
 // ============================================================================
 
 use aiken/collection/list
@@ -77,11 +76,10 @@ pub type NoctisMetadataExtra {
   // Fixed at genesis — this launch's own bonding_curve.ak credential (same
   // "no constructor params, one fixed address shared across every launch,
   // launch_id disambiguates" pattern already used for
-  // cto_governance_credential). Paired with token_policy_id/
-  // token_asset_name below: live_curve_creator only trusts a reference
-  // input at this credential once it also holds a real, substantial
-  // quantity of this launch's own genuine token — see live_curve_creator's
-  // own doc comment for the full reasoning.
+  // cto_governance_credential). Paired with thread_nft_policy below:
+  // live_curve_creator only trusts a reference input at this credential once
+  // it also carries this launch's own thread NFT — see that function for the
+  // full reasoning.
   bonding_curve_credential: Credential,
   // This launch's own native token identity, exactly as it appears in
   // bonding_curve.ak's own datum. `token_asset_name` is the CIP-67 label-333
@@ -172,26 +170,15 @@ fn single_own_utxo(self: Transaction, own_address: Address) -> Bool {
   ) <= 1
 }
 
-/// Security-audit fix: the real, unforgeable creator identity for
-/// `datum.launch_id`, read LIVE from the genuine bonding_curve.ak reference
-/// input every time — never trusted as a value stored on this contract's
-/// own (attacker-writable, at first-lock time) datum. Genuineness comes
-/// from the same place it does for bonding_curve.ak itself: the referenced
-/// UTXO's address is the real curve script's credential, and only the real
-/// curve — funded by the platform's own time-locked, unforgeable minting
-/// policy — is economically meaningful to hold real curve state; a forged
-/// reference input at that address with a fabricated launch_id would not
-/// correspond to any real launch's own curve, so the launch_id match below
-/// is what actually pins this to the SPECIFIC launch being claimed.
-// Derived from CLAUDE.md's fixed platform constants: TOTAL_SUPPLY
-// (1,000,000,000) and WALLET_CAP_PCT (5). Set comfortably above the most
-// any single non-curve wallet can ever legitimately hold (5% =
-// 50,000,000) and comfortably below what the real bonding curve itself
-// always holds even at every optional allocation's simultaneous maximum
-// (CLAUDE.md's own supply-math note: the curve retains at least 30% =
-// 300,000,000 in every case).
-const min_curve_token_holding = 100_000_000
-
+/// The real, unforgeable creator identity for `datum.launch_id`, read LIVE
+/// from the genuine bonding_curve.ak reference input every time — never
+/// trusted as a value stored on this contract's own datum, which anyone can
+/// write when they first lock a UTXO here.
+///
+/// Genuineness rests on two things the referenced UTXO must satisfy together:
+/// it sits at the real curve script's credential, and it carries that
+/// launch's own thread NFT. See the checks below for why the second replaced
+/// an earlier requirement that it hold a large quantity of the launch token.
 fn live_curve_creator(
   self: Transaction,
   datum: TokenMetadataDatum,
@@ -206,12 +193,33 @@ fn live_curve_creator(
   expect InlineDatum(curve_raw_datum) = curve_ref_input.output.datum
   expect curve_datum: BondingCurveDatum = curve_raw_datum
   expect curve_datum.launch_id == datum.extra.launch_id
+  // The curve's THREAD NFT, not a quantity of the launch token.
+  //
+  // A holding was a proxy for authenticity: a forged reference input at this
+  // shared address would not plausibly carry a hundred million real tokens.
+  // The thread NFT answers the same question directly — it is minted once per
+  // launch under a policy nobody else controls, and the curve carries it on
+  // every spend — so this is stricter than what it replaces rather than a
+  // relaxation.
+  //
+  // It is also the only version that keeps working. A graduated curve has
+  // moved its LP and staking reserves out and sold its supply through, so it
+  // holds essentially none of its own token; a holding requirement therefore
+  // silently stopped metadata being editable at exactly the point a launch
+  // starts trading publicly and its name, logo and description matter most.
+  // The NFT is preserved on every spend, graduation included.
+  //
+  // launch_id is still matched above: the asset name commits to only the
+  // first 31 bytes of it, so the NFT alone does not pin the launch.
   expect
     assets.quantity_of(
       curve_ref_input.output.value,
-      datum.extra.token_policy_id,
-      datum.extra.token_asset_name,
-    ) >= min_curve_token_holding
+      datum.extra.thread_nft_policy,
+      thread_nft.thread_asset_name(
+        thread_nft.role_bonding_curve,
+        datum.extra.launch_id,
+      ),
+    ) == 1
   curve_datum.creator_pub_key_hash
 }
 
@@ -348,9 +356,19 @@ validator token_metadata {
               active_metadata_signer(datum, live_creator_key),
             ),
             // A launch always has metadata; emptying the map would leave the
-            // token with nothing for a wallet to display. What the map SAYS
-            // is the creator's business, so nothing further is imposed here.
+            // token with nothing for a wallet to display.
             new_metadata != [],
+            // ...and it keeps the two keys the 333 sub-standard requires.
+            //
+            // The genesis builder already refuses to construct a token
+            // without them, but metadata is revised by REWRITING this map, so
+            // conformance held only at the first version: a later revision
+            // could drop `name` or `description` and leave the token
+            // unreadable to any wallet following the standard, on a file that
+            // calls itself CIP-68 in its own first line. What the values say
+            // is still entirely the creator's business — a launch may rename
+            // itself to anything, it may not stop having a name.
+            cip68.has_required_fungible_fields(new_metadata),
             // Security-audit fix: current_timestamp was previously entirely
             // self-declared with no correspondence-to-reality check, unlike
             // bonding_curve.ak's ActivateCurve (see that file's own fix
@@ -485,12 +503,15 @@ fn mock_curve_ref_input(curve_address: Address, curve_datum: BondingCurveDatum) 
     output_reference: OutputReference { transaction_id: #"ab", output_index: 0 },
     output: Output {
       address: curve_address,
+      // The curve's own thread NFT, which is what authenticates it now. A
+      // real curve carries this on every spend, graduation included — where
+      // it holds none of its own token at all.
       value: assets.merge(
         assets.from_lovelace(2_000_000),
         assets.from_asset(
-          curve_datum.token_policy_id,
-          curve_datum.token_asset_name,
-          min_curve_token_holding,
+          #"c0ffee",
+          thread_nft.thread_asset_name(thread_nft.role_bonding_curve, #"01"),
+          1,
         ),
       ),
       datum: InlineDatum(curve_datum),
@@ -636,6 +657,13 @@ fn mock_forged_cto_ref_input(cto_address: Address, cto_datum: CtoGovernanceDatum
 /// so a test that claims the datum changed is actually changing something.
 fn updated_metadata() -> Pairs<ByteArray, Data> {
   let name: Data = "Renamed Token"
+  let description: Data = "A launch that changed its mind about its name."
+  [Pair("name", name), Pair("description", description)]
+}
+
+/// A revision that drops one of the two keys the 333 sub-standard requires.
+fn non_conformant_metadata() -> Pairs<ByteArray, Data> {
+  let name: Data = "Renamed Token"
   [Pair("name", name)]
 }
 
@@ -718,7 +746,7 @@ test update_metadata_fails_by_forged_creator_key_pre_cto() {
 // launch_id and an attacker-chosen creator_pub_key_hash, but carrying
 // none of the launch's own real token — must not be trusted, even though
 // address + launch_id alone match.
-test update_metadata_fails_by_forged_reference_input_with_no_real_tokens() fail {
+test update_metadata_fails_by_forged_reference_input_without_the_thread_nft() fail {
   let curve_address = from_verification_key(curve_address_key)
   let curve_credential = curve_address.payment_credential
   let attacker_key = #"99"
@@ -1130,4 +1158,152 @@ test dissolve_cto_fails_when_not_triggered() {
       outputs: [mock_continuing_output(own_address, datum)],
     }
   !token_metadata.spend(Some(datum), DissolveCTO, own_ref, self)
+}
+
+
+/// The whole point of moving off a token-holding requirement.
+///
+/// A graduated curve has moved its LP and staking reserves out and sold its
+/// supply through, so it holds essentially none of its own token — while
+/// still carrying its thread NFT, which it keeps on every spend. Metadata
+/// therefore stays editable at exactly the point a launch begins trading
+/// publicly and its name, logo and description matter most.
+test update_metadata_succeeds_after_graduation_when_the_curve_holds_no_tokens() {
+  let curve_address = from_verification_key(curve_address_key)
+  let curve_credential = curve_address.payment_credential
+  let graduated_curve_datum = mock_curve_datum(#"01", real_creator_key)
+  // Real, and empty of its own token — the state graduation leaves behind.
+  let graduated_curve_ref_input =
+    Input {
+      output_reference: OutputReference { transaction_id: #"ab", output_index: 0 },
+      output: Output {
+        address: curve_address,
+        value: assets.merge(
+          assets.from_lovelace(2_000_000),
+          assets.from_asset(
+            #"c0ffee",
+            thread_nft.thread_asset_name(thread_nft.role_bonding_curve, #"01"),
+            1,
+          ),
+        ),
+        datum: InlineDatum(graduated_curve_datum),
+        reference_script: None,
+      },
+    }
+  let datum = mock_datum(curve_credential)
+  let (own_input, own_ref, own_address) = mock_own_input(datum)
+  let new_datum =
+    TokenMetadataDatum {
+      ..datum,
+      metadata: updated_metadata(),
+      extra: NoctisMetadataExtra {
+        ..datum.extra,
+        metadata_revision: 2,
+        last_updated_ts: 2000,
+      },
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      reference_inputs: [graduated_curve_ref_input],
+      outputs: [mock_continuing_output(own_address, new_datum)],
+      extra_signatories: [real_creator_key],
+    }
+  token_metadata.spend(
+    Some(datum),
+    UpdateMetadata { new_metadata: updated_metadata(), current_timestamp: 2000 },
+    own_ref,
+    self,
+  )
+}
+
+/// A curve reference input carrying ANOTHER launch's thread NFT is not this
+/// launch's curve. The asset name commits to the launch id, so this is the
+/// check that a stranger cannot borrow a real curve to speak for a launch
+/// they do not own.
+test update_metadata_fails_with_another_launchs_thread_nft() fail {
+  let curve_address = from_verification_key(curve_address_key)
+  let curve_credential = curve_address.payment_credential
+  let curve_datum = mock_curve_datum(#"01", real_creator_key)
+  let wrong_nft_ref_input =
+    Input {
+      output_reference: OutputReference { transaction_id: #"ab", output_index: 0 },
+      output: Output {
+        address: curve_address,
+        value: assets.merge(
+          assets.from_lovelace(2_000_000),
+          assets.from_asset(
+            #"c0ffee",
+            thread_nft.thread_asset_name(thread_nft.role_bonding_curve, #"02"),
+            1,
+          ),
+        ),
+        datum: InlineDatum(curve_datum),
+        reference_script: None,
+      },
+    }
+  let datum = mock_datum(curve_credential)
+  let (own_input, own_ref, own_address) = mock_own_input(datum)
+  let new_datum =
+    TokenMetadataDatum {
+      ..datum,
+      metadata: updated_metadata(),
+      extra: NoctisMetadataExtra {
+        ..datum.extra,
+        metadata_revision: 2,
+        last_updated_ts: 2000,
+      },
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      reference_inputs: [wrong_nft_ref_input],
+      outputs: [mock_continuing_output(own_address, new_datum)],
+      extra_signatories: [real_creator_key],
+    }
+  token_metadata.spend(
+    Some(datum),
+    UpdateMetadata { new_metadata: updated_metadata(), current_timestamp: 2000 },
+    own_ref,
+    self,
+  )
+}
+
+/// Metadata is revised by rewriting the whole map, so conformance that held
+/// only at genesis would not hold for long. A revision dropping `description`
+/// would leave the token unreadable to any wallet following the standard,
+/// on a contract whose first line calls itself CIP-68.
+test update_metadata_fails_when_a_revision_drops_a_required_field() {
+  let (curve_credential, _curve_address, curve_ref_input) = mock_curve_setup()
+  let datum = mock_datum(curve_credential)
+  let (own_input, own_ref, own_address) = mock_own_input(datum)
+  let new_datum =
+    TokenMetadataDatum {
+      ..datum,
+      metadata: non_conformant_metadata(),
+      extra: NoctisMetadataExtra {
+        ..datum.extra,
+        metadata_revision: 2,
+        last_updated_ts: 2000,
+      },
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      reference_inputs: [curve_ref_input],
+      outputs: [mock_continuing_output(own_address, new_datum)],
+      extra_signatories: [real_creator_key],
+    }
+  !token_metadata.spend(
+    Some(datum),
+    UpdateMetadata {
+      new_metadata: non_conformant_metadata(),
+      current_timestamp: 2000,
+    },
+    own_ref,
+    self,
+  )
 }
