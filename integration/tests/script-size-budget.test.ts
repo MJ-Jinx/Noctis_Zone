@@ -40,6 +40,17 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by SIX validators at once, for one datum field. cto_governance
+ * gained `last_ballot_end_timestamp`, which is +141 there — and +10 to +12
+ * each on bonding_curve, bonding_curve_tier_b, lp_escrow, token_metadata and
+ * vesting, none of which changed a line. They all decode a CtoGovernanceDatum
+ * as a reference input for their CTO check, so widening that type widens their
+ * decoding too.
+ *
+ * Worth internalising before the next datum change: a field added to a SHARED
+ * datum moves every validator that reads it, and each moved hash is a moved
+ * script address. Six reference scripts would need re-deriving here, not one.
+ *
  * Last moved by cto_governance +521: an anchored ballot's bundle reference is
  * now derived by the validator from its own datum rather than read out of the
  * redeemer, so the script carries the preimage construction and its hash. It
@@ -118,17 +129,17 @@ for (const v of blueprint.validators) {
  * decision rather than a surprise.
  */
 const RECORDED: Record<string, number> = {
-  bonding_curve: 11_129,
-  bonding_curve_tier_b: 13_921,
-  cto_governance: 7_919,
+  bonding_curve: 11_139,
+  bonding_curve_tier_b: 13_933,
+  cto_governance: 8_060,
   cto_sybil_challenge: 2_201,
   curve_order: 1_775,
   launch_token_policy: 419,
-  lp_escrow: 7_418,
+  lp_escrow: 7_429,
   nhop_challenge: 2_157,
   staking_pool: 4_069,
-  token_metadata: 4_571,
-  vesting: 5_737,
+  token_metadata: 4_581,
+  vesting: 5_748,
   zk_anchor: 2_634,
 };
 

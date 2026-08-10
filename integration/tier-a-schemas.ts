@@ -538,6 +538,11 @@ export const CtoGovernanceDatumShape = Data.Object({
   // every timestamp in it is the relayer's to choose; this is what the
   // validator measures those choices against. Never written by any redeemer.
   ballot_duration: Data.Integer(),
+  // When this launch's most recent ballot closed, or 0 if none ever has. The
+  // anchor writes it from the ballot's own end and the next anchor is measured
+  // against it, which is what puts the cooldown between two ballots — whatever
+  // either one's outcome was.
+  last_ballot_end_timestamp: Data.Integer(),
 });
 export type CtoGovernanceDatumData = Data.Static<typeof CtoGovernanceDatumShape>;
 export const CtoGovernanceDatumSchema = CtoGovernanceDatumShape as unknown as CtoGovernanceDatumData;

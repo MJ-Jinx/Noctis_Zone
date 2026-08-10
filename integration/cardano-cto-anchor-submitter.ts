@@ -129,6 +129,11 @@ export const CtoGovernanceDatumShape = Data.Object({
   // The deployed ballot width an anchored result's window must match exactly.
   // Carried through untouched by the spread below — no redeemer writes it.
   ballot_duration: Data.Integer(),
+  // When this launch's last ballot closed, 0 if none ever has. Unlike
+  // ballot_duration this IS written by this redeemer — see submitVoteResult,
+  // which sets it from the ballot's own end so the next anchor is held a full
+  // cooldown away whatever this one's outcome was.
+  last_ballot_end_timestamp: Data.Integer(),
 });
 export type CtoGovernanceDatumData = Data.Static<typeof CtoGovernanceDatumShape>;
 export const CtoGovernanceDatumSchema = CtoGovernanceDatumShape as unknown as CtoGovernanceDatumData;
@@ -417,6 +422,11 @@ export class CardanoCtoAnchorSubmitter {
       proposal_count: currentDatum.proposal_count + 1n,
       pending_relayer_bond: params.relayerBondLovelace,
       pending_relayer_key_hash: params.relayerCredentialHash,
+      // The ballot's end starts the cooldown before the next one may open.
+      // Written for every outcome, so a failed ballot cannot be cleared and
+      // immediately retried. A spread alone would carry the PREVIOUS value
+      // through and the validator's equality check would refuse it.
+      last_ballot_end_timestamp: params.endTimestamp,
     };
 
     const redeemerData: AnchorVoteResultRedeemerData = {

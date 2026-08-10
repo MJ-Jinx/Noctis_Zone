@@ -3382,6 +3382,10 @@ fn mock_cto_governance_datum(
     // NFT placed in this reference UTXO's value in the CTO-vote tests below.
     thread_nft_policy: #"c0ffee",
     ballot_duration: 500,
+    // These fixtures read a governance UTXO as a REFERENCE input; none of them
+    // anchors a ballot, so the cooldown has no bearing here. 0 is the genesis
+    // value: no ballot has ever run for this launch.
+    last_ballot_end_timestamp: 0,
   }
 }
 

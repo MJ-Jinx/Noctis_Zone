@@ -613,6 +613,10 @@ fn mock_cto_governance_datum(
     ops_pub_key_hash: #"66",
     thread_nft_policy: #"c0ffee",
     ballot_duration: 500,
+    // These fixtures read a governance UTXO as a REFERENCE input; none of them
+    // anchors a ballot, so the cooldown has no bearing here. 0 is the genesis
+    // value: no ballot has ever run for this launch.
+    last_ballot_end_timestamp: 0,
   }
 }
 

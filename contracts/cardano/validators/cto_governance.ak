@@ -191,8 +191,10 @@ pub type CtoGovernanceDatum {
   // evidence a real vote happened and reopening the exact bare-signature
   // trust gap this fix exists to close. This field is the permanent
   // record those downstream checks read instead. A later proposal
-  // overwrites it, but the mandatory cooldown_duration between any two
-  // proposals gives a wide real-world window to act on it first.
+  // overwrites it, but `last_ballot_end_timestamp` below holds the next
+  // ballot a full `cooldown_duration_ms` away, which is what gives a wide
+  // real-world window to act on it first. That spacing used to be described
+  // here as existing when nothing implemented it.
   last_executed_proposal: Option<ProposalAnchor>,
   // Fix (2026-07-19, full-suite security audit): CRITICAL finding —
   // AnchorVoteResult (open relay) never verified the "proof bundle"
@@ -250,6 +252,21 @@ pub type CtoGovernanceDatum {
   // ballot_duration pins the window's exact width, so a result cannot describe
   // a ballot that ran for a minute or for a year.
   ballot_duration: Int,
+  // When this launch's most recent ballot closed, or 0 if none ever has.
+  //
+  // The cooldown between ballots is a real rule of this platform — a launch
+  // gets one ballot, then a quiet period, whatever the outcome. Nothing here
+  // could express that: `active_proposal` stops two ballots OVERLAPPING, and
+  // `last_executed_proposal` only ever records a ballot that PASSED and was
+  // executed, so neither can space out consecutive ones. A failed ballot
+  // starts a cooldown too, which is exactly what a repeat challenger would
+  // otherwise exploit: fail, clear, and immediately try again.
+  //
+  // Written on every anchor, from the ballot's own end_timestamp. Read by the
+  // next anchor, which must describe a ballot starting a full cooldown later.
+  // 0 is the genesis value and means "no ballot yet", so a launch's first one
+  // is never held back.
+  last_ballot_end_timestamp: Int,
 }
 
 /// Redeemer actions
@@ -643,6 +660,39 @@ fn governance_nft_preserved(
 /// Cardano's own validity range and lp_escrow's `lock_timestamp`.
 const min_post_grad_delay_ms: Int = 7_776_000_000
 
+/// CLAUDE.md's CTO_COOLDOWN_DAYS (90 days), in MILLISECONDS.
+///
+/// The same duration as the post-graduation delay above and deliberately a
+/// separate constant: they answer different questions — "has this launch had
+/// its runway" versus "has this launch had its quiet period" — and either
+/// could be retuned without the other.
+const cooldown_duration_ms: Int = 7_776_000_000
+
+/// Whether enough quiet has passed since this launch's last ballot closed.
+///
+/// A launch gets one ballot, then a cooldown, whatever the outcome. `outcome`
+/// is deliberately not consulted: a failed ballot starts a cooldown exactly
+/// like a passed one, and without that a challenger could fail, clear the
+/// slot, and immediately try again — grinding a community that has already
+/// answered until turnout drops.
+///
+/// `start_timestamp` is the relayer's to name, so this is a claim being
+/// checked rather than a clock being read. That is sound because it is bounded
+/// from the other side: `ballot_window_ok` fixes the window's width and
+/// requires it to have closed by `anchor_timestamp`, which is itself held
+/// inside the transaction's real validity range. A relayer who back-dates
+/// `start_timestamp` to clear this must back-date `end_timestamp` with it, and
+/// then the ballot they describe closed before they anchored it — which
+/// changes nothing about when the NEXT one may start, since this records the
+/// end they declared.
+fn cooldown_elapsed(datum: CtoGovernanceDatum, start_timestamp: Int) -> Bool {
+  // 0 is genesis: no ballot has ever run, so nothing is being cooled down
+  // from. Without this a launch's first ballot would be held back 90 days
+  // from the epoch, which is to say not at all — but stating it explicitly
+  // keeps the field's meaning readable at the point it is used.
+  datum.last_ballot_end_timestamp == 0 || start_timestamp >= datum.last_ballot_end_timestamp + cooldown_duration_ms
+}
+
 /// Whether this launch graduated long enough ago for a ballot to be eligible.
 ///
 /// The delay is a real rule in the product — a healthy launch gets runway
@@ -822,6 +872,10 @@ validator cto_governance {
             proposal_count: datum.proposal_count + 1,
             pending_relayer_bond: relayer_bond,
             pending_relayer_key_hash: relayer_credential_hash,
+            // Recorded here rather than on execution, so a ballot that failed
+            // — or one that passed and was never executed — still starts the
+            // cooldown. This is the field the NEXT anchor is measured against.
+            last_ballot_end_timestamp: end_timestamp,
           }
         let new_datum = own_continuing_datum(self, own_ref)
 
@@ -838,6 +892,7 @@ validator cto_governance {
           quorum_ok,
           ballot_window_ok,
           post_graduation_delay_ok(self, datum, start_timestamp),
+          cooldown_elapsed(datum, start_timestamp),
           creator_cap_ok,
           trigger_ok,
           dissolve_ok,
@@ -1080,6 +1135,23 @@ fn mock_datum(active_proposal: Option<ProposalAnchor>) -> CtoGovernanceDatum {
     ops_pub_key_hash: #"66",
     thread_nft_policy: mock_cto_nft_policy(),
     ballot_duration: 500,
+    // 0 = this launch has never held a ballot, so the cooldown does not
+    // apply. Every pre-existing test describes a first ballot, which is what
+    // they were written to be about. The cooldown's own tests use
+    // `mock_datum_after_ballot` below and say so in their names.
+    last_ballot_end_timestamp: 0,
+  }
+}
+
+/// A launch whose previous ballot closed at `last_end` — the only state in
+/// which the cooldown has anything to say.
+fn mock_datum_after_ballot(
+  active_proposal: Option<ProposalAnchor>,
+  last_end: Int,
+) -> CtoGovernanceDatum {
+  CtoGovernanceDatum {
+    ..mock_datum(active_proposal),
+    last_ballot_end_timestamp: last_end,
   }
 }
 
@@ -1427,6 +1499,10 @@ fn anchor_spend_with_lp_ref(
       proposal_count: datum.proposal_count + 1,
       pending_relayer_bond: 25_000_000,
       pending_relayer_key_hash: #"33",
+      // The anchor records the ballot's end as the cooldown's start. Spelled
+      // out here rather than spread from `datum`, so if the validator stopped
+      // writing it these fixtures would disagree with what it produces.
+      last_ballot_end_timestamp: end_timestamp,
     }
   let continuing_output =
     Output {
@@ -1511,6 +1587,82 @@ test anchor_rejects_a_ballot_window_of_the_wrong_width() {
 }
 
 
+
+// A launch gets one ballot, then a quiet period, whatever the outcome. Before
+// this the only spacing between ballots was `active_proposal`, which stops two
+// from OVERLAPPING and nothing more — clear the slot and the next could open
+// the same second.
+//
+// Durations below are written as literal wall-clock milliseconds, never in
+// terms of `cooldown_duration_ms`. A fixture expressed in terms of the
+// constant it is testing scales with the constant, so it cannot observe a
+// wrong one — which is how a whole class of seconds-vs-ms errors survived two
+// previous sweeps in this codebase.
+const ninety_days_ms: Int = 7_776_000_000
+
+test anchor_accepts_a_first_ballot_with_no_cooldown_to_serve() {
+  // last_ballot_end_timestamp is 0 at genesis. A launch's first ballot must
+  // not be held back, and this is the state every other anchor test is in.
+  anchor_spend_with_window(
+    mock_datum_after_ballot(None, 0),
+    eligible_start,
+    eligible_start + 500,
+    eligible_start + 500,
+  )
+}
+
+test anchor_rejects_a_second_ballot_inside_the_cooldown() {
+  // The previous ballot closed; this one opens a day later. Everything else
+  // about it is a known-good anchor.
+  let previous_end = eligible_start + 500
+  !anchor_spend_with_window(
+    mock_datum_after_ballot(None, previous_end),
+    previous_end + 86_400_000,
+    previous_end + 86_400_500,
+    previous_end + 86_400_500,
+  )
+}
+
+test anchor_rejects_a_second_ballot_one_millisecond_early() {
+  // The boundary itself, from the failing side.
+  let previous_end = eligible_start + 500
+  !anchor_spend_with_window(
+    mock_datum_after_ballot(None, previous_end),
+    previous_end + ninety_days_ms - 1,
+    previous_end + ninety_days_ms + 499,
+    previous_end + ninety_days_ms + 499,
+  )
+}
+
+test anchor_accepts_a_second_ballot_once_the_cooldown_has_elapsed() {
+  // And from the passing side, one millisecond later. The pair pins the
+  // boundary exactly; either alone would still pass with the wrong constant.
+  let previous_end = eligible_start + 500
+  anchor_spend_with_window(
+    mock_datum_after_ballot(None, previous_end),
+    previous_end + ninety_days_ms,
+    previous_end + ninety_days_ms + 500,
+    previous_end + ninety_days_ms + 500,
+  )
+}
+
+// THE COOLDOWN IS WRITTEN FOR EVERY OUTCOME, and it is the structure of
+// `AnchorVoteResult` that guarantees it: `last_ballot_end_timestamp` is set
+// inside `expected_datum`, one unconditional record construction with no
+// branch above it. Every path that anchors a result writes it. That matters
+// because a cooldown recorded only for ballots that PASSED would let a
+// challenger fail, clear the slot and retry at once, grinding a community
+// that has already answered until turnout drops.
+//
+// The tests above pin the boundary rather than that guarantee, and the reason
+// is worth recording so nobody adds a weaker one believing it helps. Every
+// anchor fixture here uses `SilenceLockTrigger`, which `trigger_ok` requires
+// to have passed — so a rejected-outcome fixture is refused before the
+// cooldown is ever consulted, and a test built on one would go green for a
+// reason unrelated to its name. That is the redundant-rejection-reason trap
+// this codebase has hit before. Should a future change give these fixtures a
+// proposal type that may legitimately fail, the test worth adding is: anchor
+// a failed ballot, then assert its successor inside the cooldown is refused.
 
 test anchor_rejects_graduation_time_from_another_launch() {
   // Same known-good anchor, with the escrow reference input swapped for one
@@ -1706,6 +1858,10 @@ test anchor_vote_result_succeeds_with_quorum_met() {
       proposal_count: 1,
       pending_relayer_bond: 25_000_000,
       pending_relayer_key_hash: #"33",
+      // The ballot's end becomes the cooldown's start. Spelled out rather
+      // than spread from `datum`, so a validator that stopped writing it
+      // would fail this equality instead of quietly agreeing.
+      last_ballot_end_timestamp: eligible_start + 500,
     }
   let continuing_output =
     Output {
@@ -1775,6 +1931,10 @@ test anchor_vote_result_rejects_dropping_thread_nft() {
       proposal_count: 1,
       pending_relayer_bond: 25_000_000,
       pending_relayer_key_hash: #"33",
+      // The ballot's end becomes the cooldown's start. Spelled out rather
+      // than spread from `datum`, so a validator that stopped writing it
+      // would fail this equality instead of quietly agreeing.
+      last_ballot_end_timestamp: eligible_start + 500,
     }
   // The continuing output DROPS the NFT — plain lovelace only. The lovelace
   // bond arithmetic still balances (27M == 2M + 25M), so ONLY the missing
@@ -1843,6 +2003,10 @@ test anchor_vote_result_rejects_wrong_launch_nft() {
       proposal_count: 1,
       pending_relayer_bond: 25_000_000,
       pending_relayer_key_hash: #"33",
+      // The ballot's end becomes the cooldown's start. Spelled out rather
+      // than spread from `datum`, so a validator that stopped writing it
+      // would fail this equality instead of quietly agreeing.
+      last_ballot_end_timestamp: eligible_start + 500,
     }
   // Right NFT policy, WRONG asset_name (another launch's id `#"02"`, not this
   // launch's `#"01"`) — quantity_of(value, policy, #"01") == 1 is False.
@@ -1910,6 +2074,10 @@ test anchor_vote_result_rejects_underfunded_bond() {
       proposal_count: 1,
       pending_relayer_bond: 1_000_000,
       pending_relayer_key_hash: #"33",
+      // The ballot's end becomes the cooldown's start. Spelled out rather
+      // than spread from `datum`, so a validator that stopped writing it
+      // would fail this equality instead of quietly agreeing.
+      last_ballot_end_timestamp: eligible_start + 500,
     }
   let continuing_output =
     Output {
@@ -1975,6 +2143,10 @@ test anchor_vote_result_rejects_unpaid_bond() {
       proposal_count: 1,
       pending_relayer_bond: 25_000_000,
       pending_relayer_key_hash: #"33",
+      // The ballot's end becomes the cooldown's start. Spelled out rather
+      // than spread from `datum`, so a validator that stopped writing it
+      // would fail this equality instead of quietly agreeing.
+      last_ballot_end_timestamp: eligible_start + 500,
     }
   let continuing_output =
     Output {
@@ -3048,6 +3220,10 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
       proposal_count: 1,
       pending_relayer_bond: 25_000_000,
       pending_relayer_key_hash: #"33",
+      // The ballot's end becomes the cooldown's start. Spelled out rather
+      // than spread from `datum`, so a validator that stopped writing it
+      // would fail this equality instead of quietly agreeing.
+      last_ballot_end_timestamp: eligible_start + 500,
     }
   let continuing_output =
     Output {

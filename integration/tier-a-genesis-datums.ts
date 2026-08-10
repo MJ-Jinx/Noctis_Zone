@@ -523,6 +523,10 @@ export async function buildGenesisDatums(input: BuildGenesisDatumsInput) {
     ops_pub_key_hash: input.opsPubKeyHashHex,
     thread_nft_policy: threadNftPolicyId,
     ballot_duration: BigInt(ballotDurationSeconds),
+    // No ballot has run at genesis, so there is nothing to cool down from and
+    // a launch's first one is never held back. The validator reads 0 as
+    // exactly that rather than as a timestamp in 1970.
+    last_ballot_end_timestamp: 0n,
   };
 
   // 2026-08-03: the staking pool's own genesis datum. Nothing anywhere
