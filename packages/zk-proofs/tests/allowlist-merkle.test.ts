@@ -126,9 +126,14 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
   });
 
   it('rejects a proof with a tampered sibling in the padding levels', () => {
-    const tree = buildAllowlistTree([leafForFill(1)]); // all 20 levels are padding (depth reduced 32 -> 20)
+    // A one-leaf tree, so every level of its proof is depth padding.
+    const tree = buildAllowlistTree([leafForFill(1)]);
     const proof = tree.getProof(0);
-    const tampered = proof.map((entry, i) => (i === 19 ? { ...entry, sibling: fakeBytes32(99) } : entry));
+    // The LAST level, found from the proof rather than named: an index
+    // pinned to a particular depth silently stops tampering with anything
+    // the moment the depth changes, and the test then passes a valid proof.
+    const topLevel = proof.length - 1;
+    const tampered = proof.map((entry, i) => (i === topLevel ? { ...entry, sibling: fakeBytes32(99) } : entry));
 
     const { contract, ctx } = deployWithRoot(tree.root, witnessesFor(fakeBytes32(1), tampered));
     expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();

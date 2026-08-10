@@ -25,8 +25,25 @@ import { buildBalanceSnapshotTree } from '../src/cto-governance.js';
 import { buildAllowlistTree, buildRegistrantTree, hashAllowlistLeaf } from '../src/eligibility-gate.js';
 import { buildRewardTree, buildStakeSnapshotTree } from '../src/staking-pool.js';
 
-/** Every tree here is depth 20. */
-const CAPACITY = 2 ** 20;
+// Every tree is depth 20.
+//
+// Reducing it was investigated and rejected on measurement. The reasoning
+// was that each level costs proving work every proof pays for whatever the
+// real population is, so a shallower tree would be materially cheaper for
+// the participant who downloads the prover key. Built both ways with real
+// ZK keys, in one shell so neither reading could be a stale directory:
+// eligibility_gate is 194 MB either way, and its four Merkle-folding
+// circuits differ by about 30 KB across four levels — roughly 7.5 KB a
+// level, not the megabytes assumed. PLONK key size is set by the circuit
+// rounded up to a power of two, and a handful of fold levels does not
+// cross a boundary.
+//
+// So depth costs capacity and buys almost nothing, and capacity is the
+// side with a real failure: a registrant who cannot register, a holder
+// whose balance cannot vote. Depth stays where it is; the guard below is
+// what makes that safe.
+const DARKVEIL_DEPTH = 20;
+const HOLDER_DEPTH = 20;
 
 const LEAF = hashAllowlistLeaf(new Uint8Array(32).fill(7));
 
@@ -38,36 +55,43 @@ function repeated<T>(value: T, count: number): T[] {
 const BUILDERS = [
   {
     name: 'buildAllowlistTree',
-    overCapacity: () => buildAllowlistTree(repeated(LEAF, CAPACITY + 1)),
+    depth: DARKVEIL_DEPTH,
+    overCapacity: () => buildAllowlistTree(repeated(LEAF, 2 ** DARKVEIL_DEPTH + 1)),
     atCapacityIsAllowed: () => buildAllowlistTree(repeated(LEAF, 1)),
   },
   {
     name: 'buildRegistrantTree',
-    overCapacity: () => buildRegistrantTree(repeated(LEAF, CAPACITY + 1)),
+    depth: DARKVEIL_DEPTH,
+    overCapacity: () => buildRegistrantTree(repeated(LEAF, 2 ** DARKVEIL_DEPTH + 1)),
     atCapacityIsAllowed: () => buildRegistrantTree(repeated(LEAF, 1)),
   },
   {
     name: 'buildBalanceSnapshotTree',
+    depth: HOLDER_DEPTH,
     overCapacity: () =>
-      buildBalanceSnapshotTree(repeated({ voterKey: LEAF, balance: 1n, heldSinceTimestamp: 0n }, CAPACITY + 1)),
+      buildBalanceSnapshotTree(
+        repeated({ voterKey: LEAF, balance: 1n, heldSinceTimestamp: 0n }, 2 ** HOLDER_DEPTH + 1),
+      ),
     atCapacityIsAllowed: () => buildBalanceSnapshotTree([{ voterKey: LEAF, balance: 1n, heldSinceTimestamp: 0n }]),
   },
   {
     name: 'buildStakeSnapshotTree',
-    overCapacity: () => buildStakeSnapshotTree(repeated({ stakerKey: LEAF, stakedAmount: 1n }, CAPACITY + 1)),
+    depth: HOLDER_DEPTH,
+    overCapacity: () => buildStakeSnapshotTree(repeated({ stakerKey: LEAF, stakedAmount: 1n }, 2 ** HOLDER_DEPTH + 1)),
     atCapacityIsAllowed: () => buildStakeSnapshotTree([{ stakerKey: LEAF, stakedAmount: 1n }]),
   },
   {
     name: 'buildRewardTree',
-    overCapacity: () => buildRewardTree(repeated({ stakerKey: LEAF, cumulativeAmount: 1n }, CAPACITY + 1)),
+    depth: HOLDER_DEPTH,
+    overCapacity: () => buildRewardTree(repeated({ stakerKey: LEAF, cumulativeAmount: 1n }, 2 ** HOLDER_DEPTH + 1)),
     atCapacityIsAllowed: () => buildRewardTree([{ stakerKey: LEAF, cumulativeAmount: 1n }]),
   },
 ] as const;
 
 describe('every fixed-depth tree refuses more leaves than it can prove', () => {
-  for (const { name, overCapacity, atCapacityIsAllowed } of BUILDERS) {
-    it(`${name} refuses one leaf past capacity`, () => {
-      expect(overCapacity).toThrow(/exceeds the 1048576 a depth-20 tree can prove/);
+  for (const { name, depth, overCapacity, atCapacityIsAllowed } of BUILDERS) {
+    it(`${name} refuses one leaf past its depth-${depth} capacity`, () => {
+      expect(overCapacity).toThrow(new RegExp(`exceeds the ${2 ** depth} a depth-${depth} tree can prove`));
     });
 
     it(`${name} still builds an ordinary tree`, () => {
@@ -87,7 +111,7 @@ describe('the proof length the circuits depend on', () => {
     for (const size of [1, 2, 3, 5, 8, 9, 17, 100, 1000]) {
       const tree = buildAllowlistTree(repeated(LEAF, size));
       for (const index of [0, Math.floor(size / 2), size - 1]) {
-        expect(tree.getProof(index)).toHaveLength(20);
+        expect(tree.getProof(index)).toHaveLength(DARKVEIL_DEPTH);
       }
     }
   });
