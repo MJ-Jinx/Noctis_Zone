@@ -38,6 +38,8 @@ export function deriveCreatorKey(secretKeyBytes: Uint8Array): Uint8Array {
 // snapshot) with different leaf/node domains but identical tree shape.
 
 const TREE_DEPTH = 20;
+/** What a depth-20 tree holds. Past this, no valid proof can be built. */
+const MAX_LEAVES = 2 ** TREE_DEPTH;
 
 export interface MerkleProofEntry {
   sibling: Uint8Array;
@@ -57,6 +59,18 @@ function buildSnapshotTree(
 ): SnapshotTree {
   if (leaves.length === 0) {
     throw new Error('buildSnapshotTree: at least one entry is required');
+  }
+
+  // A tree deeper than the circuit's fixed proof vector cannot be proven
+  // against: the depth padding below runs a negative number of times, so
+  // `getProof` returns MORE entries than the circuit reads, and the
+  // documented "always exactly TREE_DEPTH entries" quietly stops holding.
+  // Refused here rather than left to produce a proof that cannot verify —
+  // whoever is building the tree can still see everyone they left out.
+  if (leaves.length > MAX_LEAVES) {
+    throw new Error(
+      `buildSnapshotTree: ${leaves.length} leaves exceeds the ${MAX_LEAVES} a depth-${TREE_DEPTH} tree can prove`,
+    );
   }
 
   let size = 1;
@@ -155,6 +169,13 @@ export function hashStakeNode(left: Uint8Array, right: Uint8Array): Uint8Array {
  * `root` via `publishStakeSnapshot`.
  */
 export function buildStakeSnapshotTree(entries: Array<{ stakerKey: Uint8Array; stakedAmount: bigint }>): SnapshotTree {
+  // Checked BEFORE the leaves are hashed: the shared builder below guards
+  // too, but reaching it means paying for a million hashes first.
+  if (entries.length > MAX_LEAVES) {
+    throw new Error(
+      `buildStakeSnapshotTree: ${entries.length} entries exceeds the ${MAX_LEAVES} a depth-${TREE_DEPTH} tree can prove`,
+    );
+  }
   const leaves = entries.map((e) => hashStakeLeaf(e.stakerKey, e.stakedAmount));
   return buildSnapshotTree(leaves, STAKE_PAD_SIBLING, STAKE_EMPTY_LEAF, hashStakeNode);
 }
@@ -211,6 +232,13 @@ export function hashRewardNode(left: Uint8Array, right: Uint8Array): Uint8Array 
  * the staker has already claimed.
  */
 export function buildRewardTree(entries: Array<{ stakerKey: Uint8Array; cumulativeAmount: bigint }>): SnapshotTree {
+  // Checked BEFORE the leaves are hashed: the shared builder below guards
+  // too, but reaching it means paying for a million hashes first.
+  if (entries.length > MAX_LEAVES) {
+    throw new Error(
+      `buildRewardTree: ${entries.length} entries exceeds the ${MAX_LEAVES} a depth-${TREE_DEPTH} tree can prove`,
+    );
+  }
   const leaves = entries.map((e) => hashRewardLeaf(e.stakerKey, e.cumulativeAmount));
   return buildSnapshotTree(leaves, REWARD_PAD_SIBLING, REWARD_EMPTY_LEAF, hashRewardNode);
 }

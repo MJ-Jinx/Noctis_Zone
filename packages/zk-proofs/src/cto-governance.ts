@@ -101,6 +101,8 @@ export function computeVoteNullifier(input: VoteNullifierInput): Uint8Array {
 // witness type exactly.
 
 const TREE_DEPTH = 20;
+/** What a depth-20 tree holds. Past this, no valid proof can be built. */
+const MAX_LEAVES = 2 ** TREE_DEPTH;
 const PAD_SIBLING = pad32('noctis:cto:balance:pad:v1');
 const EMPTY_LEAF = pad32('noctis:cto:balance:empty-leaf:v1');
 const BALANCE_LEAF_DOMAIN = pad32('noctis:cto:balance:leaf:v1');
@@ -177,6 +179,18 @@ export function buildBalanceSnapshotTree(
 ): BalanceSnapshotTree {
   if (entries.length === 0) {
     throw new Error('buildBalanceSnapshotTree: at least one entry is required');
+  }
+
+  // A tree deeper than the circuit's fixed proof vector cannot be proven
+  // against: the depth padding below runs a negative number of times, so
+  // `getProof` returns MORE entries than the circuit reads, and the
+  // documented "always exactly TREE_DEPTH entries" quietly stops holding.
+  // Refused here rather than left to produce a proof that cannot verify —
+  // whoever is building the tree can still see everyone they left out.
+  if (entries.length > MAX_LEAVES) {
+    throw new Error(
+      `buildBalanceSnapshotTree: ${entries.length} entries exceeds the ${MAX_LEAVES} a depth-${TREE_DEPTH} tree can prove`,
+    );
   }
 
   const leaves = entries.map((e) => hashBalanceLeaf(e.voterKey, e.balance, e.heldSinceTimestamp));

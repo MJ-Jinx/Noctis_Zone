@@ -104,6 +104,8 @@ export function computeRegistrationCommit(input: RegistrationCommitInput): Uint8
 // `Vector<20, MerkleProofEntry>` witness type exactly.
 
 const TREE_DEPTH = 20;
+/** What a depth-20 tree holds. Past this, no valid proof can be built. */
+const MAX_LEAVES = 2 ** TREE_DEPTH;
 const PAD_SIBLING = pad32('noctis:allowlist:pad:v1');
 const EMPTY_LEAF = pad32('noctis:allowlist:empty-leaf:v1');
 const ALLOWLIST_NODE_DOMAIN = pad32('noctis:allowlist:node:v1');
@@ -141,6 +143,18 @@ export interface AllowlistTree {
 export function buildAllowlistTree(leaves: Uint8Array[]): AllowlistTree {
   if (leaves.length === 0) {
     throw new Error('buildAllowlistTree: at least one leaf is required');
+  }
+
+  // A tree deeper than the circuit's fixed proof vector cannot be proven
+  // against: the depth padding below runs a negative number of times, so
+  // `getProof` returns MORE entries than the circuit reads, and the
+  // documented "always exactly TREE_DEPTH entries" quietly stops holding.
+  // Refused here rather than left to produce a proof that cannot verify —
+  // whoever is building the tree can still see everyone they left out.
+  if (leaves.length > MAX_LEAVES) {
+    throw new Error(
+      `buildAllowlistTree: ${leaves.length} leaves exceeds the ${MAX_LEAVES} a depth-${TREE_DEPTH} tree can prove`,
+    );
   }
 
   let size = 1;
@@ -255,6 +269,18 @@ export interface RegistrantTree {
 export function buildRegistrantTree(leaves: Uint8Array[]): RegistrantTree {
   if (leaves.length === 0) {
     throw new Error('buildRegistrantTree: at least one leaf is required');
+  }
+
+  // A tree deeper than the circuit's fixed proof vector cannot be proven
+  // against: the depth padding below runs a negative number of times, so
+  // `getProof` returns MORE entries than the circuit reads, and the
+  // documented "always exactly TREE_DEPTH entries" quietly stops holding.
+  // Refused here rather than left to produce a proof that cannot verify —
+  // whoever is building the tree can still see everyone they left out.
+  if (leaves.length > MAX_LEAVES) {
+    throw new Error(
+      `buildRegistrantTree: ${leaves.length} leaves exceeds the ${MAX_LEAVES} a depth-${TREE_DEPTH} tree can prove`,
+    );
   }
 
   let size = 1;
