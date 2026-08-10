@@ -193,6 +193,36 @@ export function buildBalanceSnapshotTree(
     );
   }
 
+  // Check the fields before hashing them, so a missing one is reported here
+  // rather than inside the runtime's WASM binding.
+  //
+  // The types already require all three, and a typed caller that drops one is
+  // a compile error. What this catches is the untyped route in: these entries
+  // are assembled from Blockfrost JSON and a registry lookup, and a value that
+  // is DECLARED bigint but absent at runtime reaches the hash unchallenged.
+  // There it becomes `Cannot read properties of undefined (reading
+  // 'toString')` — thrown from inside a WASM conversion, naming no field, no
+  // entry and no caller. That exact error, from exactly this omission, sat
+  // unexplained for eleven days.
+  //
+  // Naming the field and the index costs one pass over a list that is at most
+  // MAX_LEAVES long and is about to be hashed anyway.
+  entries.forEach((e, i) => {
+    if (typeof e.balance !== 'bigint') {
+      throw new TypeError(`buildBalanceSnapshotTree: entry ${i} has a non-bigint balance (${typeof e.balance})`);
+    }
+    if (typeof e.heldSinceTimestamp !== 'bigint') {
+      throw new TypeError(
+        `buildBalanceSnapshotTree: entry ${i} has a non-bigint heldSinceTimestamp (${typeof e.heldSinceTimestamp}). ` +
+          'A voter whose first-acquisition time could not be resolved must be excluded from the snapshot, not carried into it — ' +
+          'the holding-period rule cannot be applied to a leaf that has no timestamp.',
+      );
+    }
+    if (!(e.voterKey instanceof Uint8Array)) {
+      throw new TypeError(`buildBalanceSnapshotTree: entry ${i} has a voterKey that is not a Uint8Array`);
+    }
+  });
+
   const leaves = entries.map((e) => hashBalanceLeaf(e.voterKey, e.balance, e.heldSinceTimestamp));
 
   let size = 1;
