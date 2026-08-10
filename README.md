@@ -115,7 +115,7 @@ Full constants in [CLAUDE.md](CLAUDE.md).
 ## Domain + social
 
 - **Website:** [noctis.zone](https://noctis.zone) 
-- **GitHub:** [github.com/MrJustJinx/Noctis_Zone](https://github.com/MrJustJinx/Noctis_Zone)
+- **GitHub:** [github.com/MJ-Jinx/Noctis_Zone](https://github.com/MJ-Jinx/Noctis_Zone)
 - **Twitter/X:** [@Noctis_Zone](https://x.com/Noctis_Zone)
 - **Discord:** Coming Soon
 
