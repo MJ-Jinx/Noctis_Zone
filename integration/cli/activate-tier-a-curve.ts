@@ -22,6 +22,7 @@ import {
   parseJsonStdin,
   readStdin,
   requireFieldsAllowZero,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -64,7 +65,7 @@ async function main() {
   const result = await submitter.activateCurve(
     input.governorPrivateKeyExtendedHex,
     input.governorAddress,
-    input.currentTimestampMs,
+    requireTimestampMs(input.currentTimestampMs, 'currentTimestampMs'),
   );
   process.stdout.write(JSON.stringify(result));
 }

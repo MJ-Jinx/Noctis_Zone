@@ -18,6 +18,7 @@ import {
   parseJsonStdin,
   readStdin,
   requireFieldsAllowZero,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -60,7 +61,9 @@ async function main() {
     launchId: hexToBytes(input.launchIdHex),
   });
 
-  const result = await submitter.executeProposal(BigInt(input.currentTimestampMs));
+  const result = await submitter.executeProposal(
+    BigInt(requireTimestampMs(input.currentTimestampMs, 'currentTimestampMs')),
+  );
   process.stdout.write(JSON.stringify(result));
 }
 

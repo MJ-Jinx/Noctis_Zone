@@ -18,6 +18,7 @@ import {
   parseJsonStdin,
   readStdin,
   requireFieldsAllowZero,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -27,7 +28,7 @@ interface MigrateInput {
   launchIdHex: string;
   governorAddress: string;
   governorPrivateKeyExtendedHex: string;
-  currentTimestampSeconds: number;
+  currentTimestampMs: number;
   blockfrostProjectId: string;
   blockfrostUrl: string;
   minswap: {
@@ -53,7 +54,7 @@ async function main() {
     'launchIdHex',
     'governorAddress',
     'governorPrivateKeyExtendedHex',
-    'currentTimestampSeconds',
+    'currentTimestampMs',
     'blockfrostProjectId',
     'blockfrostUrl',
     'minswap',
@@ -73,7 +74,7 @@ async function main() {
   const result = await submitter.migrateToMinswapPool(
     input.governorPrivateKeyExtendedHex,
     input.governorAddress,
-    input.currentTimestampSeconds,
+    requireTimestampMs(input.currentTimestampMs, 'currentTimestampMs'),
   );
   process.stdout.write(
     JSON.stringify({

@@ -38,11 +38,18 @@
 // ExpireCurve=7, ClaimBuyback=8, Graduate=9, TriggerCTO=10, DissolveCTO=11,
 // AnchorDvAllocationRoot=12), not assumed to match Tier A.
 //
-// Timestamp units — same as the Tier A submitter (SECONDS for SealLock's
-// lock_timestamp and vesting's vest_start_timestamp; neither is bound to the
-// tx validity range — see the Tier A file header for the
-// full confirmed-via-on-chain-evidence reasoning). Graduate takes NO
-// timestamp.
+// Timestamp units — MILLISECONDS throughout, matching the Tier A submitter
+// and Cardano's own validity range. This file is a mirror, and it inherits
+// the units along with everything else:
+//   - Graduate takes no timestamp parameter at all (bare variant).
+//   - SealLock's `timestamp` and vesting's `start_timestamp` are each bound
+//     through interval.contains(self.validity_range, ...) in the SHARED
+//     lp_escrow.ak / vesting.ak named above, so both builders below set a
+//     range and the value must fall inside it.
+//   - Both are also stored: `lock_timestamp` is what is_lock_expired adds
+//     lock_duration to, and `vest_start_timestamp` is what ClaimVested
+//     subtracts from current_timestamp. Those comparisons are ms against
+//     ms-scale constants (min_lock_duration, vest_days*86_400_000).
 //
 // Graduate and SealLock are PERMISSIONLESS; StartVesting requires the
 // governor signature. Two-transaction split (TX1 = Graduate + SealLock,
@@ -154,14 +161,14 @@ export class TierBGraduationSubmitter {
    * on-chain, this throws (on the state guards below) instead of
    * double-spending.
    *
-   * @param lockSealTimestampSeconds  POSIX SECONDS — becomes lp_escrow's
-   *   lock_timestamp (real-day-arithmetic field, deliberately NOT ms-scale;
-   *   see file header).
+   * @param lockSealTimestampMs  MILLISECONDS — becomes lp_escrow's
+   *   lock_timestamp, which is_lock_expired adds lock_duration to. See file
+   *   header.
    */
   async graduateAndSealLp(
     governorPrivateKeyExtendedHex: string,
     governorAddress: string,
-    lockSealTimestampSeconds: number,
+    lockSealTimestampMs: number,
   ): Promise<{
     txHash: string;
     lpAda: bigint;
@@ -228,7 +235,7 @@ export class TierBGraduationSubmitter {
     });
     const newLpDatum: LpEscrowDatumData = {
       ...lpDatum,
-      lock_timestamp: BigInt(lockSealTimestampSeconds),
+      lock_timestamp: BigInt(lockSealTimestampMs),
       lp_state: 'Locked',
     };
 
@@ -236,7 +243,11 @@ export class TierBGraduationSubmitter {
     // Graduate as variant 9 while the code sent 8. `redeemer-indices.ts` is
     // held against the compiled blueprint by a test, so it cannot say that.
     const graduateRedeemer = new Constr(BONDING_CURVE_TIER_B_REDEEMER.Graduate, []);
-    const sealLockRedeemer = new Constr(LP_ESCROW_REDEEMER.SealLock, [BigInt(lockSealTimestampSeconds), lpAda]);
+    const sealLockRedeemer = new Constr(LP_ESCROW_REDEEMER.SealLock, [BigInt(lockSealTimestampMs), lpAda]);
+
+    // SealLock binds its timestamp to the range, so the range has to exist.
+    const sealValidFrom = lockSealTimestampMs - 240_000;
+    const sealValidTo = lockSealTimestampMs + 240_000;
 
     const bech32Key = extendedHexToBech32PrivateKey(governorPrivateKeyExtendedHex);
     const governorUtxos = await lucid.utxosAt(governorAddress);
@@ -244,6 +255,8 @@ export class TierBGraduationSubmitter {
 
     const tx = await lucid
       .newTx()
+      .validFrom(sealValidFrom)
+      .validTo(sealValidTo)
       .collectFrom([curveUtxo], Data.to(graduateRedeemer))
       .collectFrom([lpUtxo], Data.to(sealLockRedeemer))
       .attach.SpendingValidator(this.bondingCurveValidator)
@@ -286,12 +299,12 @@ export class TierBGraduationSubmitter {
    * header), so this can be called any time after mint and independently
    * retried.
    *
-   * @param vestStartTimestampSeconds  POSIX SECONDS.
+   * @param vestStartTimestampMs  MILLISECONDS.
    */
   async startVesting(
     governorPrivateKeyExtendedHex: string,
     governorAddress: string,
-    vestStartTimestampSeconds: number,
+    vestStartTimestampMs: number,
   ): Promise<{ txHash: string }> {
     const lucid = await this.lucidPromise;
 
@@ -309,10 +322,14 @@ export class TierBGraduationSubmitter {
     const newVestingDatum: VestingDatumData = {
       ...vestingDatum,
       vesting_state: 'Vesting',
-      vest_start_timestamp: BigInt(vestStartTimestampSeconds),
+      vest_start_timestamp: BigInt(vestStartTimestampMs),
     };
 
-    const startVestingRedeemer = new Constr(VESTING_REDEEMER.StartVesting, [BigInt(vestStartTimestampSeconds)]);
+    const startVestingRedeemer = new Constr(VESTING_REDEEMER.StartVesting, [BigInt(vestStartTimestampMs)]);
+
+    // StartVesting binds start_timestamp to the range the same way.
+    const vestValidFrom = vestStartTimestampMs - 240_000;
+    const vestValidTo = vestStartTimestampMs + 240_000;
 
     const bech32Key = extendedHexToBech32PrivateKey(governorPrivateKeyExtendedHex);
     const governorUtxos = await lucid.utxosAt(governorAddress);
@@ -320,6 +337,8 @@ export class TierBGraduationSubmitter {
 
     const tx = await lucid
       .newTx()
+      .validFrom(vestValidFrom)
+      .validTo(vestValidTo)
       .collectFrom([vestingUtxo], Data.to(startVestingRedeemer))
       .attach.SpendingValidator(this.vestingValidator)
       .pay.ToContract(
@@ -345,13 +364,13 @@ export class TierBGraduationSubmitter {
    * TX1's hash is preserved in the thrown error so a caller can tell
    * graduation already landed and only StartVesting needs a retry.
    *
-   * @param lockSealTimestampSeconds  POSIX SECONDS — used for both
+   * @param lockSealTimestampMs  MILLISECONDS — used for both
    *   lp_escrow's lock_timestamp and vesting's vest_start_timestamp.
    */
   async graduate(
     governorPrivateKeyExtendedHex: string,
     governorAddress: string,
-    lockSealTimestampSeconds: number,
+    lockSealTimestampMs: number,
   ): Promise<{
     graduateSealLockTxHash: string;
     startVestingTxHash: string;
@@ -361,17 +380,13 @@ export class TierBGraduationSubmitter {
   }> {
     const lucid = await this.lucidPromise;
 
-    const step1 = await this.graduateAndSealLp(
-      governorPrivateKeyExtendedHex,
-      governorAddress,
-      lockSealTimestampSeconds,
-    );
+    const step1 = await this.graduateAndSealLp(governorPrivateKeyExtendedHex, governorAddress, lockSealTimestampMs);
 
     await lucid.awaitTx(step1.txHash);
 
     let step2TxHash: string;
     try {
-      const step2 = await this.startVesting(governorPrivateKeyExtendedHex, governorAddress, lockSealTimestampSeconds);
+      const step2 = await this.startVesting(governorPrivateKeyExtendedHex, governorAddress, lockSealTimestampMs);
       step2TxHash = step2.txHash;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

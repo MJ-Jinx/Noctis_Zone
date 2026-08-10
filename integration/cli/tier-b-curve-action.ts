@@ -25,6 +25,7 @@ import {
   readStdin,
   requireField,
   requireFieldsFalsy,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -143,7 +144,7 @@ async function main() {
     case 'activate': {
       const key = requireField(input, 'governorPrivateKeyExtendedHex', input.action);
       const addr = requireField(input, 'governorAddress', input.action);
-      const ts = requireField(input, 'currentTimestampMs', input.action);
+      const ts = requireTimestampMs(requireField(input, 'currentTimestampMs', input.action), 'currentTimestampMs');
       result = await submitter.activateCurve(key, addr, ts);
       break;
     }
@@ -155,7 +156,7 @@ async function main() {
       const key = requireField(input, 'governorPrivateKeyExtendedHex', input.action);
       const addr = requireField(input, 'governorAddress', input.action);
       const count = requireField(input, 'registrantCount', input.action);
-      const ts = requireField(input, 'currentTimestampMs', input.action);
+      const ts = requireTimestampMs(requireField(input, 'currentTimestampMs', input.action), 'currentTimestampMs');
       result = await submitter.openDvClaim(key, addr, count, ts);
       break;
     }

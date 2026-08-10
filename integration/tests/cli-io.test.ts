@@ -18,6 +18,7 @@ import {
   requireFieldsAllowZero,
   requireFieldsFalsy,
   requireFieldsStrict,
+  requireTimestampMs,
 } from '../cli/cli-io.js';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -129,6 +130,43 @@ describe('requireField (single-field, action-dispatch CLIs)', () => {
 
   it("includes the action label in the error message when given, matching stake-action.ts/tier-b-curve-action.ts/token-metadata-action.ts's real format", () => {
     expect(() => requireField({ a: undefined }, 'a', 'stake')).toThrow('Missing required field for action "stake": a');
+  });
+});
+
+describe('requireTimestampMs (the seconds/milliseconds boundary)', () => {
+  // Cardano's validity range is milliseconds and every validator timestamp
+  // is compared against it; Midnight's ledger block field is
+  // `secondsSinceEpoch`. This codebase talks to both, so the units genuinely
+  // differ by destination and the CLI is where a PHP-supplied value crosses
+  // into the Cardano half. A seconds value here is not a slightly wrong
+  // time, it is 1970.
+  const REAL_NOW_MS = 1_775_000_000_000;
+  const SAME_INSTANT_SECONDS = 1_775_000_000;
+
+  it('accepts a real millisecond timestamp and returns it unchanged', () => {
+    expect(requireTimestampMs(REAL_NOW_MS, 'currentTimestampMs')).toBe(REAL_NOW_MS);
+  });
+
+  it('rejects the same instant expressed in seconds', () => {
+    expect(() => requireTimestampMs(SAME_INSTANT_SECONDS, 'currentTimestampMs')).toThrow(/must be MILLISECONDS/);
+  });
+
+  it('names the offending field, so the error points at the real caller', () => {
+    expect(() => requireTimestampMs(SAME_INSTANT_SECONDS, 'lockSealTimestampMs')).toThrow(/lockSealTimestampMs/);
+  });
+
+  it('accepts the exact boundary and rejects one below it', () => {
+    // 1e12 ms is 2001-09-09, the instant below which a value could honestly
+    // be either unit. Pinned from both sides one unit apart so the
+    // comparison cannot drift to the wrong side without a test noticing.
+    expect(requireTimestampMs(1_000_000_000_000, 'ts')).toBe(1_000_000_000_000);
+    expect(() => requireTimestampMs(999_999_999_999, 'ts')).toThrow(/must be MILLISECONDS/);
+  });
+
+  it('rejects a non-integer or non-finite value before the unit check', () => {
+    expect(() => requireTimestampMs(1.5, 'ts')).toThrow(/integer number of milliseconds/);
+    expect(() => requireTimestampMs(Number.NaN, 'ts')).toThrow(/integer number of milliseconds/);
+    expect(() => requireTimestampMs(Number.POSITIVE_INFINITY, 'ts')).toThrow(/integer number of milliseconds/);
   });
 });
 

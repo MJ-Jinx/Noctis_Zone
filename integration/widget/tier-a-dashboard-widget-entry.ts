@@ -32,12 +32,21 @@
 //
 // 3. getVestingState() computes `vestedToDate`/`claimable` CLIENT-SIDE using
 //    the browser's real current wall-clock time (Date.now()), mirroring
-//    vesting.ak's own exact formula (token_allocation * elapsed_seconds /
-//    vest_seconds, floor division) — this is the real, honest "how much can
+//    vesting.ak's own exact formula (token_allocation * elapsed_ms /
+//    vest_ms, floor division) — this is the real, honest "how much can
 //    I claim right now" figure for an actual creator, not a backdated test
 //    value. It reads live on-chain state on every call (no caching), same
 //    "stale price could get a tx rejected" reasoning as the buy widget's
 //    getCurveState().
+//
+// 4. Every timestamp here is MILLISECONDS, because that is the unit the
+//    chain supplies and the validator compares in: `vest_start_timestamp`
+//    is stored from a value bound to the transaction's validity range, and
+//    vesting.ak measures the schedule as vest_days * 86_400_000. Mixing
+//    seconds into either the display arithmetic or the claim call does not
+//    shift the answer slightly — it puts the two operands a thousandfold
+//    apart, so the subtraction below would go negative and the widget would
+//    report nothing as claimable no matter how much had actually vested.
 // ============================================================================
 
 import type { Network as LucidNetwork, WalletApi } from '@lucid-evolution/lucid';
@@ -67,7 +76,7 @@ export interface VestingStateSummary {
   claimedTokens: string;
   vestDays: string;
   vestStartTimestamp: string;
-  /** Computed client-side against real current time — floor(token_allocation * elapsed / (vestDays*86400)). */
+  /** Computed client-side against real current time — floor(token_allocation * elapsedMs / (vestDays*86_400_000)). */
   vestedToDate: string;
   /** vestedToDate - claimedTokens, floored at 0. */
   claimable: string;
@@ -101,20 +110,44 @@ function configure(newConfig: TierADashboardWidgetConfig): void {
   submitter = new TierAClaimsSubmitter(submitterConfig);
 }
 
+/** The subset of vesting.ak's datum the schedule arithmetic below needs. */
+export interface VestingScheduleFields {
+  vesting_state: string;
+  vest_start_timestamp: bigint;
+  vest_days: bigint;
+  token_allocation: bigint;
+}
+
+/**
+ * vesting.ak's own ClaimVested formula, evaluated client-side so the
+ * dashboard can show a live "claimable now" figure.
+ *
+ * MILLISECONDS on both sides. `vest_start_timestamp` was stored from a value
+ * bound to a transaction's validity range, and the validator measures the
+ * schedule as `vest_days * 86_400_000`. Feeding this a seconds-scale `nowMs`
+ * does not shift the answer a little — it makes `elapsedMs` negative by
+ * roughly the epoch itself, so the guard below holds vestedToDate at zero
+ * and the creator is shown nothing claimable however much has vested.
+ *
+ * Exported so the arithmetic is testable on its own; the browser entry point
+ * supplies Date.now().
+ */
+export function computeVestedToDate(datum: VestingScheduleFields, nowMs: bigint): bigint {
+  if (datum.vesting_state !== 'Vesting' && datum.vesting_state !== 'FullyClaimed') return 0n;
+  const elapsedMs = nowMs - datum.vest_start_timestamp;
+  const vestMs = datum.vest_days * 86_400_000n;
+  if (elapsedMs <= 0n || vestMs <= 0n) return 0n;
+  // Floor division, matching the validator exactly — a UI that rounded up
+  // would offer a claim the contract then refuses.
+  const vested = (datum.token_allocation * elapsedMs) / vestMs;
+  return vested > datum.token_allocation ? datum.token_allocation : vested;
+}
+
 async function getVestingState(): Promise<VestingStateSummary> {
   const s = requireSubmitter();
   const datum = await s.readVestingDatum();
 
-  let vestedToDate = 0n;
-  if (datum.vesting_state === 'Vesting' || datum.vesting_state === 'FullyClaimed') {
-    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-    const elapsedSeconds = nowSeconds - datum.vest_start_timestamp;
-    const vestSeconds = datum.vest_days * 86400n;
-    if (elapsedSeconds > 0n && vestSeconds > 0n) {
-      vestedToDate = (datum.token_allocation * elapsedSeconds) / vestSeconds;
-      if (vestedToDate > datum.token_allocation) vestedToDate = datum.token_allocation;
-    }
-  }
+  const vestedToDate = computeVestedToDate(datum, BigInt(Date.now()));
   const claimableRaw = vestedToDate - datum.claimed_tokens;
   const claimable = claimableRaw > 0n ? claimableRaw : 0n;
 
@@ -146,8 +179,8 @@ async function getCreatorFeesState(): Promise<CreatorFeesStateSummary> {
  */
 async function claimVested(params: { claimAmount: string; walletApi: WalletApi }): Promise<{ txHash: string }> {
   const s = requireSubmitter();
-  const currentTimestampSeconds = Math.floor(Date.now() / 1000);
-  const result = await s.claimVestedWithWallet(params.walletApi, BigInt(params.claimAmount), currentTimestampSeconds);
+  const currentTimestampMs = Date.now();
+  const result = await s.claimVestedWithWallet(params.walletApi, BigInt(params.claimAmount), currentTimestampMs);
   return { txHash: result.txHash };
 }
 

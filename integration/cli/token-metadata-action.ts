@@ -27,6 +27,7 @@ import {
   readStdin,
   requireField,
   requireFieldsFalsy,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -99,7 +100,7 @@ async function main() {
     case 'build-update': {
       const callerAddress = requireField(input, 'callerAddress', input.action);
       const metadata = requireField(input, 'metadata', input.action);
-      const ts = requireField(input, 'currentTimestampMs', input.action);
+      const ts = requireTimestampMs(requireField(input, 'currentTimestampMs', input.action), 'currentTimestampMs');
       result = await submitter.buildUpdateMetadata({
         callerAddress,
         curveAddress: input.curveAddress,

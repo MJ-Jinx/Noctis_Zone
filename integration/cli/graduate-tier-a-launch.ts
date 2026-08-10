@@ -27,6 +27,7 @@ import {
   parseJsonStdin,
   readStdin,
   requireFieldsAllowZero,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -36,7 +37,7 @@ interface GraduateInput {
   launchIdHex: string;
   governorAddress: string;
   governorPrivateKeyExtendedHex: string;
-  lockSealTimestampSeconds: number;
+  lockSealTimestampMs: number;
   blockfrostProjectId: string;
   blockfrostUrl: string;
 }
@@ -50,7 +51,7 @@ async function main() {
     'launchIdHex',
     'governorAddress',
     'governorPrivateKeyExtendedHex',
-    'lockSealTimestampSeconds',
+    'lockSealTimestampMs',
     'blockfrostProjectId',
     'blockfrostUrl',
   ]);
@@ -70,7 +71,7 @@ async function main() {
   const result = await submitter.graduate(
     input.governorPrivateKeyExtendedHex,
     input.governorAddress,
-    input.lockSealTimestampSeconds,
+    requireTimestampMs(input.lockSealTimestampMs, 'lockSealTimestampMs'),
   );
   process.stdout.write(
     JSON.stringify({

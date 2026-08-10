@@ -105,6 +105,14 @@ function makeFakeTxBuilder() {
       return builder;
     }),
   };
+  builder.validFrom = vi.fn((...a: unknown[]) => {
+    calls.validFrom = a;
+    return builder;
+  });
+  builder.validTo = vi.fn((...a: unknown[]) => {
+    calls.validTo = a;
+    return builder;
+  });
   builder.addSigner = vi.fn((...a: unknown[]) => {
     calls.addSigner = a;
     return builder;
@@ -318,6 +326,56 @@ describe('TierBGraduationSubmitter.graduateAndSealLp — Tier B DarkVeil field p
     expect(curvePayload.value.total_raised).toBe(0n);
     expect(curvePayload.value.lp_seeded).toBe(true);
     expect(curvePayload.value.staking_seeded).toBe(true);
+  });
+});
+
+describe('TierBGraduationSubmitter — SealLock/StartVesting are bound to a real validity range', () => {
+  // lp_escrow.ak's SealLock and vesting.ak's StartVesting each bind their
+  // timestamp through interval.contains(self.validity_range, ...), so a
+  // builder that sets no range cannot satisfy either. This mirror shipped
+  // without one, and stamped lock_timestamp from a seconds-scale value —
+  // which is_lock_expired then adds an ms-scale lock_duration to. Both
+  // halves are asserted here: the range exists and brackets the value, and
+  // the value written into the datum is the one that was bracketed.
+  const SEAL_MS = 1_775_000_000_000;
+
+  it('SealLock: sets a range that brackets lock_timestamp, no wider than the cap', async () => {
+    const { builder, calls, payToContractCalls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum(), assets: {} }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+
+    await submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, SEAL_MS);
+
+    const from = calls.validFrom?.[0] as number;
+    const to = calls.validTo?.[0] as number;
+    expect(from).toBeLessThanOrEqual(SEAL_MS);
+    expect(to).toBeGreaterThanOrEqual(SEAL_MS);
+    // max_validity_range_width in lp_escrow.ak, as a literal — expressing it
+    // via the submitter's own 240_000 would scale with the bug it guards.
+    expect(to - from).toBeLessThanOrEqual(600_000);
+
+    const sealedDatum = (payToContractCalls[1] as [string, { value: Record<string, unknown> }, unknown])[1].value;
+    expect(sealedDatum.lock_timestamp).toBe(BigInt(SEAL_MS));
+  });
+
+  it('StartVesting: sets a range that brackets vest_start_timestamp', async () => {
+    const { builder, calls, payToContractCalls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      vestingUtxos: [{ datum: vestDatum(), assets: {} }],
+    });
+
+    await submitter.startVesting(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, SEAL_MS);
+
+    const from = calls.validFrom?.[0] as number;
+    const to = calls.validTo?.[0] as number;
+    expect(from).toBeLessThanOrEqual(SEAL_MS);
+    expect(to).toBeGreaterThanOrEqual(SEAL_MS);
+    expect(to - from).toBeLessThanOrEqual(600_000);
+
+    const vestedDatum = (payToContractCalls[0] as [string, { value: Record<string, unknown> }, unknown])[1].value;
+    expect(vestedDatum.vest_start_timestamp).toBe(BigInt(SEAL_MS));
   });
 });
 

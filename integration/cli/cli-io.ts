@@ -115,6 +115,55 @@ export function requireField<T extends object, K extends keyof T>(
   return value as NonNullable<T[K]>;
 }
 
+/**
+ * The instant at which a POSIX value stops being ambiguous between the two
+ * units: 2001-09-09T01:46:40Z, which is 1e12 ms and 1e9 seconds.
+ *
+ * Below this a value could plausibly be either, so no guard can separate
+ * them. Above it, only milliseconds reach that magnitude — a seconds reading
+ * of 1e12 would be the year 33658. Every timestamp this codebase sends to
+ * Cardano is a real "now" or close to it, so all of them sit far above the
+ * line and a seconds value cannot.
+ */
+const MS_UNIT_FLOOR = 1_000_000_000_000;
+
+/**
+ * Asserts a caller-supplied timestamp is MILLISECONDS since the epoch, which
+ * is what every Cardano-side field in this codebase wants.
+ *
+ * WHY THIS EXISTS
+ * Cardano's transaction validity range is natively milliseconds, and every
+ * validator that stores or compares a timestamp does so against a value that
+ * arrived on that range. The Aiken constants were sized in ms accordingly
+ * (`min_lock_duration`, `migration_cooldown`, `dex_change_notice_period`,
+ * `execution_window`). The Midnight/Compact contracts are the other unit
+ * entirely — the ledger's own block field is `secondsSinceEpoch` — so this
+ * codebase genuinely carries both, and the boundary between them is exactly
+ * where a value gets handed from PHP to a Cardano submitter.
+ *
+ * A seconds value passed here is off by 1000. It does not read as a slightly
+ * wrong time; it reads as 1970, which turns a stored duration into a
+ * different duration and a validity range into one no node will accept. The
+ * magnitudes are so far apart that a single comparison separates them for
+ * good, which is the whole reason this is a guard and not a convention.
+ *
+ * @param value  The number as received from the caller.
+ * @param field  The input field name, so the error names the real culprit.
+ */
+export function requireTimestampMs(value: number, field: string): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+    throw new Error(`${field} must be an integer number of milliseconds since the epoch, got: ${value}`);
+  }
+  if (value < MS_UNIT_FLOOR) {
+    throw new Error(
+      `${field} must be MILLISECONDS since the epoch, but ${value} is too small to be one ` +
+        `(it looks like POSIX seconds — multiply by 1000). Cardano's validity range is ` +
+        'milliseconds, and every validator timestamp is compared against it.',
+    );
+  }
+  return value;
+}
+
 /** Recursively converts bigints to strings and Uint8Arrays to hex, so a result object survives JSON.stringify. Uses the Uint8Array-aware superset (stake-action.ts's own variant) as the one canonical version — a strict superset of every other file's plain variant, since none of their result shapes carry a raw Uint8Array today. */
 export function jsonSafe(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString();

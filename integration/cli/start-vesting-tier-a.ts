@@ -23,6 +23,7 @@ import {
   parseJsonStdin,
   readStdin,
   requireFieldsAllowZero,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -32,7 +33,7 @@ interface StartVestingInput {
   launchIdHex: string;
   governorAddress: string;
   governorPrivateKeyExtendedHex: string;
-  vestStartTimestampSeconds: number;
+  vestStartTimestampMs: number;
   blockfrostProjectId: string;
   blockfrostUrl: string;
 }
@@ -46,7 +47,7 @@ async function main() {
     'launchIdHex',
     'governorAddress',
     'governorPrivateKeyExtendedHex',
-    'vestStartTimestampSeconds',
+    'vestStartTimestampMs',
     'blockfrostProjectId',
     'blockfrostUrl',
   ]);
@@ -69,7 +70,7 @@ async function main() {
   const result = await submitter.startVesting(
     input.governorPrivateKeyExtendedHex,
     input.governorAddress,
-    input.vestStartTimestampSeconds,
+    requireTimestampMs(input.vestStartTimestampMs, 'vestStartTimestampMs'),
   );
   process.stdout.write(JSON.stringify({ txHash: result.txHash }));
 }

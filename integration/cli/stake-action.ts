@@ -20,6 +20,7 @@ import {
   readStdin,
   requireField,
   requireFieldsFalsy,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -110,7 +111,13 @@ async function main() {
     case 'stake': {
       const mnemonic = requireField(input, 'stakerMnemonic', input.action);
       const amount = BigInt(requireField(input, 'amount', input.action));
-      result = await submitter.stake(mnemonic, amount, input.stakeTimestampMs);
+      result = await submitter.stake(
+        mnemonic,
+        amount,
+        input.stakeTimestampMs === undefined
+          ? undefined
+          : requireTimestampMs(input.stakeTimestampMs, 'stakeTimestampMs'),
+      );
       break;
     }
     case 'unstake': {

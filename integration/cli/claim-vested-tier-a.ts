@@ -16,6 +16,7 @@ import {
   parseJsonStdin,
   readStdin,
   requireFieldsAllowZero,
+  requireTimestampMs,
 } from './cli-io.js';
 
 declare const __dirname: string;
@@ -26,7 +27,7 @@ interface ClaimVestedInput {
   creatorAddress: string;
   creatorPrivateKeyExtendedHex: string;
   claimAmount: string;
-  currentTimestampSeconds: number;
+  currentTimestampMs: number;
   blockfrostProjectId: string;
   blockfrostUrl: string;
 }
@@ -41,7 +42,7 @@ async function main() {
     'creatorAddress',
     'creatorPrivateKeyExtendedHex',
     'claimAmount',
-    'currentTimestampSeconds',
+    'currentTimestampMs',
     'blockfrostProjectId',
     'blockfrostUrl',
   ]);
@@ -61,7 +62,7 @@ async function main() {
     input.creatorPrivateKeyExtendedHex,
     input.creatorAddress,
     BigInt(input.claimAmount),
-    input.currentTimestampSeconds,
+    requireTimestampMs(input.currentTimestampMs, 'currentTimestampMs'),
   );
   process.stdout.write(JSON.stringify({ txHash: result.txHash }));
 }
