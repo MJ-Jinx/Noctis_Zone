@@ -24,9 +24,16 @@ vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
   };
 });
 
-import { credentialToAddress, Lucid } from '@lucid-evolution/lucid';
+import { credentialToAddress, Lucid, validatorToScriptHash } from '@lucid-evolution/lucid';
 import type { ResolveChallengeParams, SubmitChallengeParams } from '../cardano-cto-sybil-challenge-submitter.js';
 import { CardanoCtoSybilChallengeSubmitter, toHex } from '../cardano-cto-sybil-challenge-submitter.js';
+
+// The challenge token, derived the way the submitter derives it: the policy is
+// the script's OWN hash, because `mint` and `spend` are two handlers of one
+// Aiken validator. Nobody else can mint this — which is what makes it evidence
+// rather than a claim.
+const SCRIPT_HASH = validatorToScriptHash({ type: 'PlutusV3', script: '590000' });
+const CHALLENGE_UNIT = SCRIPT_HASH + Buffer.from('sybil', 'utf8').toString('hex');
 
 function fakeBytes(fill: number, len = 32): Uint8Array {
   return new Uint8Array(len).fill(fill);
@@ -62,7 +69,17 @@ function makeFakeTxBuilder() {
       calls.attachSpendingValidator = a;
       return builder;
     }),
+    // Both paths attach this now: the mint on submit is what makes a deposit
+    // resolvable at all, and the burn on resolve is required by `spend`.
+    MintingPolicy: vi.fn((...a: unknown[]) => {
+      calls.attachMintingPolicy = a;
+      return builder;
+    }),
   };
+  builder.mintAssets = vi.fn((...a: unknown[]) => {
+    calls.mintAssets = a;
+    return builder;
+  });
   builder.pay = {
     ToContract: vi.fn((...a: unknown[]) => {
       calls.payToContract = a;
@@ -94,17 +111,39 @@ function makeFakeTxBuilder() {
   return { builder, calls, payToAddressCalls };
 }
 
+interface FixtureUtxo {
+  datum: unknown;
+  assets: Record<string, bigint>;
+  /** Opt out of the challenge token, to describe a deposit made without one. */
+  noChallengeToken?: boolean;
+  txHash?: string;
+}
+
+/**
+ * A real challenge UTXO carries the challenge token — the mint handler puts it
+ * there, and `spend` refuses to settle an input without it. A fixture without
+ * one describes a deposit the chain can never resolve.
+ */
+function asChainUtxos(utxos: FixtureUtxo[] | undefined) {
+  return (utxos ?? []).map((u, i) => ({
+    txHash: u.txHash ?? i.toString(16).padStart(2, '0').repeat(32),
+    outputIndex: 0,
+    ...u,
+    assets: u.noChallengeToken ? u.assets : { [CHALLENGE_UNIT]: 1n, ...u.assets },
+  }));
+}
+
 function makeSubmitter(
   builder: ReturnType<typeof makeFakeTxBuilder>['builder'],
   opts: {
-    utxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
+    utxos?: FixtureUtxo[];
     walletAddress?: string;
     governorPrivateKey?: string;
   } = {},
 ) {
   const fakeLucid = {
     selectWallet: { fromAPI: vi.fn(), fromPrivateKey: vi.fn() },
-    utxosAt: vi.fn().mockResolvedValue(opts.utxos ?? []),
+    utxosAt: vi.fn().mockResolvedValue(asChainUtxos(opts.utxos)),
     wallet: () => ({
       address: vi.fn().mockResolvedValue(opts.walletAddress ?? addrFor(fakeKeyHash(0xaa))),
     }),
@@ -192,6 +231,53 @@ describe('CardanoCtoSybilChallengeSubmitter.submitChallenge', () => {
     await submitter.submitChallenge(walletApi as never, baseSubmitParams());
     expect(fakeLucid.selectWallet.fromAPI).toHaveBeenCalledWith(walletApi);
   });
+
+  // Without these the deposit still builds and still submits — and can never
+  // be resolved, because `spend` requires this token on the input it settles.
+  // The bond goes in and has no way out, which is the failure these pin.
+  it('mints the challenge token, so the deposit can be resolved at all', async () => {
+    const { builder, calls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder);
+
+    await submitter.submitChallenge({} as never, baseSubmitParams());
+
+    const [minted] = calls.mintAssets as [Record<string, bigint>, string];
+    expect(minted[CHALLENGE_UNIT]).toBe(1n);
+    expect(calls.attachMintingPolicy).toBeDefined();
+  });
+
+  it('puts the token on the challenge output, not in the challenger’s wallet', async () => {
+    // `spend` looks for it on the input it settles, so a token minted into the
+    // challenger's own change output would satisfy the mint and nothing else.
+    const { builder, calls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder);
+
+    await submitter.submitChallenge({} as never, baseSubmitParams({ bondAmountLovelace: 25_000_000n }));
+
+    const [, , assets] = calls.payToContract as [string, unknown, Record<string, bigint>];
+    expect(assets[CHALLENGE_UNIT]).toBe(1n);
+    // Exactly the bond, no more: the mint handler compares the output's
+    // lovelace against the datum's bond_amount for equality.
+    expect(assets.lovelace).toBe(25_000_000n);
+  });
+
+  it('brackets submitted_at in a validity range the mint handler will accept', async () => {
+    // The mint handler requires the declared timestamp to fall inside the
+    // range AND the range to be no wider than 600_000ms — `interval.contains`
+    // alone would let a caller widen it and pick any time they liked.
+    const { builder, calls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder);
+
+    await submitter.submitChallenge({} as never, baseSubmitParams());
+
+    const [, payload] = calls.payToContract as [string, { value: { submitted_at: bigint } }];
+    const submittedAt = Number(payload.value.submitted_at);
+    const [validFrom] = calls.validFrom as [number];
+    const [validTo] = calls.validTo as [number];
+    expect(validFrom).toBeLessThanOrEqual(submittedAt);
+    expect(validTo).toBeGreaterThanOrEqual(submittedAt);
+    expect(validTo - validFrom).toBeLessThanOrEqual(600_000);
+  });
 });
 
 describe('CardanoCtoSybilChallengeSubmitter.resolveChallenge', () => {
@@ -248,7 +334,7 @@ describe('CardanoCtoSybilChallengeSubmitter.resolveChallenge', () => {
     });
 
     await expect(submitter.resolveChallenge(baseResolveParams())).rejects.toThrow(
-      /No open cto_sybil_challenge UTXO found/,
+      /No open cto_sybil_challenge UTXO carrying the challenge token/,
     );
   });
 
@@ -303,5 +389,50 @@ describe('CardanoCtoSybilChallengeSubmitter.resolveChallenge', () => {
     expect(redeemer.upheld).toBe(false);
     expect(redeemer.current_timestamp).toBe(12345n);
     expect(calls.addSigner).toEqual([toHex(fakeBytes(2))]); // datum.governor_pub_key_hash
+  });
+
+  // cto_sybil_challenge.ak is unparameterized, so every challenge across every
+  // launch shares one address and its datum is written by whoever paid it
+  // there. These pin the token half of that, on both sides of the pair.
+  it('burns the challenge token, which `spend` requires of the same transaction', async () => {
+    const { builder, calls } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      governorPrivateKey: 'ed25519_sk1fake',
+      utxos: [{ datum: challengeDatum(), assets: {} }],
+    });
+
+    await submitter.resolveChallenge(baseResolveParams());
+
+    const [minted] = calls.mintAssets as [Record<string, bigint>, string];
+    expect(minted[CHALLENGE_UNIT]).toBe(-1n);
+    expect(calls.attachMintingPolicy).toBeDefined();
+  });
+
+  it('refuses a deposit that never minted the token', async () => {
+    // Exactly what the builder used to produce: a bond and a datum, nothing
+    // else. The chain cannot settle it, so neither will this.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      governorPrivateKey: 'ed25519_sk1fake',
+      utxos: [{ datum: challengeDatum(), assets: {}, noChallengeToken: true }],
+    });
+
+    await expect(submitter.resolveChallenge(baseResolveParams())).rejects.toThrow(/carrying the challenge token/);
+  });
+
+  it('refuses to choose when two open challenges name the same voter and proposal', async () => {
+    // The asset name is shared by every challenge, so both carry a genuine
+    // token and neither is distinguishable by it. A decoy could otherwise
+    // absorb a resolution — and its payout — meant for the real one.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      governorPrivateKey: 'ed25519_sk1fake',
+      utxos: [
+        { datum: challengeDatum(), assets: {}, txHash: '11'.repeat(32) },
+        { datum: challengeDatum({ bond_amount: 1_000_000n }), assets: {}, txHash: '22'.repeat(32) },
+      ],
+    });
+
+    await expect(submitter.resolveChallenge(baseResolveParams())).rejects.toThrow(/Refusing to guess/);
   });
 });

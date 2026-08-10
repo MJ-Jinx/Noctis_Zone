@@ -9,13 +9,23 @@
 // Two real transactions, two different signers:
 //   - submitChallenge — the CHALLENGER's own wallet pays the bond
 //     (NHOP_CHALLENGE_BOND, 25 ADA) and deposits it plus an inline datum at
-//     the contract's fixed script address. This needs no SpendingValidator
-//     attached and no redeemer at all — creating a script UTXO requires no
-//     validator approval, only SPENDING one does (same insight
-//     CLAUDE.md's staking_pool.ak section already documents: "Staking
-//     itself needs no validator redeemer at all"). Modeled on
+//     the contract's fixed script address, AND mints the challenge token
+//     that makes the deposit resolvable. Modeled on
 //     darkveil-claim-submitter.ts's buyer-wallet-signed pattern
 //     (lucid.selectWallet.fromAPI).
+//
+//     THE MINT IS NOT OPTIONAL, and the reason is worth stating because the
+//     opposite is intuitive. Creating a script UTXO needs no validator
+//     approval — only spending one does — so a deposit alone builds and
+//     submits happily. But `spend` requires this validator's own token on the
+//     input it settles and requires that token burned in the same
+//     transaction, so a deposit made without the mint can never be resolved
+//     by either arm: the bond goes in and has no way out. Minting IS
+//     validated, which is the whole point — it is what makes `submitted_at`
+//     a time the chain agreed to rather than one the challenger chose, and
+//     the defence window counts from that field. `mint` and `spend` are two
+//     handlers of one script, so the policy id IS the script hash and nobody
+//     else can mint this token.
 //   - resolveChallenge — GOVERNOR-signed (matches the validator's own
 //     list.has(self.extra_signatories, datum.governor_pub_key_hash) check),
 //     spends the challenge UTXO with ResolveChallenge, paying either the
@@ -40,18 +50,22 @@
 import type {
   LucidEvolution,
   Network as LucidNetwork,
+  MintingPolicy,
   SpendingValidator,
   UTxO,
   WalletApi,
 } from '@lucid-evolution/lucid';
 import {
   Blockfrost,
+  Constr,
   credentialToAddress,
   Data,
   getAddressDetails,
   Lucid,
   validatorToAddress,
+  validatorToScriptHash,
 } from '@lucid-evolution/lucid';
+import { CTO_SYBIL_MINT_REDEEMER } from './redeemer-indices.js';
 
 // ============================================================================
 // DATA SCHEMAS — mirror the fresh contracts/cardano/plutus.json exactly
@@ -127,14 +141,40 @@ export interface CardanoCtoSybilChallengeSubmitterConfig {
   governorPrivateKey?: string;
 }
 
+/**
+ * `challenge_asset_name` in cto_sybil_challenge.ak — the literal `"sybil"`.
+ *
+ * One name for every challenge, deliberately: what makes a challenge unique
+ * is the UTXO it lives in, and `spend` already binds a resolution to that.
+ */
+const CHALLENGE_ASSET_NAME_HEX = Buffer.from('sybil', 'utf8').toString('hex');
+
+/**
+ * `max_validity_range_width` in the validator, halved either side of the
+ * timestamp. Both handlers require a range that CONTAINS the timestamp and is
+ * no wider than this — `interval.contains` alone would let a caller widen the
+ * range and pick a time far from the real one.
+ */
+const VALIDITY_HALF_WIDTH_MS = 240_000;
+
 export class CardanoCtoSybilChallengeSubmitter {
   private lucidPromise: Promise<LucidEvolution>;
   private validator: SpendingValidator;
+  /**
+   * The same script, attached for its minting handler. `mint` and `spend` are
+   * two handlers of one Aiken validator, so this is the identical CBOR under a
+   * different Lucid type — not a second script and not a second address.
+   */
+  private mintingPolicy: MintingPolicy;
   private scriptAddress: string;
+  /** Policy id + asset name of the challenge token. The policy IS the script hash. */
+  private challengeUnit: string;
 
   constructor(private config: CardanoCtoSybilChallengeSubmitterConfig) {
     this.validator = { type: 'PlutusV3', script: config.compiledScriptCbor };
+    this.mintingPolicy = { type: 'PlutusV3', script: config.compiledScriptCbor };
     this.scriptAddress = validatorToAddress(config.network, this.validator);
+    this.challengeUnit = validatorToScriptHash(this.validator) + CHALLENGE_ASSET_NAME_HEX;
     this.lucidPromise = Lucid(new Blockfrost(config.blockfrostUrl, config.blockfrostProjectId), config.network);
   }
 
@@ -151,6 +191,25 @@ export class CardanoCtoSybilChallengeSubmitter {
     return utxo.datum;
   }
 
+  /**
+   * The one open challenge for a given (voter, proposal), authenticated by the
+   * challenge token.
+   *
+   * Sibling of launch-utxo-lookup.ts and the same two rules — require a token,
+   * and refuse rather than choose — for the same reason: this validator is
+   * unparameterized, so every challenge across every launch shares one address
+   * and a datum there is written by whoever paid the output.
+   *
+   * It is STRONGER here than for the launch lookups, and worth saying why: the
+   * policy id is this script's own hash rather than a field read off the datum
+   * under inspection, so a forger cannot mint a token that satisfies it at
+   * all. There is no residual "self-authored policy" case to reason about.
+   *
+   * Ambiguity is still possible and still refused — the asset name is shared
+   * by every challenge, so two challenges naming the same (voter, proposal)
+   * both carry a genuine token. Taking the first would let a cheap decoy
+   * absorb a resolution meant for the real one.
+   */
   private async findChallengeUtxo(
     lucid: LucidEvolution,
     challengedVoterKey: Uint8Array,
@@ -159,6 +218,7 @@ export class CardanoCtoSybilChallengeSubmitter {
     const utxos = await lucid.utxosAt(this.scriptAddress);
     const voterKeyHex = toHex(challengedVoterKey);
     const proposalIdHex = toHex(challengedProposalId);
+    const matches: UTxO[] = [];
     for (const utxo of utxos) {
       if (!utxo.datum) continue;
       let decoded: CtoSybilChallengeDatumData;
@@ -167,20 +227,44 @@ export class CardanoCtoSybilChallengeSubmitter {
       } catch {
         continue;
       }
-      if (decoded.challenged_voter_key === voterKeyHex && decoded.challenged_proposal_id === proposalIdHex) {
-        return utxo;
+      if (decoded.challenged_voter_key !== voterKeyHex || decoded.challenged_proposal_id !== proposalIdHex) {
+        continue;
       }
+      if ((utxo.assets[this.challengeUnit] ?? 0n) !== 1n) continue;
+      matches.push(utxo);
     }
-    throw new Error(
-      `No open cto_sybil_challenge UTXO found for voter_key ${voterKeyHex} / proposal ${proposalIdHex} at ${this.scriptAddress}`,
-    );
+
+    if (matches.length === 0) {
+      throw new Error(
+        `No open cto_sybil_challenge UTXO carrying the challenge token found for voter_key ${voterKeyHex} / ` +
+          `proposal ${proposalIdHex} at ${this.scriptAddress}. Either no challenge was opened, or it has ` +
+          'already been resolved.',
+      );
+    }
+    if (matches.length > 1) {
+      const refs = matches.map((u) => `${u.txHash}#${u.outputIndex}`).join(', ');
+      throw new Error(
+        `${matches.length} open challenges name voter_key ${voterKeyHex} / proposal ${proposalIdHex}: ${refs}. ` +
+          'Refusing to guess which to resolve — exactly one is expected, so this needs investigating before ' +
+          'any bond is paid out.',
+      );
+    }
+
+    const only = matches[0];
+    if (!only) {
+      throw new Error('unreachable: matches has exactly one element');
+    }
+    return only;
   }
 
   /**
-   * Challenger-initiated: a plain deposit at the fixed script address, no
-   * SpendingValidator attach and no redeemer needed — creating a script
-   * UTXO needs no validator approval. Signed by the challenger's own
-   * connected wallet, which pays the real bond.
+   * Challenger-initiated: deposits the bond at the fixed script address and
+   * mints the challenge token in the same transaction. Signed by the
+   * challenger's own connected wallet, which pays the real bond.
+   *
+   * No SpendingValidator is attached — nothing is being spent here — but the
+   * minting policy is, because the mint is what makes the deposit resolvable
+   * later. See this file's header for why a deposit alone is a dead end.
    */
   async submitChallenge(walletApi: WalletApi, params: SubmitChallengeParams): Promise<{ txHash: string }> {
     const lucid = await this.lucidPromise;
@@ -212,13 +296,28 @@ export class CardanoCtoSybilChallengeSubmitter {
 
     const tx = await lucid
       .newTx()
+      // The mint handler binds `submitted_at` to real chain time: it requires
+      // the declared timestamp to fall inside this range AND the range to be
+      // no wider than the validator's own maximum.
+      .validFrom(Number(submittedAt) - VALIDITY_HALF_WIDTH_MS)
+      .validTo(Number(submittedAt) + VALIDITY_HALF_WIDTH_MS)
+      .mintAssets(
+        { [this.challengeUnit]: 1n },
+        Data.to(new Constr(CTO_SYBIL_MINT_REDEEMER.OpenChallenge, [submittedAt])),
+      )
+      .attach.MintingPolicy(this.mintingPolicy)
       .pay.ToContract(
         this.scriptAddress,
         {
           kind: 'inline',
           value: Data.to<CtoSybilChallengeDatumData>(datum, CtoSybilChallengeDatumSchema),
         },
-        { lovelace: params.bondAmountLovelace },
+        // The token has to land ON the challenge output, not in the
+        // challenger's wallet — `spend` looks for it on the input it settles.
+        // The lovelace must equal `bond_amount` exactly; the mint handler
+        // checks that too, so an overfunded deposit is refused rather than
+        // silently unaccounted.
+        { lovelace: params.bondAmountLovelace, [this.challengeUnit]: 1n },
       )
       .addSigner(challengerAddress)
       .complete();
@@ -252,15 +351,21 @@ export class CardanoCtoSybilChallengeSubmitter {
     // The validator binds current_timestamp through
     // interval.contains(validity_range, ...), so a resolve transaction
     // without a range is refused outright.
-    const resolveValidFrom = Number(params.currentTimestamp) - 240_000;
-    const resolveValidTo = Number(params.currentTimestamp) + 240_000;
+    const resolveValidFrom = Number(params.currentTimestamp) - VALIDITY_HALF_WIDTH_MS;
+    const resolveValidTo = Number(params.currentTimestamp) + VALIDITY_HALF_WIDTH_MS;
 
     let txBuilder = lucid
       .newTx()
       .validFrom(resolveValidFrom)
       .validTo(resolveValidTo)
       .collectFrom([challengeUtxo], Data.to<ResolveChallengeRedeemerData>(redeemer, ResolveChallengeRedeemerSchema))
-      .attach.SpendingValidator(this.validator);
+      .attach.SpendingValidator(this.validator)
+      // Burning is required by `spend`, not merely tidy: it checks for a -1 of
+      // this token in the same transaction. That is what stops a resolved
+      // challenge's token being carried into a later forged one — the token,
+      // not the datum, is what makes a challenge real.
+      .mintAssets({ [this.challengeUnit]: -1n }, Data.to(new Constr(CTO_SYBIL_MINT_REDEEMER.CloseChallenge, [])))
+      .attach.MintingPolicy(this.mintingPolicy);
 
     if (params.upheld) {
       const challengerAddress = credentialToAddress(this.config.network, {
