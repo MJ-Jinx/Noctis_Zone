@@ -651,11 +651,7 @@ const FALLBACK_METHODS: Array<{
   circuit: string;
   args: unknown[];
 }> = [
-  {
-    method: 'registerForDarkVeil',
-    circuit: 'registerForDarkVeil',
-    args: [fakeBytes32(100)],
-  },
+  { method: 'registerForDarkVeil', circuit: 'registerForDarkVeil', args: [] },
   {
     method: 'updateAllowlistRoot',
     circuit: 'updateAllowlistRoot',

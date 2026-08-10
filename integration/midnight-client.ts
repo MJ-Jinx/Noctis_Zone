@@ -837,10 +837,10 @@ export class NoctisLaunchManager {
    * Tier C at all, so this falls back to bondingCurve when eligibilityGate
    * isn't connected.
    */
-  async registerForDarkVeil(bondCommitment: Uint8Array) {
+  async registerForDarkVeil() {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.registerForDarkVeil(bondCommitment);
+    return handle.callTx.registerForDarkVeil();
   }
 
   /**

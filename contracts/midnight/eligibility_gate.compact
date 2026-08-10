@@ -863,9 +863,13 @@ circuit verifyRegistrant(caller: Bytes<32>): [] {
 // 3. Lock the bond (refundable on cancellation, or partially via
 //    claimRatioBondRefund after a normal close)
 // 4. Emit nullifier to prevent double-registration
-export circuit registerForDarkVeil(
-  bondCommitment: Bytes<32>
-): [] {
+//
+// Takes no arguments: everything it needs is either the caller's own
+// witness secret or already sealed on this contract. In particular the
+// registration nullifier is derived in-circuit from the caller's identity
+// rather than accepted from them, so there is no commitment for a caller
+// to supply, get wrong, or have ignored.
+export circuit registerForDarkVeil(): [] {
   // Must be in DarkVeil phase
   assert(disclose(phase == LaunchPhase.DarkVeil), "DarkVeil registration not active");
   // Fix (2026-07-21, Medium): `phase` alone was checked, never

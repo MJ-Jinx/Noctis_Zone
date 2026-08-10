@@ -81,7 +81,7 @@ describe('eligibility-gate.ts — parity with the compiled circuit', () => {
     // dvState must be Registration before registerForDarkVeil is callable.
     const rStart = contract.circuits.startRegistration(ctx1);
     const ctx2 = nextContext(contractAddress, rStart.context);
-    const rRegister = contract.circuits.registerForDarkVeil(ctx2, fakeBytes32(7));
+    const rRegister = contract.circuits.registerForDarkVeil(ctx2);
 
     // The contract's own `caller.bytes` (its internal deriveUserPublicKey(sk))
     // is the key it locked the bond under — read it back via the ledger and

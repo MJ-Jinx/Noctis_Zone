@@ -602,7 +602,7 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
     const rReg = d.contract.circuits.startRegistration(ctx0);
     const ctx = nextContext(d.contractAddress, rReg.context);
 
-    expect(() => d.contract.circuits.registerForDarkVeil(ctx, fakeBytes32(7))).not.toThrow();
+    expect(() => d.contract.circuits.registerForDarkVeil(ctx)).not.toThrow();
   });
 
   it('FIXED: buyTokens enforces the 5% wallet cap directly against cumulativePurchases, atomically', () => {
@@ -709,7 +709,7 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
     const ctx1 = nextContext(d.contractAddress, r1.context);
     const rStart = d.contract.circuits.startRegistration(ctx1);
     const ctxStart = nextContext(d.contractAddress, rStart.context);
-    const r2 = d.contract.circuits.registerForDarkVeil(ctxStart, fakeBytes32(7));
+    const r2 = d.contract.circuits.registerForDarkVeil(ctxStart);
     const ctx2 = nextContext(d.contractAddress, r2.context);
     const r3 = d.contract.circuits.advancePhase(ctx2, LaunchPhase.Public);
     const ctx3 = nextContext(d.contractAddress, r3.context);
@@ -725,7 +725,7 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
     const ctx1 = nextContext(d.contractAddress, r1.context);
     const rStart = d.contract.circuits.startRegistration(ctx1);
     const ctxStart = nextContext(d.contractAddress, rStart.context);
-    const r2 = d.contract.circuits.registerForDarkVeil(ctxStart, fakeBytes32(7));
+    const r2 = d.contract.circuits.registerForDarkVeil(ctxStart);
     const ctx2 = nextContext(d.contractAddress, r2.context);
     const r3 = d.contract.circuits.advancePhase(ctx2, LaunchPhase.Public);
     const ctx3 = nextContext(d.contractAddress, r3.context);
@@ -809,9 +809,9 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
     const { governorContract, contractAddress, ctx } = deployWithFloor(3n);
 
     // Only 2 of the 3 leaves register — below the floor of 3.
-    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx, fakeBytes32(201));
+    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx);
     const ctxA = nextContext(contractAddress, rA.context);
-    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA, fakeBytes32(202));
+    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA);
     const ctxB = nextContext(contractAddress, rB.context);
 
     expect(ledger(ctxB.currentQueryContext.state).registrationCount).toBe(2n);
@@ -828,9 +828,9 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
   it('cancelDarkVeil() releases every bond immediately, with no further governor call', () => {
     const { governorContract, contractAddress, ctx } = deployWithFloor(3n);
 
-    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx, fakeBytes32(201));
+    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx);
     const ctxA = nextContext(contractAddress, rA.context);
-    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA, fakeBytes32(202));
+    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA);
     const ctxB = nextContext(contractAddress, rB.context);
 
     const rCancel = governorContract.circuits.cancelDarkVeil(ctxB);
@@ -859,11 +859,11 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
   it('allows startBuying() once registration count reaches the floor', () => {
     const { governorContract, contractAddress, ctx } = deployWithFloor(3n);
 
-    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx, fakeBytes32(201));
+    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx);
     const ctxA = nextContext(contractAddress, rA.context);
-    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA, fakeBytes32(202));
+    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA);
     const ctxB = nextContext(contractAddress, rB.context);
-    const rC = registrantContract(SECRET_C, 2).circuits.registerForDarkVeil(ctxB, fakeBytes32(203));
+    const rC = registrantContract(SECRET_C, 2).circuits.registerForDarkVeil(ctxB);
     const ctxC = nextContext(contractAddress, rC.context);
 
     expect(ledger(ctxC.currentQueryContext.state).registrationCount).toBe(3n);
@@ -921,7 +921,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const ctx1 = nextContext(d.contractAddress, r1.context);
     // Fix (2026-07-21): registerForDarkVeil now requires
     // dvState == Registration, so this must happen after startRegistration.
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(d.contractAddress, r2.context);
@@ -1056,7 +1056,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const ctx1 = nextContext(contractAddress, r1.context);
     // Fix (2026-07-21): registerForDarkVeil now requires
     // dvState == Registration, so this must happen after startRegistration.
-    const rReg = contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(contractAddress, rReg.context);
     const r2 = contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(contractAddress, r2.context);
@@ -1222,7 +1222,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const rBuying = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctxBuying = nextContext(d.contractAddress, rBuying.context);
@@ -1234,9 +1234,7 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
       getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
       getBuyNonce: (_ctx) => [undefined, BUY_NONCE],
     });
-    expect(() => lateRegistrant.circuits.registerForDarkVeil(ctxBuying, fakeBytes32(21))).toThrow(
-      /registration sub-phase/i,
-    );
+    expect(() => lateRegistrant.circuits.registerForDarkVeil(ctxBuying)).toThrow(/registration sub-phase/i);
   });
 
   it('rejects revealBuyCommit before DarkVeil is closed', () => {
@@ -1312,7 +1310,7 @@ describe('bonding_curve.compact — ratio-based NIGHT bond refund', () => {
     const ctx1 = nextContext(d.contractAddress, r1.context);
     // Fix (2026-07-21): registerForDarkVeil now requires
     // dvState == Registration, so this must happen after startRegistration.
-    const rReg1 = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg1 = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg1 = nextContext(d.contractAddress, rReg1.context);
     const r3 = d.contract.circuits.startBuying(ctxReg1, REGISTRANT_TREE.root);
     let ctx = nextContext(d.contractAddress, r3.context);
@@ -1428,7 +1426,7 @@ describe('bonding_curve.compact — ratio-based NIGHT bond refund', () => {
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.advancePhase(ctxReg, LaunchPhase.Public);
     const ctx2 = nextContext(d.contractAddress, r2.context);
@@ -1446,7 +1444,7 @@ describe('bonding_curve.compact — ratio-based NIGHT bond refund', () => {
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r3 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx3 = nextContext(d.contractAddress, r3.context);
@@ -1768,7 +1766,7 @@ describe('bonding_curve.compact — lifecycle and range guards', () => {
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(d.contractAddress, r2.context);
@@ -1797,7 +1795,7 @@ describe('bonding_curve.compact — revealing after cancellation', () => {
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     let ctx = nextContext(d.contractAddress, r2.context);
@@ -1883,7 +1881,7 @@ function registerBuyAndCloseForReveal(purchased: bigint) {
   const ctx0 = nextContext(d.contractAddress, r0.context);
   const r1 = d.contract.circuits.startRegistration(ctx0);
   const ctx1 = nextContext(d.contractAddress, r1.context);
-  const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+  const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
   const ctxReg = nextContext(d.contractAddress, rReg.context);
   const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
   let ctx = nextContext(d.contractAddress, r2.context);
@@ -1914,7 +1912,7 @@ describe('bonding_curve.compact — a closed DarkVeil cannot be marked failed', 
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(d.contractAddress, r2.context);
@@ -1937,7 +1935,7 @@ describe('bonding_curve.compact — registrant membership proof', () => {
     const ctx1 = nextContext(contractAddress, r0.context);
     const r1 = contract.circuits.startRegistration(ctx1);
     const ctx2 = nextContext(contractAddress, r1.context);
-    const rReg = contract.circuits.registerForDarkVeil(ctx2, fakeBytes32(7));
+    const rReg = contract.circuits.registerForDarkVeil(ctx2);
     const ctx3 = nextContext(contractAddress, rReg.context);
     const r2 = contract.circuits.startBuying(ctx3, root);
     return { contract, contractAddress, ctx: nextContext(contractAddress, r2.context) };
@@ -1998,7 +1996,7 @@ describe('bonding_curve.compact — registrant exclusion dispute', () => {
     const c1 = nextContext(contractAddress, r0.context);
     const r1 = contract.circuits.startRegistration(c1);
     const c2 = nextContext(contractAddress, r1.context);
-    const rReg = contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    const rReg = contract.circuits.registerForDarkVeil(c2);
     const c3 = nextContext(contractAddress, rReg.context);
     const r2 = contract.circuits.startBuying(c3, root);
     const c4 = nextContext(contractAddress, r2.context);
@@ -2118,7 +2116,7 @@ describe('bonding_curve.compact — permissionless DarkVeil expiry', () => {
     const c1 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(c1);
     const c2 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(c2);
     return { ...d, ctx: nextContext(d.contractAddress, rReg.context) };
   }
 
@@ -2173,7 +2171,7 @@ describe('bonding_curve.compact — permissionless DarkVeil expiry', () => {
     const c1 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(c1);
     const c2 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(c2);
     const c3 = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.startBuying(c3, REGISTRANT_TREE.root);
     const c4 = nextContext(d.contractAddress, r2.context);

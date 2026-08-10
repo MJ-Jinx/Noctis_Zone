@@ -160,7 +160,7 @@ function deployAndStartDvBuying() {
   const ctx1 = nextContext(d.contractAddress, r1.context);
   // Fix (2026-07-21): registerForDarkVeil now requires
   // dvState == Registration, so this must happen after startRegistration.
-  const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+  const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
   const ctxReg = nextContext(d.contractAddress, rReg.context);
   const r2 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
   const ctx2 = nextContext(d.contractAddress, r2.context);
@@ -249,7 +249,7 @@ describe('eligibility_gate.compact — wallet cap enforcement via revealBuyCommi
     // Phase 4 fix: submitBuyCommit now requires proof of prior registration.
     // Fix (2026-07-21): registerForDarkVeil now requires
     // dvState == Registration, so this must happen after startRegistration.
-    const rReg = contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(contractAddress, rReg.context);
     const r2 = contract.circuits.startBuying(ctxReg, registrantTree.root);
     const ctx2 = nextContext(contractAddress, r2.context);
@@ -335,7 +335,7 @@ describe('eligibility_gate.compact — fix (2026-07-30): advancePhase cannot mov
 describe('eligibility_gate.compact — registration nullifier (disclose() placement regression)', () => {
   it('allows registration for a new wallet during the DarkVeil phase', () => {
     const { contract, ctx } = deployAndStartDarkVeil();
-    const result = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const result = contract.circuits.registerForDarkVeil(ctx);
     const state = ledger(result.context.currentQueryContext.state);
     expect(state.registrationCount).toBe(1n);
   });
@@ -351,19 +351,15 @@ describe('eligibility_gate.compact — registration nullifier (disclose() placem
     // witnesses (same nonce/user secret => same nullifier) must fail the
     // second time.
     const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
-    const r1 = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const r1 = contract.circuits.registerForDarkVeil(ctx);
     const ctx2 = nextContext(contractAddress, r1.context);
 
-    expect(() => contract.circuits.registerForDarkVeil(ctx2, fakeBytes32(20))).toThrow(
-      'Already registered for this launch',
-    );
+    expect(() => contract.circuits.registerForDarkVeil(ctx2)).toThrow('Already registered for this launch');
   });
 
   it('rejects registration outside the DarkVeil phase', () => {
     const { contract, ctx } = deploy(); // still Pending, never advanced
-    expect(() => contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20))).toThrow(
-      'DarkVeil registration not active',
-    );
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow('DarkVeil registration not active');
   });
 
   it('Fix (2026-07-21, Medium): rejects registration once dvState has moved past Registration, even though phase is still DarkVeil', () => {
@@ -375,7 +371,7 @@ describe('eligibility_gate.compact — registration nullifier (disclose() placem
     const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
     // MIN_DV_PARTICIPANTS_TEST floor (1) needs a real registrant before
     // startBuying will succeed.
-    const r1 = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const r1 = contract.circuits.registerForDarkVeil(ctx);
     const ctx1 = nextContext(contractAddress, r1.context);
     const rBuying = contract.circuits.startBuying(ctx1, REGISTRANT_TREE.root);
     const ctxBuying = nextContext(contractAddress, rBuying.context);
@@ -387,9 +383,7 @@ describe('eligibility_gate.compact — registration nullifier (disclose() placem
       getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
       getBuyNonce: (_ctx) => [undefined, BUY_NONCE],
     });
-    expect(() => lateRegistrant.circuits.registerForDarkVeil(ctxBuying, fakeBytes32(21))).toThrow(
-      /registration sub-phase/i,
-    );
+    expect(() => lateRegistrant.circuits.registerForDarkVeil(ctxBuying)).toThrow(/registration sub-phase/i);
   });
 
   it('rejects the creator registering for their own DarkVeil (CLAUDE.md eligibility check #3)', () => {
@@ -423,9 +417,7 @@ describe('eligibility_gate.compact — registration nullifier (disclose() placem
     // the creator check is ever reached. Confirmed by running it; the
     // test's own name still holds directionally (registration IS
     // rejected) but not for the reason its description names.
-    expect(() => contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(20))).toThrow(
-      'DarkVeil not in registration sub-phase',
-    );
+    expect(() => contract.circuits.registerForDarkVeil(ctx1)).toThrow('DarkVeil not in registration sub-phase');
   });
 });
 
@@ -441,7 +433,7 @@ describe('eligibility_gate.compact — NIGHT bond payment enforcement', () => {
     // rejected end-to-end; it proves the call is wired in and doesn't
     // break the existing registration flow.
     const { contract, ctx } = deployAndStartDarkVeil();
-    const result = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const result = contract.circuits.registerForDarkVeil(ctx);
     const state = ledger(result.context.currentQueryContext.state);
     expect(state.registrationCount).toBe(1n);
     expect(state.lockedBonds.size()).toBe(1n);
@@ -451,7 +443,7 @@ describe('eligibility_gate.compact — NIGHT bond payment enforcement', () => {
 describe('eligibility_gate.compact — NIGHT bond refund', () => {
   it('locks a bond on registration and allows refund after the launch is cancelled', () => {
     const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
-    const r1 = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const r1 = contract.circuits.registerForDarkVeil(ctx);
     const ctx2 = nextContext(contractAddress, r1.context);
 
     const rCancel = contract.circuits.advancePhase(ctx2, LaunchPhase.Cancelled);
@@ -465,7 +457,7 @@ describe('eligibility_gate.compact — NIGHT bond refund', () => {
 
   it('rejects a bond refund claim while the launch is still active', () => {
     const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
-    const r1 = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const r1 = contract.circuits.registerForDarkVeil(ctx);
     const ctx2 = nextContext(contractAddress, r1.context);
 
     expect(() => contract.circuits.claimBondRefund(ctx2, fakeBytes32(5))).toThrow(
@@ -480,7 +472,7 @@ describe('eligibility_gate.compact — NIGHT bond refund', () => {
     // sendUnshielded test in this suite: proves the call is wired in, not
     // verified end-to-end against a live network.
     const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
-    const r1 = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const r1 = contract.circuits.registerForDarkVeil(ctx);
     const ctx2 = nextContext(contractAddress, r1.context);
     const rCancel = contract.circuits.advancePhase(ctx2, LaunchPhase.Cancelled);
     const ctx3 = nextContext(contractAddress, rCancel.context);
@@ -490,7 +482,7 @@ describe('eligibility_gate.compact — NIGHT bond refund', () => {
 
   it('Phase 5 hygiene fix: claimBondRefund rejects an empty (all-zero) recipient address', () => {
     const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
-    const r1 = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const r1 = contract.circuits.registerForDarkVeil(ctx);
     const ctx2 = nextContext(contractAddress, r1.context);
     const rCancel = contract.circuits.advancePhase(ctx2, LaunchPhase.Cancelled);
     const ctx3 = nextContext(contractAddress, rCancel.context);
@@ -506,7 +498,7 @@ describe('eligibility_gate.compact — DarkVeil failure refund gate (regression)
     // public-only launch (phase -> Public), not death (phase -> Cancelled)
     // — so registrants would have had no way to reclaim a bond at all.
     const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
-    const r1 = contract.circuits.registerForDarkVeil(ctx, fakeBytes32(20));
+    const r1 = contract.circuits.registerForDarkVeil(ctx);
     const ctx2 = nextContext(contractAddress, r1.context);
 
     const rMark = contract.circuits.markDarkVeilFailed(ctx2);
@@ -619,9 +611,9 @@ describe('eligibility_gate.compact — minimum DarkVeil participant floor', () =
     const { governorContract, contractAddress, ctx } = deployWithFloor(3n);
 
     // Only 2 of the 3 leaves register — below the floor of 3.
-    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx, fakeBytes32(201));
+    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx);
     const ctxA = nextContext(contractAddress, rA.context);
-    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA, fakeBytes32(202));
+    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA);
     const ctxB = nextContext(contractAddress, rB.context);
 
     expect(ledger(ctxB.currentQueryContext.state).registrationCount).toBe(2n);
@@ -638,9 +630,9 @@ describe('eligibility_gate.compact — minimum DarkVeil participant floor', () =
   it('cancelDarkVeil() releases every bond immediately, with no further governor call', () => {
     const { governorContract, contractAddress, ctx } = deployWithFloor(3n);
 
-    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx, fakeBytes32(201));
+    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx);
     const ctxA = nextContext(contractAddress, rA.context);
-    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA, fakeBytes32(202));
+    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA);
     const ctxB = nextContext(contractAddress, rB.context);
 
     const rCancel = governorContract.circuits.cancelDarkVeil(ctxB);
@@ -676,11 +668,11 @@ describe('eligibility_gate.compact — minimum DarkVeil participant floor', () =
   it('allows startBuying() once registration count reaches the floor', () => {
     const { governorContract, contractAddress, ctx } = deployWithFloor(3n);
 
-    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx, fakeBytes32(201));
+    const rA = registrantContract(SECRET_A, 0).circuits.registerForDarkVeil(ctx);
     const ctxA = nextContext(contractAddress, rA.context);
-    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA, fakeBytes32(202));
+    const rB = registrantContract(SECRET_B, 1).circuits.registerForDarkVeil(ctxA);
     const ctxB = nextContext(contractAddress, rB.context);
-    const rC = registrantContract(SECRET_C, 2).circuits.registerForDarkVeil(ctxB, fakeBytes32(203));
+    const rC = registrantContract(SECRET_C, 2).circuits.registerForDarkVeil(ctxB);
     const ctxC = nextContext(contractAddress, rC.context);
 
     expect(ledger(ctxC.currentQueryContext.state).registrationCount).toBe(3n);
@@ -1069,7 +1061,7 @@ describe('eligibility_gate.compact — merged DarkVeil private buy (Phase 2)', (
     // creator themselves is never one of them, which is exactly this test's
     // point.
     const registrantContract = new Contract<PrivateState>(witnesses);
-    const rReg = registrantContract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = registrantContract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(contractAddress, rReg.context);
     const r2 = contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx2 = nextContext(contractAddress, r2.context);
@@ -1135,7 +1127,7 @@ describe('eligibility_gate.compact — Phase 2: claimRatioBondRefund (previously
     const ctx1 = nextContext(d.contractAddress, r1.context);
     // Fix (2026-07-21): registerForDarkVeil now requires
     // dvState == Registration, so this must happen after startRegistration.
-    const rReg0 = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg0 = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg0 = nextContext(d.contractAddress, rReg0.context);
     const r3 = d.contract.circuits.startBuying(ctxReg0, REGISTRANT_TREE.root);
     let ctx = nextContext(d.contractAddress, r3.context);
@@ -1187,7 +1179,7 @@ describe('eligibility_gate.compact — Phase 2: claimRatioBondRefund (previously
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg0 = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg0 = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg0 = nextContext(d.contractAddress, rReg0.context);
     const r3 = d.contract.circuits.startBuying(ctxReg0, REGISTRANT_TREE.root);
     let ctx = nextContext(d.contractAddress, r3.context);
@@ -1348,7 +1340,7 @@ describe('eligibility_gate.compact — Phase 2: claimRatioBondRefund (previously
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r3 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     let ctx = nextContext(d.contractAddress, r3.context);
@@ -1410,7 +1402,7 @@ describe('eligibility_gate.compact — Phase 2: claimRatioBondRefund (previously
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.advancePhase(ctxReg, LaunchPhase.Public);
     const ctx2 = nextContext(d.contractAddress, r2.context);
@@ -1428,7 +1420,7 @@ describe('eligibility_gate.compact — Phase 2: claimRatioBondRefund (previously
     const ctx0 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(ctx0);
     const ctx1 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(ctx1, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(ctx1);
     const ctxReg = nextContext(d.contractAddress, rReg.context);
     const r3 = d.contract.circuits.startBuying(ctxReg, REGISTRANT_TREE.root);
     const ctx3 = nextContext(d.contractAddress, r3.context);
@@ -1520,9 +1512,9 @@ describe('eligibility_gate.compact — registrant exclusion dispute', () => {
     const r1 = governor.circuits.startRegistration(c0);
     const c1 = nextContext(contractAddress, r1.context);
 
-    const rI = party(SECRET_INCL, 0, publishedTree, 0).circuits.registerForDarkVeil(c1, fakeBytes32(211));
+    const rI = party(SECRET_INCL, 0, publishedTree, 0).circuits.registerForDarkVeil(c1);
     const cI = nextContext(contractAddress, rI.context);
-    const rE = party(SECRET_EXCL, 1, HONEST_TREE, 1).circuits.registerForDarkVeil(cI, fakeBytes32(212));
+    const rE = party(SECRET_EXCL, 1, HONEST_TREE, 1).circuits.registerForDarkVeil(cI);
     const cE = nextContext(contractAddress, rE.context);
 
     const rB = governor.circuits.startBuying(cE, publishedTree.root);
@@ -1796,7 +1788,7 @@ describe('eligibility_gate.compact — registrant exclusion dispute', () => {
     const c0 = nextContext(contractAddress, r0.context);
     const r1 = governor.circuits.startRegistration(c0);
     const c1 = nextContext(contractAddress, r1.context);
-    const rE = party(SECRET_EXCL, 1, HONEST_TREE, 1).circuits.registerForDarkVeil(c1, fakeBytes32(212));
+    const rE = party(SECRET_EXCL, 1, HONEST_TREE, 1).circuits.registerForDarkVeil(c1);
     const cE = nextContext(contractAddress, rE.context);
 
     expect(() =>
@@ -1867,7 +1859,7 @@ describe('eligibility_gate.compact — permissionless DarkVeil expiry', () => {
     const c1 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(c1);
     const c2 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(c2);
     return { ...d, ctx: nextContext(d.contractAddress, rReg.context) };
   }
 
@@ -1922,7 +1914,7 @@ describe('eligibility_gate.compact — permissionless DarkVeil expiry', () => {
     const c1 = nextContext(d.contractAddress, r0.context);
     const r1 = d.contract.circuits.startRegistration(c1);
     const c2 = nextContext(d.contractAddress, r1.context);
-    const rReg = d.contract.circuits.registerForDarkVeil(c2, fakeBytes32(7));
+    const rReg = d.contract.circuits.registerForDarkVeil(c2);
     const c3 = nextContext(d.contractAddress, rReg.context);
     const r2 = d.contract.circuits.startBuying(c3, REGISTRANT_TREE.root);
     const c4 = nextContext(d.contractAddress, r2.context);

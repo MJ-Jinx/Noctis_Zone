@@ -15,8 +15,7 @@
 
 import type { ContractProviders } from '@midnight-ntwrk/midnight-js-contracts';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { DOMAINS, deriveUserPublicKey, type MerkleProofEntry } from '../../contracts/midnight/witnesses.js';
-import { computeRegistrationCommit } from '../../packages/zk-proofs/src/eligibility-gate.js';
+import type { MerkleProofEntry } from '../../contracts/midnight/witnesses.js';
 import { NoctisLaunchManager, NoctisMidnightClient } from '../midnight-client.js';
 import { type CardanoWalletConnection, signCardanoData } from '../wallet-connection.js';
 import type { DarkVeilSession } from './wallet-session.js';
@@ -253,15 +252,11 @@ export async function registerOnChain(session: DarkVeilSession, params: Register
     );
   }
 
-  const userPubKey = deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER, params.launchIdBytes);
-  const bondCommitment = computeRegistrationCommit({
-    userKey: userPubKey.bytes,
-    launchId: params.launchIdBytes,
-    bondAmount: params.bondAmount,
-  });
-
+  // registerForDarkVeil takes nothing: it derives the caller's identity and
+  // registration nullifier in-circuit from the witness secret the client
+  // above was constructed with.
   const manager = new NoctisLaunchManager(client);
-  return manager.registerForDarkVeil(bondCommitment);
+  return manager.registerForDarkVeil();
 }
 
 export { bytesToHex, hexToBytes };
