@@ -118,6 +118,26 @@ function canonicalizeVoteBundle(bundle: CtoVoteProofBundle): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(ordered));
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) {
+    throw new Error(`hex string has an odd length (${clean.length}): ${hex}`);
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/**
+ * The off-chain record of a relayed ballot, pinned for auditors.
+ *
+ * Distinct from the reference cto_governance.ak stores, which is derived
+ * on-chain from a narrower preimage (see cto-anchor-reference.ts). This one
+ * covers the whole bundle a third party would fetch from Midnight, including
+ * the proposal id, and is what `CtoVoteProofBundle` is published under.
+ */
 export function computeCtoVoteProofBundleHash(bundle: CtoVoteProofBundle): Uint8Array {
   return blake2b(canonicalizeVoteBundle(bundle), { dkLen: 32 });
 }
@@ -210,7 +230,10 @@ export function buildVoteResultFromProposal(
   const params: VoteResultParams = {
     proposalType: cardanoProposalType,
     descriptionHash: proposal.descriptionHash,
-    proofBundleHash,
+    // The ballot is named; the reference is not supplied. cto_governance.ak
+    // derives that itself from its own datum, and the submitter recomputes it
+    // to build a matching continuing datum — see cto-anchor-reference.ts.
+    proposalId: hexToBytes(proposalIdHex),
     yesVotes: proposal.yesVotes,
     noVotes: proposal.noVotes,
     voterCount: proposal.voterCount,

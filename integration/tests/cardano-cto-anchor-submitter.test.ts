@@ -182,7 +182,7 @@ function baseParams(overrides: Partial<VoteResultParams> = {}): VoteResultParams
   return {
     proposalType: 'SilenceLockTrigger',
     descriptionHash: fakeBytes(10),
-    proofBundleHash: fakeBytes(11),
+    proposalId: fakeBytes(11),
     yesVotes: 60_000n,
     noVotes: 10_000n,
     voterCount: 20n,

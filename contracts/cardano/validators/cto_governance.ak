@@ -45,11 +45,12 @@
 // ============================================================================
 
 use aiken/collection/list
-use aiken/crypto.{VerificationKeyHash}
+use aiken/crypto.{VerificationKeyHash, blake2b_256}
 use aiken/interval
 use aiken/interval.{Interval, IntervalBoundType}
-use cardano/address.{Address, Credential, VerificationKey, from_verification_key,
-  with_delegation_key}
+use aiken/primitive/bytearray
+use cardano/address.{Address, Credential, Script, VerificationKey,
+  from_verification_key, with_delegation_key}
 use cardano/assets.{PolicyId}
 use cardano/transaction.{Input, InlineDatum, Output, OutputReference, Transaction}
 use noctis/lp_escrow_datum.{Locked, LpEscrowDatum}
@@ -265,7 +266,13 @@ pub type CtoGovernanceRedeemer {
   AnchorVoteResult {
     proposal_type: ProposalType,
     description_hash: ByteArray,
-    proof_bundle_hash: ByteArray,
+    /// The Midnight ballot this result claims to come from.
+    ///
+    /// It is an input to the anchored bundle reference rather than a stored
+    /// field: the reference is DERIVED (see `derive_proof_bundle_hash`), so
+    /// naming a different ballot produces a different reference, and the
+    /// relayer cannot name one ballot while presenting another's numbers.
+    proposal_id: ByteArray,
     yes_votes: Int,
     no_votes: Int,
     voter_count: Int,
@@ -459,6 +466,110 @@ fn bond_paid_out(self: Transaction, own_ref: OutputReference, amount: Int) -> Bo
   assets.lovelace_of(own_input.output.value) == assets.lovelace_of(own_output.value) + amount
 }
 
+/// The anchored bundle reference, derived rather than accepted.
+///
+/// `AnchorVoteResult` is open relay on purpose — anyone may submit, because a
+/// platform-only relay could suppress a legitimate community takeover simply
+/// by never submitting. That makes every redeemer field the submitter's to
+/// name, which is answerable for the numbers (they are checked against the
+/// launch's own deployed rules) but was not answerable for the bundle
+/// reference: it was carried into the stored record unexamined, so one
+/// launch's genuine reference could be presented as evidence for another's
+/// ballot, or kept while the numbers underneath it changed.
+///
+/// Deriving it removes the choice. `launch_id` and `proposal_count` come from
+/// the DATUM, so the submitter supplies neither, and a reference is therefore
+/// valid for exactly one launch, one ballot ordinal, and one set of numbers.
+/// Anyone holding the Midnight bundle can recompute this value and confirm the
+/// anchored record describes that bundle and no other.
+///
+/// `proof_bundle_hash` is excluded from its own preimage — `base` carries the
+/// empty placeholder the caller builds it with.
+///
+/// What this does NOT do, stated plainly rather than implied: it does not
+/// establish that a Midnight ballot happened, and no Cardano validator can.
+/// The guarantees against an invented tally are the distinct-voter floor, the
+/// quorum and majority tests, the ballot-window width, the graduation gate and
+/// the governor's challenge window — this makes the reference honest about
+/// which ballot it belongs to, not the tally true.
+///
+/// ENCODING — fixed-width fields, deliberately, not `cbor.serialise`
+/// The relayer's own submitter has to reproduce this value exactly, in
+/// TypeScript, to build a datum this validator will accept. Serialising the
+/// record would make that reproduction depend on matching a CBOR encoder's
+/// choices byte for byte — indefinite-length arrays, constructor tags — which
+/// is a fragile thing to owe across two languages. Every part below is a fixed
+/// width instead, the same convention `bonding_curve_tier_b.ak`'s
+/// `hash_dv_leaf` and `staking_pool.ak`'s reward leaves already use, and for
+/// the same reason.
+///
+/// Each variable-length ByteArray is hashed to 32 bytes rather than
+/// concatenated raw, so no two different field splits can ever produce one
+/// preimage.
+fn derive_proof_bundle_hash(
+  launch_id: ByteArray,
+  proposal_count: Int,
+  proposal_id: ByteArray,
+  base: ProposalAnchor,
+) -> ByteArray {
+  blake2b_256(
+    concat_all(
+      [
+        blake2b_256(launch_id),
+        bytearray.from_int_big_endian(proposal_count, 8),
+        blake2b_256(proposal_id),
+        bytearray.from_int_big_endian(proposal_type_tag(base.proposal_type), 1),
+        blake2b_256(base.description_hash),
+        bytearray.from_int_big_endian(base.yes_votes, 16),
+        bytearray.from_int_big_endian(base.no_votes, 16),
+        bytearray.from_int_big_endian(base.voter_count, 8),
+        bytearray.from_int_big_endian(base.creator_yes_votes, 16),
+        bytearray.from_int_big_endian(base.creator_no_votes, 16),
+        bytearray.from_int_big_endian(outcome_tag(base.outcome), 1),
+        bytearray.from_int_big_endian(base.start_timestamp, 8),
+        bytearray.from_int_big_endian(base.end_timestamp, 8),
+        target_dex_bytes(base.target_dex_credential),
+      ],
+    ),
+  )
+}
+
+fn concat_all(parts: List<ByteArray>) -> ByteArray {
+  list.foldr(parts, #"", bytearray.concat)
+}
+
+fn proposal_type_tag(t: ProposalType) -> Int {
+  when t is {
+    SilenceLockTrigger -> 0
+    FundAllocation -> 1
+    DexMigration -> 2
+    WhitelistUpdate -> 3
+    DissolveCTOProposal -> 4
+  }
+}
+
+fn outcome_tag(o: ProposalOutcome) -> Int {
+  when o is {
+    Passed -> 0
+    Failed -> 1
+  }
+}
+
+/// A one-byte kind tag then a fixed 32 bytes, so an absent target and a
+/// present one can never encode alike, and a key-hash credential can never
+/// encode as the script credential carrying the same bytes.
+fn target_dex_bytes(target: Option<Credential>) -> ByteArray {
+  when target is {
+    None -> bytearray.concat(#"00", blake2b_256(#""))
+    Some(cred) ->
+      when cred is {
+        VerificationKey(hash) ->
+          bytearray.concat(#"01", blake2b_256(hash))
+        Script(hash) -> bytearray.concat(#"02", blake2b_256(hash))
+      }
+  }
+}
+
 /// Same double-satisfaction closure as bonding_curve.ak/lp_escrow.ak
 /// etc. — see those files' own single_own_utxo comment for the full
 /// explanation.
@@ -601,7 +712,7 @@ validator cto_governance {
         AnchorVoteResult {
         proposal_type,
         description_hash,
-        proof_bundle_hash,
+        proposal_id,
         yes_votes,
         no_votes,
         voter_count,
@@ -664,11 +775,16 @@ validator cto_governance {
           True
         }
 
-        let proposal =
+        // Built once with the empty placeholder so the reference can be
+        // derived over everything else, then closed over with the derived
+        // value. The placeholder is what `derive_proof_bundle_hash` hashes,
+        // which is why it must be a fixed, known value rather than anything
+        // the submitter supplies.
+        let base_proposal =
           ProposalAnchor {
             proposal_type,
             description_hash,
-            proof_bundle_hash,
+            proof_bundle_hash: #"",
             yes_votes,
             no_votes,
             voter_count,
@@ -683,6 +799,16 @@ validator cto_governance {
             allocation_amount,
             allocation_recipient_hash,
             relayer_credential_hash,
+          }
+        let proposal =
+          ProposalAnchor {
+            ..base_proposal,
+            proof_bundle_hash: derive_proof_bundle_hash(
+              datum.launch_id,
+              datum.proposal_count,
+              proposal_id,
+              base_proposal,
+            ),
           }
 
         // Fix: cto_state/community_wallet_hash are NO LONGER mutated
@@ -990,6 +1116,68 @@ fn cto_out_value(lovelace: Int) -> assets.Value {
 /// need this because their ballots now sit on a real, eligibility-relative
 /// timescale, while every other consumer of mock_proposal only cares about
 /// the anchor time and is left on the original toy values.
+/// The Midnight ballot every anchoring fixture in this file claims to relay.
+/// The ballot every anchoring fixture in this file relays, carrying the empty
+/// placeholder that `derive_proof_bundle_hash` expects in a preimage.
+///
+/// Shared so a test can derive the reference this ballot WOULD get under
+/// different conditions — another launch, another ordinal, another tally — and
+/// plant that instead. A reference computed from a fixture's own literal copy
+/// of these fields would only ever prove the literals matched.
+fn mock_anchor_base(
+  start_timestamp: Int,
+  end_timestamp: Int,
+  anchor_timestamp: Int,
+) -> ProposalAnchor {
+  ProposalAnchor {
+    proposal_type: SilenceLockTrigger,
+    description_hash: #"aa",
+    proof_bundle_hash: #"",
+    yes_votes: 60_000,
+    no_votes: 10_000,
+    voter_count: 15,
+    creator_yes_votes: 0,
+    creator_no_votes: 0,
+    outcome: Passed,
+    start_timestamp: start_timestamp,
+    end_timestamp: end_timestamp,
+    anchor_timestamp: anchor_timestamp,
+    execution_status: PendingExecution,
+    target_dex_credential: None,
+    allocation_amount: 0,
+    allocation_recipient_hash: #"ff",
+    relayer_credential_hash: #"33",
+  }
+}
+
+fn mock_proposal_id() -> ByteArray {
+  #"9e"
+}
+
+/// Close a fixture's expected anchor over the reference the validator will
+/// derive for it.
+///
+/// A success-path fixture has to carry the SAME value the validator computes,
+/// or the continuing-datum equality fails for a reason that has nothing to do
+/// with what the test is about. Deriving it here rather than pinning a literal
+/// means these fixtures keep testing their own subject if the preimage ever
+/// changes, instead of going red in a way that invites pasting in whatever
+/// value makes them green again.
+fn with_derived_reference(
+  datum: CtoGovernanceDatum,
+  base: ProposalAnchor,
+) -> ProposalAnchor {
+  ProposalAnchor {
+    ..base,
+    proof_bundle_hash: derive_proof_bundle_hash(
+      datum.launch_id,
+      datum.proposal_count,
+      mock_proposal_id(),
+      ProposalAnchor { ..base, proof_bundle_hash: #"" },
+    ),
+  }
+}
+
 fn mock_proposal_windowed(
   outcome: ProposalOutcome,
   execution_status: ExecutionStatus,
@@ -1165,6 +1353,28 @@ fn anchor_spend_with_window_and_grad(
     end_timestamp,
     anchor_timestamp,
     mock_lp_ref_input(lp_lock_timestamp),
+    None,
+  )
+}
+
+/// The known-good anchoring spend, with the continuing datum's bundle
+/// reference replaced by `planted`.
+///
+/// This is the shape a forging relayer actually has available. The reference
+/// is no longer a redeemer field, so it cannot be passed in — but the relayer
+/// still authors the continuing datum, so writing a chosen value into the
+/// anchor there is the whole of the attack surface that remains.
+fn anchor_spend_with_planted_reference(
+  datum: CtoGovernanceDatum,
+  planted: ByteArray,
+) -> Bool {
+  anchor_spend_with_lp_ref(
+    datum,
+    eligible_start,
+    eligible_start + 500,
+    eligible_start + 500,
+    mock_lp_ref_input(mock_grad_ts),
+    Some(planted),
   )
 }
 
@@ -1178,6 +1388,7 @@ fn anchor_spend_with_foreign_lp_datum(datum: CtoGovernanceDatum) -> Bool {
     eligible_start + 500,
     eligible_start + 500,
     mock_lp_ref_input_foreign_datum(),
+    None,
   )
 }
 
@@ -1187,6 +1398,7 @@ fn anchor_spend_with_lp_ref(
   end_timestamp: Int,
   anchor_timestamp: Int,
   lp_ref: Input,
+  reference_override: Option<ByteArray>,
 ) -> Bool {
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_address = from_verification_key(#"cc")
@@ -1200,25 +1412,13 @@ fn anchor_spend_with_lp_ref(
         reference_script: None,
       },
     }
+  let base_proposal =
+    mock_anchor_base(start_timestamp, end_timestamp, anchor_timestamp)
   let proposal =
-    ProposalAnchor {
-      proposal_type: SilenceLockTrigger,
-      description_hash: #"aa",
-      proof_bundle_hash: #"bb",
-      yes_votes: 60_000,
-      no_votes: 10_000,
-      voter_count: 15,
-      creator_yes_votes: 0,
-      creator_no_votes: 0,
-      outcome: Passed,
-      start_timestamp: start_timestamp,
-      end_timestamp: end_timestamp,
-      anchor_timestamp: anchor_timestamp,
-      execution_status: PendingExecution,
-      target_dex_credential: None,
-      allocation_amount: 0,
-      allocation_recipient_hash: #"ff",
-      relayer_credential_hash: #"33",
+    when reference_override is {
+      None -> with_derived_reference(datum, base_proposal)
+      Some(planted) ->
+        ProposalAnchor { ..base_proposal, proof_bundle_hash: planted }
     }
   let new_datum =
     CtoGovernanceDatum {
@@ -1247,7 +1447,7 @@ fn anchor_spend_with_lp_ref(
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 15,
@@ -1344,6 +1544,132 @@ test anchor_rejects_a_ballot_for_a_launch_that_never_graduated() {
   )
 }
 
+// ============================================================================
+// The anchored bundle reference is derived, not chosen
+// ============================================================================
+// A relayer cannot pass a reference — it is no longer a redeemer field — but
+// they still author the continuing datum, so each of these plants a chosen
+// value there and shows it is refused. The control immediately below plants
+// the CORRECT value by the same route, so none of these can be passing merely
+// because planting anything at all breaks the fixture.
+
+/// The reference this exact ballot derives to, pinned as bytes.
+///
+/// Its twin lives in `integration/tests/cto-anchor-reference-parity.test.ts`,
+/// asserting the same literal. The relayer's submitter has to reproduce this
+/// value in TypeScript to build a datum this validator accepts, and the two
+/// implementations share no code — so a literal both sides check against is
+/// what turns a silent cross-language drift into a red test on whichever side
+/// moved. Changing the preimage means changing BOTH, deliberately.
+test anchor_reference_matches_the_pinned_cross_language_value() {
+  derive_proof_bundle_hash(
+    #"01",
+    0,
+    mock_proposal_id(),
+    mock_anchor_base(1000, 1500, 1500),
+  ) == #"9bc1ff165578a191d2bf2f09c462235cd7bc134b9befceb3a4e434198ed5bbf6"
+}
+
+test anchor_reference_accepts_the_value_the_validator_derives() {
+  // The control. Same planting route as every rejection below, carrying the
+  // reference the validator itself computes — so those rejections are known to
+  // be about the value, not about the mechanism used to place it.
+  let datum = mock_datum(None)
+  let expected =
+    derive_proof_bundle_hash(
+      datum.launch_id,
+      datum.proposal_count,
+      mock_proposal_id(),
+      mock_anchor_base(eligible_start, eligible_start + 500, eligible_start + 500),
+    )
+  anchor_spend_with_planted_reference(datum, expected)
+}
+
+test anchor_reference_rejects_arbitrary_bytes() {
+  // What the field used to accept without examination.
+  !anchor_spend_with_planted_reference(mock_datum(None), #"bb")
+}
+
+test anchor_reference_rejects_empty() {
+  // The placeholder its own preimage carries. Worth its own case: a derivation
+  // that silently returned the placeholder would still satisfy every "rejects
+  // arbitrary bytes" test while binding nothing.
+  !anchor_spend_with_planted_reference(mock_datum(None), #"")
+}
+
+test anchor_reference_rejects_another_launchs_genuine_reference() {
+  // The replay this closes. `other` is a REAL reference — correctly derived,
+  // for the identical ballot — belonging to a different launch. Anchoring it
+  // here is what a relayer holding one launch's legitimate bundle would try.
+  let datum = mock_datum(None)
+  let other =
+    derive_proof_bundle_hash(
+      #"02",
+      datum.proposal_count,
+      mock_proposal_id(),
+      mock_anchor_base(eligible_start, eligible_start + 500, eligible_start + 500),
+    )
+  !anchor_spend_with_planted_reference(datum, other)
+}
+
+test anchor_reference_rejects_a_reference_derived_for_another_ordinal() {
+  // proposal_count comes from the datum, so a reference is valid for one
+  // ballot slot on one launch. This stops a genuine reference being re-anchored
+  // for the launch's next ballot.
+  let datum = mock_datum(None)
+  let other =
+    derive_proof_bundle_hash(
+      datum.launch_id,
+      datum.proposal_count + 1,
+      mock_proposal_id(),
+      mock_anchor_base(eligible_start, eligible_start + 500, eligible_start + 500),
+    )
+  !anchor_spend_with_planted_reference(datum, other)
+}
+
+test anchor_reference_rejects_a_reference_derived_for_another_ballot() {
+  // Naming a different Midnight ballot changes the reference, so a relayer
+  // cannot cite one ballot while presenting another's numbers.
+  let datum = mock_datum(None)
+  let other =
+    derive_proof_bundle_hash(
+      datum.launch_id,
+      datum.proposal_count,
+      #"7a",
+      mock_anchor_base(eligible_start, eligible_start + 500, eligible_start + 500),
+    )
+  !anchor_spend_with_planted_reference(datum, other)
+}
+
+test anchor_reference_rejects_a_reference_derived_for_a_different_tally() {
+  // The reference travels with the numbers. Keeping a genuine reference while
+  // editing the result underneath it is refused — here by one vote, so the
+  // test cannot pass on a coarser difference.
+  let datum = mock_datum(None)
+  let base = mock_anchor_base(eligible_start, eligible_start + 500, eligible_start + 500)
+  let other =
+    derive_proof_bundle_hash(
+      datum.launch_id,
+      datum.proposal_count,
+      mock_proposal_id(),
+      ProposalAnchor { ..base, yes_votes: base.yes_votes + 1 },
+    )
+  !anchor_spend_with_planted_reference(datum, other)
+}
+
+test anchor_reference_rejects_a_reference_derived_for_a_different_window() {
+  // The ballot window is part of what a reference commits to.
+  let datum = mock_datum(None)
+  let other =
+    derive_proof_bundle_hash(
+      datum.launch_id,
+      datum.proposal_count,
+      mock_proposal_id(),
+      mock_anchor_base(eligible_start + 1, eligible_start + 501, eligible_start + 500),
+    )
+  !anchor_spend_with_planted_reference(datum, other)
+}
+
 test anchor_vote_result_succeeds_with_quorum_met() {
   let datum = mock_datum(None)
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
@@ -1360,12 +1686,15 @@ test anchor_vote_result_succeeds_with_quorum_met() {
     }
   // 70_000 total votes out of 1_000_000 supply = 7% > 5% quorum. Yes > No.
   let proposal =
-    mock_proposal_windowed(
-      Passed,
-      PendingExecution,
-      eligible_start,
-      eligible_start + 500,
-      eligible_start + 500,
+    with_derived_reference(
+      datum,
+      mock_proposal_windowed(
+        Passed,
+        PendingExecution,
+        eligible_start,
+        eligible_start + 500,
+        eligible_start + 500,
+      ),
     )
   // AnchorVoteResult no longer mutates cto_state/community_wallet_hash
   // directly (that's ExecuteProposal's job now, after the challenge window)
@@ -1397,7 +1726,7 @@ test anchor_vote_result_succeeds_with_quorum_met() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 15, // bumped 5 -> 15 (anti-whale-takeover fix, 2026-07-28): must meet the new min_voter_count
@@ -1469,7 +1798,7 @@ test anchor_vote_result_rejects_dropping_thread_nft() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 5,
@@ -1537,7 +1866,7 @@ test anchor_vote_result_rejects_wrong_launch_nft() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 5,
@@ -1601,7 +1930,7 @@ test anchor_vote_result_rejects_underfunded_bond() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 5,
@@ -1668,7 +1997,7 @@ test anchor_vote_result_rejects_unpaid_bond() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 5,
@@ -1736,7 +2065,7 @@ test anchor_vote_result_rejects_wide_validity_range() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 5,
@@ -1799,7 +2128,7 @@ test anchor_vote_result_fails_without_quorum() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 9_000,
       no_votes: 1_000,
       // Bumped to 15 (the new min_voter_count) so this test isolates the
@@ -1869,7 +2198,7 @@ test anchor_vote_result_fails_when_voter_count_below_minimum() {
     AnchorVoteResult {
       proposal_type: SilenceLockTrigger,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 1,
@@ -1920,7 +2249,7 @@ test anchor_vote_result_fails_when_creator_cap_exceeded() {
     AnchorVoteResult {
       proposal_type: FundAllocation,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 60_000,
       no_votes: 10_000,
       voter_count: 15,
@@ -2691,11 +3020,11 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
         reference_script: None,
       },
     }
-  let proposal =
+  let base_proposal =
     ProposalAnchor {
       proposal_type: FundAllocation,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proof_bundle_hash: #"",
       yes_votes: 0,
       no_votes: 0,
       voter_count: 0,
@@ -2710,7 +3039,8 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
       allocation_amount: 0,
       allocation_recipient_hash: #"ff",
       relayer_credential_hash: #"33",
-    }
+        }
+  let proposal = with_derived_reference(datum, base_proposal)
   let new_datum =
     CtoGovernanceDatum {
       ..datum,
@@ -2741,7 +3071,7 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
     AnchorVoteResult {
       proposal_type: FundAllocation,
       description_hash: #"aa",
-      proof_bundle_hash: #"bb",
+      proposal_id: mock_proposal_id(),
       yes_votes: 0,
       no_votes: 0,
       voter_count: 0,

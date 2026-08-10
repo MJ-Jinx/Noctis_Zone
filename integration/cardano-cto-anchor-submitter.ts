@@ -38,6 +38,7 @@
 
 import type { LucidEvolution, Network as LucidNetwork, SpendingValidator, UTxO } from '@lucid-evolution/lucid';
 import { Blockfrost, CredentialSchema, Data, Lucid, validatorToAddress } from '@lucid-evolution/lucid';
+import { deriveAnchorReferenceHex, type TargetDexCredential } from './cto-anchor-reference.js';
 import { selectLaunchUtxo } from './launch-utxo-lookup.js';
 import { LpEscrowDatumSchema } from './tier-a-schemas.js';
 
@@ -150,7 +151,7 @@ export const CtoGovernanceDatumSchema = CtoGovernanceDatumShape as unknown as Ct
 const AnchorVoteResultRedeemerShape = Data.Object({
   proposal_type: ProposalTypeSchema,
   description_hash: Data.Bytes(),
-  proof_bundle_hash: Data.Bytes(),
+  proposal_id: Data.Bytes(),
   yes_votes: Data.Integer(),
   no_votes: Data.Integer(),
   voter_count: Data.Integer(),
@@ -183,7 +184,14 @@ function toHex(bytes: Uint8Array): string {
 export interface VoteResultParams {
   proposalType: ProposalTypeData;
   descriptionHash: Uint8Array;
-  proofBundleHash: Uint8Array;
+  /**
+   * The Midnight ballot being relayed. It replaces the bundle reference this
+   * interface used to carry: the validator DERIVES that reference now (see
+   * cto-anchor-reference.ts), so supplying one was never a real choice — it
+   * was an unchecked field that a forging relayer could fill with a genuine
+   * reference borrowed from another launch's ballot.
+   */
+  proposalId: Uint8Array;
   yesVotes: bigint;
   noVotes: bigint;
   voterCount: bigint;
@@ -202,6 +210,25 @@ export interface VoteResultParams {
   relayerCredentialHash: string; // hex VerificationKeyHash — self-attested (open relay, no signature enforced)
   /** Real ADA bond, >= MIN_RELAYER_BOND_LOVELACE, paid into the contract's own continuing output — see submitVoteResult's own comment. */
   relayerBondLovelace: bigint;
+}
+
+/**
+ * Lucid's credential shape to the reference derivation's own.
+ *
+ * Two encodings of the same idea, and the validator hashes a one-byte kind tag
+ * that distinguishes them — so collapsing both arms to one tag here would build
+ * a datum the validator rejects for a target DEX that is a plain payment key.
+ */
+function toReferenceCredential(
+  target: VoteResultParams['targetDexCredential'],
+): TargetDexCredential {
+  if (target === null) {
+    return null;
+  }
+  if ('PubKeyCredential' in target) {
+    return { kind: 'VerificationKey', hashHex: target.PubKeyCredential[0] };
+  }
+  return { kind: 'Script', hashHex: target.ScriptCredential[0] };
 }
 
 // ============================================================================
@@ -338,10 +365,33 @@ export class CardanoCtoAnchorSubmitter {
     const anchorUtxo = await this.findAnchorUtxo(lucid, this.config.launchId);
     const currentDatum = Data.from<CtoGovernanceDatumData>(this.requireDatum(anchorUtxo), CtoGovernanceDatumSchema);
 
+    // The validator derives this from ITS OWN datum's launch id and ballot
+    // ordinal, then checks the continuing datum equals what it expects — so
+    // this has to be computed, not chosen, and computed from the same two
+    // fields read off the UTXO being spent rather than from config.
+    const proofBundleHash = deriveAnchorReferenceHex({
+      launchIdHex: currentDatum.launch_id,
+      proposalCount: currentDatum.proposal_count,
+      proposalIdHex: toHex(params.proposalId),
+      ballot: {
+        proposalType: params.proposalType,
+        descriptionHashHex: toHex(params.descriptionHash),
+        yesVotes: params.yesVotes,
+        noVotes: params.noVotes,
+        voterCount: params.voterCount,
+        creatorYesVotes: params.creatorYesVotes,
+        creatorNoVotes: params.creatorNoVotes,
+        outcome: params.outcome,
+        startTimestamp: params.startTimestamp,
+        endTimestamp: params.endTimestamp,
+        targetDexCredential: toReferenceCredential(params.targetDexCredential),
+      },
+    });
+
     const proposalAnchor: ProposalAnchorData = {
       proposal_type: params.proposalType,
       description_hash: toHex(params.descriptionHash),
-      proof_bundle_hash: toHex(params.proofBundleHash),
+      proof_bundle_hash: proofBundleHash,
       yes_votes: params.yesVotes,
       no_votes: params.noVotes,
       voter_count: params.voterCount,
@@ -374,7 +424,7 @@ export class CardanoCtoAnchorSubmitter {
     const redeemerData: AnchorVoteResultRedeemerData = {
       proposal_type: params.proposalType,
       description_hash: toHex(params.descriptionHash),
-      proof_bundle_hash: toHex(params.proofBundleHash),
+      proposal_id: toHex(params.proposalId),
       yes_votes: params.yesVotes,
       no_votes: params.noVotes,
       voter_count: params.voterCount,
