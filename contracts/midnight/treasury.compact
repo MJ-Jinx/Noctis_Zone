@@ -99,6 +99,30 @@ export ledger withdrawalCount: Counter;
 sealed ledger floorLovelace: Uint<128>;
 sealed ledger warningLovelace: Uint<128>;
 
+// A ceiling on how fast this treasury can be emptied.
+//
+// One treasury serves every launch on the platform, and a withdrawal was
+// bounded only by the balance — so the whole of it could leave in a single
+// call, in one transaction, with nothing to notice before or after.
+//
+// A rolling window caps what can leave within any span of
+// `withdrawalWindowSeconds`. That does not stop a determined holder of the
+// key, and is not meant to: it converts an instant, total loss into a
+// paced one, which is the difference between a drain nobody can react to
+// and a drain that takes long enough to be seen and answered. Routine
+// conversion batches are unaffected as long as the limits are set to fit
+// them, which is why both are deploy-time choices rather than constants
+// here — the operator sizes the window to their own cycle.
+//
+// The two currencies are counted separately because their units are not
+// comparable: lovelace against NIGHT atomic units.
+sealed ledger withdrawalWindowSeconds: Uint<64>;
+sealed ledger adaWithdrawalLimitPerWindow: Uint<128>;
+sealed ledger nightWithdrawalLimitPerWindow: Uint<128>;
+export ledger withdrawalWindowStart: Uint<64>;
+export ledger adaWithdrawnInWindow: Uint<128>;
+export ledger nightWithdrawnInWindow: Uint<128>;
+
 witness getGovernorSecret(): UserSecretKey;
 
 pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
@@ -152,7 +176,14 @@ pure circuit computeAdaEquivalent(
   return (adaBal + nightValueInLovelace) as Uint<128>;
 }
 
-constructor(launchId_: Bytes<32>, floorLovelace_: Uint<128>, warningLovelace_: Uint<128>) {
+constructor(
+  launchId_: Bytes<32>,
+  floorLovelace_: Uint<128>,
+  warningLovelace_: Uint<128>,
+  withdrawalWindowSeconds_: Uint<64>,
+  adaWithdrawalLimitPerWindow_: Uint<128>,
+  nightWithdrawalLimitPerWindow_: Uint<128>
+) {
   launchId = disclose(launchId_);
   adaBalance = 0;
   nightBalance = 0;
@@ -160,6 +191,20 @@ constructor(launchId_: Bytes<32>, floorLovelace_: Uint<128>, warningLovelace_: U
   totalNightFeesCollected = 0;
   floorLovelace = disclose(floorLovelace_);
   warningLovelace = disclose(warningLovelace_);
+
+  // A window of zero would reset on every call and cap nothing; a limit of
+  // zero would stop withdrawals entirely. Neither is a policy, so neither
+  // is deployable.
+  assert(disclose(withdrawalWindowSeconds_ > 0), "Withdrawal window must be positive");
+  assert(disclose(adaWithdrawalLimitPerWindow_ > 0), "ADA withdrawal limit must be positive");
+  assert(disclose(nightWithdrawalLimitPerWindow_ > 0), "NIGHT withdrawal limit must be positive");
+  withdrawalWindowSeconds = disclose(withdrawalWindowSeconds_);
+  adaWithdrawalLimitPerWindow = disclose(adaWithdrawalLimitPerWindow_);
+  nightWithdrawalLimitPerWindow = disclose(nightWithdrawalLimitPerWindow_);
+  withdrawalWindowStart = 0;
+  adaWithdrawnInWindow = 0;
+  nightWithdrawnInWindow = 0;
+
   const govSecret = getGovernorSecret();
   governorKey = disclose(deriveGovernorKey(govSecret));
 }
@@ -213,10 +258,35 @@ export circuit depositFees(amount: Uint<128>, currency: Currency): [] {
 // withdrew from one undifferentiated pool. NIGHT withdrawals actually pay
 // out via sendUnshielded (previously ledger-only, see file header); ADA
 // withdrawals stay bookkeeping-only (ADA isn't Midnight-native).
-export circuit withdrawFees(amount: Uint<128>, currency: Currency, recipientAddr: Bytes<32>): [] {
+export circuit withdrawFees(
+  amount: Uint<128>,
+  currency: Currency,
+  recipientAddr: Bytes<32>,
+  currentTimestamp: Uint<64>
+): [] {
   const govSecret = getGovernorSecret();
   const govKey = deriveGovernorKey(govSecret);
   assert(disclose(govKey == governorKey), "Only governor can withdraw");
+  assert(disclose(amount > 0), "Withdrawal amount must be positive");
+
+  // Bound to real chain time, so the window cannot be rolled early by
+  // naming a later hour than the chain has reached.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  // A window that has run rolls over: the running totals restart from this
+  // withdrawal, and the window restarts from now. Within a window they
+  // accumulate, so splitting a withdrawal across several calls does not
+  // raise what the window allows.
+  const windowElapsed = disclose(
+    currentTimestamp >= ((withdrawalWindowStart + withdrawalWindowSeconds) as Uint<64>)
+  );
+  const priorAda = windowElapsed ? 0 : adaWithdrawnInWindow;
+  const priorNight = windowElapsed ? 0 : nightWithdrawnInWindow;
+  withdrawalWindowStart = windowElapsed ? disclose(currentTimestamp) : withdrawalWindowStart;
   // Phase 5 hygiene fix (2026-07-12): sanity-check the caller-supplied
   // payout destination isn't the empty/all-zero address — guards against a
   // fat-fingered recipientAddr silently burning withdrawn treasury funds.
@@ -224,11 +294,25 @@ export circuit withdrawFees(amount: Uint<128>, currency: Currency, recipientAddr
 
   if (disclose(currency == Currency.Night)) {
     assert(disclose(amount <= nightBalance), "Insufficient NIGHT treasury balance");
+    const nightThisWindow = (priorNight + amount) as Uint<128>;
+    assert(
+      disclose(nightThisWindow <= nightWithdrawalLimitPerWindow),
+      "Withdrawal exceeds the NIGHT limit for this window"
+    );
+    nightWithdrawnInWindow = disclose(nightThisWindow);
+    adaWithdrawnInWindow = disclose(priorAda);
     nightBalance = disclose((nightBalance - amount) as Uint<128>);
     const dest = right<ContractAddress, UserAddress>(disclose(UserAddress { bytes: recipientAddr }));
     sendUnshielded(nativeToken(), disclose(amount), dest);
   } else {
     assert(disclose(amount <= adaBalance), "Insufficient ADA treasury balance");
+    const adaThisWindow = (priorAda + amount) as Uint<128>;
+    assert(
+      disclose(adaThisWindow <= adaWithdrawalLimitPerWindow),
+      "Withdrawal exceeds the ADA limit for this window"
+    );
+    adaWithdrawnInWindow = disclose(adaThisWindow);
+    nightWithdrawnInWindow = disclose(priorNight);
     adaBalance = disclose((adaBalance - amount) as Uint<128>);
   }
   withdrawalCount.increment(1);

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Contract, Currency, type Ledger, ledger, type Witnesses } from '../compiled/treasury/contract/index.js';
-import { deployForTest, fakeBytes32, type LedgerSink, nextContext, trackLedger } from './helpers.js';
+import { deployForTest, fakeBytes32, type LedgerSink, nextContext, nextContextAtTime, trackLedger } from './helpers.js';
 
 type PrivateState = undefined;
 
@@ -12,10 +12,50 @@ const witnesses: Witnesses<PrivateState> = {
 const FLOOR_LOVELACE = 10_000_000_000n;
 const WARNING_LOVELACE = 25_000_000_000n;
 
-function deploy(floor = FLOOR_LOVELACE, warning = WARNING_LOVELACE) {
+// A withdrawal window and per-currency ceilings, both deploy-time policy.
+// Generous here so the tests that are not about the ceiling never meet it;
+// the ceiling has its own block at the end of this file.
+const WINDOW_SECONDS = 86_400n;
+const ADA_LIMIT = 1_000_000_000_000n;
+const NIGHT_LIMIT = 1_000_000_000_000n;
+// Realistic epoch-seconds anchor — a withdrawal binds to real chain time.
+const NOW = 1_780_000_000;
+
+function deploy(
+  floor = FLOOR_LOVELACE,
+  warning = WARNING_LOVELACE,
+  opts: { windowSeconds?: bigint; adaLimit?: bigint; nightLimit?: bigint } = {},
+) {
   const contract = new Contract<PrivateState>(witnesses);
-  const { init, contractAddress, ctx } = deployForTest(contract, undefined, fakeBytes32(9), floor, warning);
+  const { init, contractAddress, ctx } = deployForTest(
+    contract,
+    undefined,
+    fakeBytes32(9),
+    floor,
+    warning,
+    opts.windowSeconds ?? WINDOW_SECONDS,
+    opts.adaLimit ?? ADA_LIMIT,
+    opts.nightLimit ?? NIGHT_LIMIT,
+  );
   return { contract, init, contractAddress, ctx };
+}
+
+/** A withdrawal made at `at`, with the simulator's block time pinned to match. */
+function withdrawAt(
+  d: { contract: ReturnType<typeof deploy>['contract']; contractAddress: ReturnType<typeof deploy>['contractAddress'] },
+  ctx: ReturnType<typeof deploy>['ctx'],
+  amount: bigint,
+  currency: Currency,
+  recipient: Uint8Array,
+  at: number = NOW,
+) {
+  return d.contract.circuits.withdrawFees(
+    nextContextAtTime(d.contractAddress, ctx, at),
+    amount,
+    currency,
+    recipient,
+    BigInt(at),
+  );
 }
 
 describe('treasury.compact', () => {
@@ -85,7 +125,7 @@ describe('treasury.compact', () => {
 
     const r1 = contract.circuits.depositFees(ctx, 5000n, Currency.Ada);
     const ctx2 = nextContext(contractAddress, r1.context);
-    const r2 = contract.circuits.withdrawFees(ctx2, 2000n, Currency.Ada, fakeBytes32(5));
+    const r2 = withdrawAt({ contract, contractAddress }, ctx2, 2000n, Currency.Ada, fakeBytes32(5));
     const afterWithdraw = trackLedger(lastLedger, ledger(r2.context.currentQueryContext.state));
     expect(afterWithdraw.adaBalance).toBe(3000n);
     // totalAdaFeesCollected is a lifetime counter, unaffected by withdrawal
@@ -100,7 +140,7 @@ describe('treasury.compact', () => {
     const ctx2 = nextContext(contractAddress, r1.context);
     const r2 = contract.circuits.depositFees(ctx2, 3000n, Currency.Night);
     const ctx3 = nextContext(contractAddress, r2.context);
-    const r3 = contract.circuits.withdrawFees(ctx3, 1000n, Currency.Night, fakeBytes32(5));
+    const r3 = withdrawAt({ contract, contractAddress }, ctx3, 1000n, Currency.Night, fakeBytes32(5));
     const afterWithdraw = trackLedger(lastLedger, ledger(r3.context.currentQueryContext.state));
     expect(afterWithdraw.nightBalance).toBe(2000n);
     expect(afterWithdraw.adaBalance).toBe(5000n); // untouched
@@ -110,7 +150,7 @@ describe('treasury.compact', () => {
     const { contract, contractAddress, ctx } = deploy();
     const r1 = contract.circuits.depositFees(ctx, 5000n, Currency.Night);
     const ctx2 = nextContext(contractAddress, r1.context);
-    expect(() => contract.circuits.withdrawFees(ctx2, 1000n, Currency.Night, fakeBytes32(0))).toThrow(
+    expect(() => withdrawAt({ contract, contractAddress }, ctx2, 1000n, Currency.Night, fakeBytes32(0))).toThrow(
       'Recipient address cannot be empty',
     );
   });
@@ -125,7 +165,7 @@ describe('treasury.compact', () => {
 
     // Only 1000 ADA available, but 5000 is requested — must fail even
     // though the NIGHT balance (10,000) alone would easily cover it.
-    expect(() => contract.circuits.withdrawFees(ctx3, 5000n, Currency.Ada, fakeBytes32(5))).toThrow(
+    expect(() => withdrawAt({ contract, contractAddress }, ctx3, 5000n, Currency.Ada, fakeBytes32(5))).toThrow(
       'Insufficient ADA treasury balance',
     );
   });
@@ -258,5 +298,170 @@ describe('treasury.compact — mark-to-market floor/warning check', () => {
     const { contract, ctx } = deploy();
     const floorResult = contract.circuits.isBelowFloor(ctx, 0n);
     expect(floorResult.result).toBe(true);
+  });
+});
+
+describe('treasury.compact — the withdrawal window paces how fast the treasury can empty', () => {
+  const RECIPIENT = fakeBytes32(5);
+  const LIMIT = 1_000n;
+
+  /** A treasury holding plenty of both currencies, with a small per-window ceiling. */
+  function funded() {
+    const d = deploy(FLOOR_LOVELACE, WARNING_LOVELACE, { adaLimit: LIMIT, nightLimit: LIMIT });
+    const r1 = d.contract.circuits.depositFees(d.ctx, 100_000n, Currency.Ada);
+    const r2 = d.contract.circuits.depositFees(nextContext(d.contractAddress, r1.context), 100_000n, Currency.Night);
+    return { ...d, ctx: nextContext(d.contractAddress, r2.context) };
+  }
+
+  it('refuses a single withdrawal of the whole balance', () => {
+    // What the ceiling is for: the balance is there, the caller is the real
+    // governor, and the only thing refusing is the pace.
+    const d = funded();
+    expect(() => withdrawAt(d, d.ctx, 100_000n, Currency.Ada, RECIPIENT)).toThrow(
+      'Withdrawal exceeds the ADA limit for this window',
+    );
+  });
+
+  it('allows exactly the limit, and nothing beyond it in the same window', () => {
+    const d = funded();
+    const r = withdrawAt(d, d.ctx, LIMIT, Currency.Ada, RECIPIENT);
+    expect(ledger(r.context.currentQueryContext.state).adaWithdrawnInWindow).toBe(LIMIT);
+
+    expect(() => withdrawAt(d, nextContext(d.contractAddress, r.context), 1n, Currency.Ada, RECIPIENT)).toThrow(
+      'Withdrawal exceeds the ADA limit for this window',
+    );
+  });
+
+  it('accumulates across calls, so splitting a withdrawal does not raise the ceiling', () => {
+    // The obvious way around a per-call cap. The window counts totals, not
+    // calls, so four quarters reach the same place as one whole.
+    const d = funded();
+    let ctx = d.ctx;
+    for (let i = 0; i < 4; i++) {
+      const r = withdrawAt(d, ctx, LIMIT / 4n, Currency.Ada, RECIPIENT);
+      ctx = nextContext(d.contractAddress, r.context);
+    }
+    expect(ledger(ctx.currentQueryContext.state).adaWithdrawnInWindow).toBe(LIMIT);
+    expect(() => withdrawAt(d, ctx, 1n, Currency.Ada, RECIPIENT)).toThrow(
+      'Withdrawal exceeds the ADA limit for this window',
+    );
+  });
+
+  it('counts the two currencies separately, since their units are not comparable', () => {
+    const d = funded();
+    const r1 = withdrawAt(d, d.ctx, LIMIT, Currency.Ada, RECIPIENT);
+    // The ADA window is spent; NIGHT is untouched and still has its own.
+    const r2 = withdrawAt(d, nextContext(d.contractAddress, r1.context), LIMIT, Currency.Night, RECIPIENT);
+    const state = ledger(r2.context.currentQueryContext.state);
+    expect(state.adaWithdrawnInWindow).toBe(LIMIT);
+    expect(state.nightWithdrawnInWindow).toBe(LIMIT);
+  });
+
+  it('lets the next window through once the first has run', () => {
+    const d = funded();
+    const r1 = withdrawAt(d, d.ctx, LIMIT, Currency.Ada, RECIPIENT);
+    const ctx = nextContext(d.contractAddress, r1.context);
+    const nextWindow = NOW + Number(WINDOW_SECONDS);
+
+    const r2 = withdrawAt(d, ctx, LIMIT, Currency.Ada, RECIPIENT, nextWindow);
+    const state = ledger(r2.context.currentQueryContext.state);
+    expect(state.adaWithdrawnInWindow).toBe(LIMIT);
+    expect(state.withdrawalWindowStart).toBe(BigInt(nextWindow));
+    expect(state.adaBalance).toBe(100_000n - LIMIT - LIMIT);
+  });
+
+  it('does not roll the window one second early', () => {
+    const d = funded();
+    const r1 = withdrawAt(d, d.ctx, LIMIT, Currency.Ada, RECIPIENT);
+    const ctx = nextContext(d.contractAddress, r1.context);
+    const justShort = NOW + Number(WINDOW_SECONDS) - 1;
+    expect(() => withdrawAt(d, ctx, 1n, Currency.Ada, RECIPIENT, justShort)).toThrow(
+      'Withdrawal exceeds the ADA limit for this window',
+    );
+  });
+
+  it('does not let a rolled window reopen the other currency by accident', () => {
+    // Rolling has to reset both counters together, but a withdrawal only
+    // writes one of them — so the untouched one must carry through rather
+    // than being silently dropped or doubled.
+    const d = funded();
+    const r1 = withdrawAt(d, d.ctx, LIMIT, Currency.Night, RECIPIENT);
+    const ctx = nextContext(d.contractAddress, r1.context);
+    const r2 = withdrawAt(d, ctx, LIMIT, Currency.Ada, RECIPIENT);
+    const state = ledger(r2.context.currentQueryContext.state);
+    expect(state.nightWithdrawnInWindow).toBe(LIMIT);
+    expect(state.adaWithdrawnInWindow).toBe(LIMIT);
+    expect(() => withdrawAt(d, nextContext(d.contractAddress, r2.context), 1n, Currency.Night, RECIPIENT)).toThrow(
+      'Withdrawal exceeds the NIGHT limit for this window',
+    );
+  });
+
+  it('resets the OTHER currency too when a withdrawal rolls the window', () => {
+    // A withdrawal writes one currency's counter, but rolling has to clear
+    // both. If the untouched one were left at its old value, spending the
+    // ADA window and then withdrawing NIGHT in the next one would carry the
+    // spent ADA total forward and refuse ADA that the new window allows.
+    const d = funded();
+    const r1 = withdrawAt(d, d.ctx, LIMIT, Currency.Ada, RECIPIENT);
+    const nextWindow = NOW + Number(WINDOW_SECONDS);
+
+    // NIGHT rolls the window; ADA is untouched by this call.
+    const r2 = withdrawAt(d, nextContext(d.contractAddress, r1.context), 1n, Currency.Night, RECIPIENT, nextWindow);
+    expect(ledger(r2.context.currentQueryContext.state).adaWithdrawnInWindow).toBe(0n);
+
+    // So the new window's ADA allowance is whole.
+    const r3 = withdrawAt(d, nextContext(d.contractAddress, r2.context), LIMIT, Currency.Ada, RECIPIENT, nextWindow);
+    expect(ledger(r3.context.currentQueryContext.state).adaWithdrawnInWindow).toBe(LIMIT);
+  });
+
+  it('resets the other currency the same way when the roles are reversed', () => {
+    // The mirror of the above. Each branch carries the counter it does not
+    // write, and the two are separate lines — so one being right says
+    // nothing about the other.
+    const d = funded();
+    const r1 = withdrawAt(d, d.ctx, LIMIT, Currency.Night, RECIPIENT);
+    const nextWindow = NOW + Number(WINDOW_SECONDS);
+
+    const r2 = withdrawAt(d, nextContext(d.contractAddress, r1.context), 1n, Currency.Ada, RECIPIENT, nextWindow);
+    expect(ledger(r2.context.currentQueryContext.state).nightWithdrawnInWindow).toBe(0n);
+
+    const r3 = withdrawAt(d, nextContext(d.contractAddress, r2.context), LIMIT, Currency.Night, RECIPIENT, nextWindow);
+    expect(ledger(r3.context.currentQueryContext.state).nightWithdrawnInWindow).toBe(LIMIT);
+  });
+
+  it('rejects a timestamp that disagrees with chain time in either direction', () => {
+    // Not via withdrawAt, which pins both to the same value and so could
+    // never disagree — the block time is held at NOW and the claimed time
+    // moved against it.
+    const d = funded();
+    const pinned = nextContextAtTime(d.contractAddress, d.ctx, NOW);
+    expect(() => d.contract.circuits.withdrawFees(pinned, 1n, Currency.Ada, RECIPIENT, BigInt(NOW - 7200))).toThrow(
+      'currentTimestamp too far in the past',
+    );
+    expect(() => d.contract.circuits.withdrawFees(pinned, 1n, Currency.Ada, RECIPIENT, BigInt(NOW + 7200))).toThrow(
+      'currentTimestamp cannot be in the future',
+    );
+  });
+
+  it('rejects a zero withdrawal, which would only churn the window', () => {
+    const d = funded();
+    expect(() => withdrawAt(d, d.ctx, 0n, Currency.Ada, RECIPIENT)).toThrow('Withdrawal amount must be positive');
+  });
+});
+
+describe('treasury.compact — the withdrawal policy a deploy may set', () => {
+  it('refuses a window of zero, which would reset on every call', () => {
+    expect(() => deploy(FLOOR_LOVELACE, WARNING_LOVELACE, { windowSeconds: 0n })).toThrow(
+      'Withdrawal window must be positive',
+    );
+  });
+
+  it('refuses a limit of zero in either currency, which would stop withdrawals entirely', () => {
+    expect(() => deploy(FLOOR_LOVELACE, WARNING_LOVELACE, { adaLimit: 0n })).toThrow(
+      'ADA withdrawal limit must be positive',
+    );
+    expect(() => deploy(FLOOR_LOVELACE, WARNING_LOVELACE, { nightLimit: 0n })).toThrow(
+      'NIGHT withdrawal limit must be positive',
+    );
   });
 });

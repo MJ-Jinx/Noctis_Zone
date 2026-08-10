@@ -565,6 +565,10 @@ export class NoctisMidnightClient {
       launchId: Uint8Array;
       floorLovelace?: bigint;
       warningLovelace?: bigint;
+      /** How fast the treasury may be drawn down — see the contract's own note. */
+      withdrawalWindowSeconds?: bigint;
+      adaWithdrawalLimitPerWindow?: bigint;
+      nightWithdrawalLimitPerWindow?: bigint;
     },
   ): Promise<PsmRecord> {
     const witnesses = treasuryWitnesses(this.governorSecretKey);
@@ -577,6 +581,9 @@ export class NoctisMidnightClient {
         args.launchId,
         args.floorLovelace ?? TREASURY_FLOOR_LOVELACE,
         args.warningLovelace ?? TREASURY_WARNING_LOVELACE,
+        args.withdrawalWindowSeconds ?? TREASURY_WITHDRAWAL_WINDOW_SECONDS,
+        args.adaWithdrawalLimitPerWindow ?? TREASURY_ADA_WITHDRAWAL_LIMIT,
+        args.nightWithdrawalLimitPerWindow ?? TREASURY_NIGHT_WITHDRAWAL_LIMIT,
       ],
     });
     this.treasury = deployed;
@@ -776,6 +783,19 @@ export function computeRatioBondRefund(bondAmount: bigint, tokensPurchased: bigi
 // deploy" status as everything else of this shape in this codebase.
 export const TREASURY_FLOOR_LOVELACE = 10_000n * 1_000_000n; // 10,000 ADA
 export const TREASURY_WARNING_LOVELACE = 25_000n * 1_000_000n; // 25,000 ADA
+
+/**
+ * Defaults for the treasury's withdrawal pacing — see `treasury.compact`'s
+ * own note on why these are deploy-time policy rather than constants there.
+ *
+ * A day, and a fifth of the warning threshold per currency. Sized to clear
+ * a routine conversion batch comfortably while still meaning that emptying
+ * the treasury takes days rather than one transaction. An operator running
+ * a different cycle should pass their own.
+ */
+export const TREASURY_WITHDRAWAL_WINDOW_SECONDS = 86_400n;
+export const TREASURY_ADA_WITHDRAWAL_LIMIT = TREASURY_WARNING_LOVELACE / 5n;
+export const TREASURY_NIGHT_WITHDRAWAL_LIMIT = 5_000n * 1_000_000n;
 
 export type TreasuryHealth = {
   adaEquivalentLovelace: bigint;

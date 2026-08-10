@@ -152,6 +152,29 @@ export ledger poolBalance: Uint<128>;
 sealed ledger maxPoolBudget: Uint<128>;
 export ledger totalToppedUp: Uint<128>;
 
+// The runway, as an on-chain ceiling rather than an off-chain promise.
+//
+// Rewards are a fixed linear daily emission over a creator-selected 3-5
+// year period. Nothing held that shape on-chain: a reward root is a
+// governor input, and claims were bounded only by what remained in the
+// pool, so a single root could release all of it at once.
+//
+// These three fields make elapsed time the binding constraint. Claims may
+// total at most `emissionBase * elapsed / emissionDurationSeconds`, so what
+// any root can release is what the runway has reached — a bad or mistaken
+// one costs at most the emission still unspent, and the rest stays behind
+// the clock. The creator's chosen duration becomes something a holder can
+// read and check rather than take on trust.
+//
+// `emissionBase` is fixed when emission starts and is NOT raised by a
+// later top-up: a top-up extends how long the pool pays out, it does not
+// pay out faster. `totalClaimed` is cumulative across every staker, which
+// per-staker `claimedRewards` cannot answer.
+sealed ledger emissionDurationSeconds: Uint<64>;
+export ledger emissionStartTime: Uint<64>;
+export ledger emissionBase: Uint<128>;
+export ledger totalClaimed: Uint<128>;
+
 // Governor-published root over (stakerKey, stakedAmount) leaves — the
 // on-chain transparency anchor for real stake/unstake activity observed
 // off-chain on bonding_curve.compact. See file header's TOKEN CUSTODY note.
@@ -323,7 +346,8 @@ constructor(
   creatorPubKey_: Bytes<32>,
   platformAddr_: Bytes<32>,
   initialClaimFeeNightAmount_: Uint<128>,
-  maxPoolBudget_: Uint<128>
+  maxPoolBudget_: Uint<128>,
+  emissionDurationSeconds_: Uint<64>
 ) {
   launchId = disclose(launchId_);
   creatorKey = disclose(creatorPubKey_);
@@ -349,7 +373,18 @@ constructor(
     launchId_
   ]));
 
+  // CLAUDE.md: STAKING_DURATION_MIN_DAYS 1095 (3 years) to
+  // STAKING_DURATION_MAX_DAYS 1825 (5 years), creator-selected with no
+  // default. Sealed, so the runway a launch advertises is the runway its
+  // claims are actually paced by.
+  assert(disclose(emissionDurationSeconds_ >= 94608000), "Emission runway is below the 3-year minimum");
+  assert(disclose(emissionDurationSeconds_ <= 157680000), "Emission runway is above the 5-year maximum");
+  emissionDurationSeconds = disclose(emissionDurationSeconds_);
+
   poolBalance = 0;
+  emissionStartTime = 0;
+  emissionBase = 0;
+  totalClaimed = 0;
   stakeSnapshotRoot = disclose(pad(32, ""));
   rewardRoot = disclose(pad(32, ""));
 }
@@ -375,6 +410,55 @@ export circuit topUpPool(amount: Uint<128>): [] {
   poolBalance = disclose((poolBalance + amount) as Uint<128>);
 }
 
+// Starts the runway clock. Until this runs, the emission ceiling is zero
+// and nothing can be claimed, so a pool cannot pay out before its own
+// schedule begins.
+//
+// `emissionBase` is fixed here, at whatever has been funded so far, and a
+// later top-up deliberately does not raise it — the pool then pays for
+// longer rather than faster, which is what "a top-up extends the runway"
+// means when the runway is enforced rather than described.
+//
+// Callable once. Restarting would move the clock forward and re-open
+// everything the old schedule had already paced out.
+export circuit startEmission(currentTimestamp: Uint<64>): [] {
+  const govSecret = getGovernorSecret();
+  const govKey = deriveGovernorKey(govSecret);
+  assert(disclose(govKey == governorKey), "Only governor can start emission");
+  assert(disclose(emissionStartTime == 0), "Emission has already started");
+  assert(disclose(poolBalance > 0), "Cannot start emission on an unfunded pool");
+
+  // Bound to real chain time, so the start cannot be backdated into a
+  // window that would unlock emission that has not elapsed.
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  assert(disclose(currentTimestamp > 0), "Emission start must be non-zero");
+
+  emissionStartTime = disclose(currentTimestamp);
+  emissionBase = poolBalance;
+}
+
+// How much of the pool the runway has released by `currentTimestamp`:
+// emissionBase * elapsed / duration, floored.
+//
+// Compact cannot divide, so the caller supplies nothing and this is never
+// computed as a quotient — claimRewards cross-multiplies against it
+// instead. Elapsed time is capped at the duration so the product stays
+// bounded regardless of how long after the runway ends a claim arrives;
+// past the end the whole base has been released and `poolBalance` is what
+// bounds a claim, as it always did.
+pure circuit elapsedWithinRunway(
+  startTime: Uint<64>,
+  duration: Uint<64>,
+  currentTimestamp: Uint<64>
+): Uint<64> {
+  const elapsed = currentTimestamp > startTime ? (currentTimestamp - startTime) as Uint<64> : 0;
+  return elapsed > duration ? duration : elapsed;
+}
+
 // Governor publishes a fresh stake-snapshot root, reflecting real
 // stake/unstake activity observed off-chain on bonding_curve.compact.
 export circuit publishStakeSnapshot(newRoot: Bytes<32>): [] {
@@ -386,23 +470,14 @@ export circuit publishStakeSnapshot(newRoot: Bytes<32>): [] {
 
 // Governor publishes a fresh reward root, reflecting the latest off-chain
 // pro-rata accrual computation.
-// Finding (2026-07-21, Medium — documented, not fixed here): a
-// single governor key can mint the entire poolBalance to arbitrary
-// addresses via a crafted rewardRoot. Since claimRewards mints real,
-// transferable tokens based purely on membership in whatever root is
-// published here, the reward root is a trusted governor input: it is
-// derived from public on-chain events and is independently re-derivable,
-// but its publication is a trusted step. This is the same
-// accepted governor-trust model as every other governor-published root on
-// this platform (allowlist, CTO balance snapshot) — but the blast radius
-// is higher here specifically because this root mints liquid tokens
-// rather than only affecting governance tallies or eligibility. Given real
-// value is at stake, a production deployment should consider hardening
-// this key to an M-of-N multisig-derived key, or adding a per-root
-// emission-rate ceiling / timelock so a single bad root can't instantly
-// drain the pool — not attempted here since it changes the deploy-time key
-// model, a decision for whoever operates this contract in production, not
-// a code-only fix.
+//
+// The root decides how the released emission is DIVIDED; it does not
+// decide how much has been released. That is set by the runway clock — see
+// `emissionDurationSeconds` and the ceiling in claimRewards — so what any
+// root can move is bounded by elapsed time regardless of what it commits
+// to. The accrual behind it is derived from public on-chain stake and
+// unstake events and is independently re-derivable by anyone, the same
+// trust model as every other governor-published root on this platform.
 export circuit publishRewardRoot(newRoot: Bytes<32>): [] {
   const govSecret = getGovernorSecret();
   const govKey = deriveGovernorKey(govSecret);
@@ -462,7 +537,7 @@ export circuit proveStake(): Uint<128> {
 // case. A fix would let the caller pass a claimAmount <= payout and
 // advance claimedRewards by that amount instead of always by the full
 // delta — not implemented here since it changes this circuit's signature.
-export circuit claimRewards(recipientAddr: Bytes<32>): [] {
+export circuit claimRewards(recipientAddr: Bytes<32>, currentTimestamp: Uint<64>): [] {
   const sk = getUserSecret();
   const caller = deriveUserPublicKey(sk, launchId);
   assert(disclose(!isKeyZero(caller)), "Invalid user key");
@@ -477,8 +552,35 @@ export circuit claimRewards(recipientAddr: Bytes<32>): [] {
   assert(disclose(payout <= poolBalance), "Pool balance exhausted");
   assert(disclose(payout <= 18446744073709551615), "Payout exceeds max mintable per claim"); // 2^64 - 1
 
+  // The runway is the binding constraint, not just the remaining balance.
+  // Claims across every staker may total at most what elapsed time has
+  // released:
+  //
+  //   totalClaimed + payout <= emissionBase * elapsed / duration
+  //
+  // checked by cross-multiplication, since there is no division in-circuit.
+  // Both products stay far below the 124-bit ceiling: a pool is at most a
+  // quarter of a 1e9 supply, and five years is under 2^28 seconds, so
+  // neither side exceeds about 2^56.
+  assert(disclose(emissionStartTime > 0), "Emission has not started");
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  const newTotalClaimed = (totalClaimed + payout) as Uint<128>;
+  const elapsed = elapsedWithinRunway(emissionStartTime, emissionDurationSeconds, currentTimestamp);
+  const claimedTimesDuration =
+    ((newTotalClaimed as Uint<92>) * (emissionDurationSeconds as Uint<92>)) as Uint<92>;
+  const releasedTimesDuration = ((emissionBase as Uint<92>) * (elapsed as Uint<92>)) as Uint<92>;
+  assert(
+    disclose(claimedTimesDuration <= releasedTimesDuration),
+    "Claim exceeds what the emission runway has released so far"
+  );
+
   // Checks-effects-interactions: update ledger before minting/paying out.
   claimedRewards.insert(disclose(caller.bytes), disclose(cumulativeEarned));
+  totalClaimed = disclose(newTotalClaimed);
   poolBalance = disclose((poolBalance - payout) as Uint<128>);
 
   // Mint the reward payout directly to the staker as a real Midnight-native

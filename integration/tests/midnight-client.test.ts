@@ -84,8 +84,11 @@ import {
   createNoctisClient,
   NoctisLaunchManager,
   NoctisMidnightClient,
+  TREASURY_ADA_WITHDRAWAL_LIMIT,
   TREASURY_FLOOR_LOVELACE,
+  TREASURY_NIGHT_WITHDRAWAL_LIMIT,
   TREASURY_WARNING_LOVELACE,
+  TREASURY_WITHDRAWAL_WINDOW_SECONDS,
 } from '../midnight-client.js';
 
 // ============================================================================
@@ -506,7 +509,14 @@ describe('NoctisMidnightClient.deployTreasury / connectTreasury', () => {
     await client.deployTreasury(FAKE_PROVIDERS, { launchId: fakeBytes32(70) });
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.privateStateId).toBe('treasury');
-    expect(call.args).toEqual([fakeBytes32(70), TREASURY_FLOOR_LOVELACE, TREASURY_WARNING_LOVELACE]);
+    expect(call.args).toEqual([
+      fakeBytes32(70),
+      TREASURY_FLOOR_LOVELACE,
+      TREASURY_WARNING_LOVELACE,
+      TREASURY_WITHDRAWAL_WINDOW_SECONDS,
+      TREASURY_ADA_WITHDRAWAL_LIMIT,
+      TREASURY_NIGHT_WITHDRAWAL_LIMIT,
+    ]);
   });
 
   it('uses explicit floor/warning overrides when provided', async () => {
@@ -515,9 +525,12 @@ describe('NoctisMidnightClient.deployTreasury / connectTreasury', () => {
       launchId: fakeBytes32(71),
       floorLovelace: 1n,
       warningLovelace: 2n,
+      withdrawalWindowSeconds: 3n,
+      adaWithdrawalLimitPerWindow: 4n,
+      nightWithdrawalLimitPerWindow: 5n,
     });
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
-    expect(call.args).toEqual([fakeBytes32(71), 1n, 2n]);
+    expect(call.args).toEqual([fakeBytes32(71), 1n, 2n, 3n, 4n, 5n]);
   });
 
   it('connectTreasury calls findDeployedContract with the given contractAddress', async () => {
