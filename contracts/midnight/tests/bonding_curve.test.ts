@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { buyCost, grossRangeQuadratic } from '../../../integration/curve-pricing.js';
 import { computeBuyCommit } from '../../../packages/zk-proofs/src/darkveil.js';
 import {
   buildAllowlistTree,
@@ -68,6 +69,7 @@ const witnesses: Witnesses<PrivateState> = {
 const BASE_PRICE = 100n;
 const MAX_PRICE = 1000n;
 const CURVE_SUPPLY = 1000n;
+const CURVE_PARAMS = { base_price: BASE_PRICE, max_price: MAX_PRICE, curve_supply: CURVE_SUPPLY };
 
 // Eligibility-gate-side constructor args
 const TOTAL_SUPPLY = 1_000_000_000n;
@@ -133,6 +135,33 @@ function deploy() {
   return { contract, init, contractAddress, ctx };
 }
 
+/** Deploys with explicit curve prices, for the constructor's own bounds. */
+function deployWithPrices(basePrice: bigint, maxPrice: bigint, curveSupply: bigint = CURVE_SUPPLY) {
+  const contract = new Contract<PrivateState>(witnesses);
+  return deployForTest(
+    contract,
+    undefined,
+    LAUNCH_ID,
+    ALLOWLIST_TREE.root,
+    TOTAL_SUPPLY,
+    MAX_WALLET_PERCENT,
+    BOND_AMOUNT,
+    WALLET_CAP,
+    basePrice,
+    maxPrice,
+    curveSupply,
+    DV_ALLOCATION,
+    DV_PRICE,
+    ALLOWLIST_SIZE,
+    REGISTRATION_CLOSE_TIME,
+    MIN_DV_PARTICIPANTS_TEST,
+    CREATOR_KEY,
+    PLATFORM_ADDR,
+    CREATOR_ADDR,
+    LP_ESCROW_ADDR,
+  );
+}
+
 /** Deploys with an explicit registrationCloseTime, for the anchor guard. */
 function deployWithRegistrationCloseTime(closeTime: bigint) {
   const contract = new Contract<PrivateState>(witnesses);
@@ -192,6 +221,19 @@ function expectedPrice(sold: bigint): bigint {
   return BASE_PRICE + ((MAX_PRICE - BASE_PRICE) * sold * sold) / (CURVE_SUPPLY * CURVE_SUPPLY);
 }
 
+/**
+ * What the curve charges for `amount` tokens starting at `sold` — the SUM of
+ * the prices of the positions the buy takes, rounded up.
+ *
+ * Deliberately the shared `integration/curve-pricing.ts` mirror rather than a
+ * reimplementation: it is the same function the Cardano curves are verified
+ * against and was confirmed against a real Preprod trade, so agreeing with it
+ * is a cross-implementation check rather than this file agreeing with itself.
+ */
+function expectedGross(sold: bigint, amount: bigint): bigint {
+  return buyCost('quadratic', CURVE_PARAMS, sold, amount);
+}
+
 /** Fee split: 0.5% creator, 1.0% platform (bps / 10000), floor-rounded. */
 // 0.5% creator + 1.0% platform. One wallet, so one platform slice.
 function fees(gross: bigint) {
@@ -243,19 +285,10 @@ describe('bonding_curve.compact — quadratic pricing', () => {
     const { contract, ctx } = deployAndActivate();
 
     const tokenAmount = 10n;
-    const claimedPrice = expectedPrice(0n); // 100
-    const grossPayment = tokenAmount * claimedPrice; // 1000
+    const grossPayment = expectedGross(0n, tokenAmount); // 1000
     const { creator, platform } = fees(grossPayment); // 10, 6, 4
 
-    const result = contract.circuits.buyTokens(
-      ctx,
-      tokenAmount,
-      claimedPrice,
-      grossPayment,
-      creator,
-      platform,
-      1_000_000n,
-    );
+    const result = contract.circuits.buyTokens(ctx, tokenAmount, grossPayment, creator, platform, 1_000_000n);
 
     const state = trackLedger(lastLedger, ledger(result.context.currentQueryContext.state));
     expect(state.tokensSold).toBe(10n);
@@ -276,65 +309,163 @@ describe('bonding_curve.compact — quadratic pricing', () => {
       ...witnesses,
       getUserSecret: (_ctx) => [undefined, { bytes: fakeBytes32(99) }],
     });
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = 10n * claimedPrice;
+    const grossPayment = expectedGross(0n, 10n);
     const { creator, platform } = fees(grossPayment);
     // The proof is checked by verifyBuyerEligibility now, so that is where a
     // non-member is turned away — before any purchase is priced.
     expect(() => notAllowlisted.circuits.verifyBuyerEligibility(ctx)).toThrow('Invalid allowlist proof');
     // And buying stays closed to them, because nothing recorded them.
-    expect(() =>
-      notAllowlisted.circuits.buyTokens(ctx, 10n, claimedPrice, grossPayment, creator, platform, 1n),
-    ).toThrow('Buyer has not proven allowlist membership');
+    expect(() => notAllowlisted.circuits.buyTokens(ctx, 10n, grossPayment, creator, platform, 1n)).toThrow(
+      'Buyer has not proven allowlist membership',
+    );
     void contractAddress;
   });
 
-  it('rejects a buy with an incorrect claimed price (verifyPrice regression)', () => {
+  it('rejects a payment that is not what the curve charges for the range', () => {
     const { contract, ctx } = deployAndActivate();
     const wrongPrice = 999n; // not what the quadratic formula gives at sold=0
 
-    expect(() => contract.circuits.buyTokens(ctx, 10n, wrongPrice, 10n * wrongPrice, 0n, 0n, 1n)).toThrow(
-      'Price verification failed',
+    expect(() => contract.circuits.buyTokens(ctx, 10n, 10n * wrongPrice, 0n, 0n, 1n)).toThrow(
+      "Payment does not match the curve's cost for this range",
     );
+  });
+
+  it('charges the SUM of the positions bought, not the entry price repeated', () => {
+    // The distinction this whole mechanism exists for. A batch spanning
+    // positions [0, n) costs the sum of P(0)..P(n-1); charging n * P(0)
+    // treats a rising curve as flat for the length of the trade, which is
+    // an ever-larger discount the bigger the batch. Asserted against real
+    // rejection, not just an inequality between two numbers.
+    const { contract, ctx } = deployAndActivate();
+    const amount = CURVE_SUPPLY / 2n;
+    const flat = amount * expectedPrice(0n);
+    const real = expectedGross(0n, amount);
+
+    expect(real).toBeGreaterThan(flat);
+    const flatFees = fees(flat);
+    expect(() => contract.circuits.buyTokens(ctx, amount, flat, flatFees.creator, flatFees.platform, 1n)).toThrow(
+      "Payment does not match the curve's cost for this range",
+    );
+    const realFees = fees(real);
+    expect(() => contract.circuits.buyTokens(ctx, amount, real, realFees.creator, realFees.platform, 1n)).not.toThrow();
+  });
+
+  it('the circuit agrees with the shared mirror at every step along the curve', () => {
+    // Walks the curve and, at each position, requires the contract to accept
+    // exactly what integration/curve-pricing.ts computes and to reject one
+    // unit either side. That is a cross-implementation check: the mirror is
+    // the same function the Cardano curves are verified against, written
+    // independently of the in-circuit arithmetic, which cannot divide and
+    // reaches the answer a different way.
+    const { contract, contractAddress } = deployAndActivate();
+    let ctx = deployAndActivate().ctx;
+    let sold = 0n;
+    let ts = 1n;
+    for (const amount of [1n, 7n, 42n, 111n, 239n, 300n]) {
+      const exact = expectedGross(sold, amount);
+      const f = fees(exact);
+      expect(() => contract.circuits.buyTokens(ctx, amount, exact - 1n, f.creator, f.platform, ts)).toThrow(
+        "Payment does not match the curve's cost for this range",
+      );
+      expect(() => contract.circuits.buyTokens(ctx, amount, exact + 1n, f.creator, f.platform, ts)).toThrow(
+        "Payment does not match the curve's cost for this range",
+      );
+      const r = contract.circuits.buyTokens(ctx, amount, exact, f.creator, f.platform, ts);
+      sold += amount;
+      expect(trackLedger(lastLedger, ledger(r.context.currentQueryContext.state)).tokensSold).toBe(sold);
+      ctx = nextContext(contractAddress, r.context);
+      ts += 1n;
+    }
+    expect(sold).toBe(700n);
+  });
+
+  it('recovers what a flat batch price gave away, on this curve and on the platform default', () => {
+    // How much a flat charge gave away depends on how much of the price is
+    // the flat base: the base part is identical either way, so a curve whose
+    // base is a large share of its maximum hides more of the gap. Both sets
+    // below are measured, and the near-zero-base row independently reproduces
+    // the ~73% the finding recorded for a mid-curve batch.
+    const midShare = (params: typeof CURVE_PARAMS) => {
+      const supply = params.curve_supply;
+      const sold = (supply * 3n) / 7n;
+      const amount = supply / 7n;
+      const flat =
+        amount * (params.base_price + ((params.max_price - params.base_price) * sold * sold) / (supply * supply));
+      return (flat * 100n) / buyCost('quadratic', params, sold, amount);
+    };
+    const wholeShare = (params: typeof CURVE_PARAMS) => {
+      const flat = params.curve_supply * params.base_price;
+      return (flat * 100n) / buyCost('quadratic', params, 0n, params.curve_supply);
+    };
+
+    // This file's fixture — base is a tenth of max, so the gap is smallest.
+    expect(midShare(CURVE_PARAMS)).toBe(81n);
+    expect(wholeShare(CURVE_PARAMS)).toBe(25n);
+
+    // A curve whose base is near zero, the shape the finding measured.
+    const nearZeroBase = { base_price: 1n, max_price: 1000n, curve_supply: 1000n };
+    expect(midShare(nearZeroBase)).toBe(73n);
+
+    // CLAUDE.md's own constants: CURVE_BASE_PRICE_LOVELACE 3,
+    // CURVE_MAX_PRICE_LOVELACE 75, TOTAL_SUPPLY 1e9. Taking the whole curve
+    // in one transaction would have cost a ninth of what it is worth.
+    const platform = { base_price: 3n, max_price: 75n, curve_supply: 1_000_000_000n };
+    expect(midShare(platform)).toBe(75n);
+    expect(wholeShare(platform)).toBe(11n);
+  });
+
+  it('buying a range in one call never costs less than buying it in pieces', () => {
+    // What makes the charge additive over subdivisions, and so removes any
+    // gain from splitting or combining a trade. Rounding up at each step is
+    // what puts the inequality this way round.
+    for (const [sold, amount] of [
+      [0n, 100n],
+      [37n, 213n],
+      [500n, 250n],
+      [900n, 100n],
+    ] as const) {
+      const whole = expectedGross(sold, amount);
+      let pieces = 0n;
+      for (let i = 0n; i < amount; i += amount / 4n) {
+        pieces += expectedGross(sold + i, amount / 4n);
+      }
+      expect(pieces).toBeGreaterThanOrEqual(whole);
+    }
   });
 
   it('rejects a buy with a fee split missing the /10000 divisor (the original bug)', () => {
     const { contract, ctx } = deployAndActivate();
     const tokenAmount = 10n;
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = tokenAmount * claimedPrice;
+    const grossPayment = expectedGross(0n, tokenAmount);
     const brokenCreatorFee = grossPayment * 100n; // the original (broken) formula
 
-    expect(() =>
-      contract.circuits.buyTokens(ctx, tokenAmount, claimedPrice, grossPayment, brokenCreatorFee, 0n, 1n),
-    ).toThrow('Creator fee mismatch');
+    expect(() => contract.circuits.buyTokens(ctx, tokenAmount, grossPayment, brokenCreatorFee, 0n, 1n)).toThrow(
+      'Creator fee mismatch',
+    );
   });
 
   it('rejects a buy with mismatched fee amounts (correct total, wrong split)', () => {
     const { contract, ctx } = deployAndActivate();
     const tokenAmount = 10n;
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = tokenAmount * claimedPrice;
+    const grossPayment = expectedGross(0n, tokenAmount);
     const { creator, platform } = fees(grossPayment);
 
-    expect(() =>
-      contract.circuits.buyTokens(ctx, tokenAmount, claimedPrice, grossPayment, platform, creator, 1n),
-    ).toThrow('Creator fee mismatch');
+    expect(() => contract.circuits.buyTokens(ctx, tokenAmount, grossPayment, platform, creator, 1n)).toThrow(
+      'Creator fee mismatch',
+    );
   });
 
   it('accumulates fees correctly across multiple buys, at ARBITRARY (non-checkpoint) amounts', () => {
     const { contract, contractAddress, ctx } = deployAndActivate();
 
-    const buy1Price = expectedPrice(0n); // 100
-    const buy1Gross = 37n * buy1Price;
+    const buy1Gross = expectedGross(0n, 37n);
     const buy1Fees = fees(buy1Gross);
-    const r1 = contract.circuits.buyTokens(ctx, 37n, buy1Price, buy1Gross, buy1Fees.creator, buy1Fees.platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, 37n, buy1Gross, buy1Fees.creator, buy1Fees.platform, 1n);
 
     const ctx2 = nextContext(contractAddress, r1.context);
-    const buy2Price = expectedPrice(37n); // not a "nice" checkpoint at all
-    const buy2Gross = 213n * buy2Price;
+    const buy2Gross = expectedGross(37n, 213n);
     const buy2Fees = fees(buy2Gross);
-    const r2 = contract.circuits.buyTokens(ctx2, 213n, buy2Price, buy2Gross, buy2Fees.creator, buy2Fees.platform, 2n);
+    const r2 = contract.circuits.buyTokens(ctx2, 213n, buy2Gross, buy2Fees.creator, buy2Fees.platform, 2n);
 
     const state = trackLedger(lastLedger, ledger(r2.context.currentQueryContext.state));
     expect(state.tokensSold).toBe(250n);
@@ -342,37 +473,53 @@ describe('bonding_curve.compact — quadratic pricing', () => {
     expect(state.platformFees).toBe(buy1Fees.platform + buy2Fees.platform);
   });
 
-  it('FIXED: verifyPrice now accepts the correct floor price at a non-checkpoint sold value', () => {
+  it('accepts exactly the ceiling of the range cost, and neither neighbour', () => {
+    // The cost of a range is almost never a whole number, so what the
+    // contract accepts is the smallest integer at or above it. One unit
+    // either side must fail: below underpays the curve, above would let a
+    // caller overstate the payment the fee slices are taken from.
     const { contract, contractAddress, ctx } = deployAndActivate();
-    const r1 = contract.circuits.buyTokens(ctx, 10n, 100n, 1000n, 5n, 10n, 1n);
+    const openingGross = expectedGross(0n, 10n);
+    const openingFees = fees(openingGross);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, openingGross, openingFees.creator, openingFees.platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
     expect(trackLedger(lastLedger, ledger(r1.context.currentQueryContext.state)).tokensSold).toBe(10n);
 
-    const trueMathematicalPrice = 100.09;
-    expect(trueMathematicalPrice).toBeGreaterThan(100);
-    expect(trueMathematicalPrice).toBeLessThan(101);
+    // Confirm this range really does divide unevenly, so the test is
+    // exercising the rounding rather than an exact case where any rule agrees.
+    const [numerator, denominator] = grossRangeQuadratic(CURVE_PARAMS, 10n, 1n);
+    expect(numerator % denominator).not.toBe(0n);
 
-    const rFloor = contract.circuits.buyTokens(ctx2, 1n, 100n, 100n, 0n, 1n, 2n);
-    expect(trackLedger(lastLedger, ledger(rFloor.context.currentQueryContext.state)).tokensSold).toBe(11n);
+    const exact = expectedGross(10n, 1n);
+    expect(() => contract.circuits.buyTokens(ctx2, 1n, exact - 1n, 0n, 0n, 2n)).toThrow(
+      "Payment does not match the curve's cost for this range",
+    );
+    expect(() => contract.circuits.buyTokens(ctx2, 1n, exact + 1n, 0n, 0n, 2n)).toThrow(
+      "Payment does not match the curve's cost for this range",
+    );
 
-    expect(() => contract.circuits.buyTokens(ctx2, 1n, 101n, 101n, 0n, 1n, 2n)).toThrow('Price verification failed');
+    const exactFees = fees(exact);
+    const rCeil = contract.circuits.buyTokens(ctx2, 1n, exact, exactFees.creator, exactFees.platform, 2n);
+    expect(trackLedger(lastLedger, ledger(rCeil.context.currentQueryContext.state)).tokensSold).toBe(11n);
   });
 
   it('FIXED: verifyFeeSlice now accepts the correct floor fee for an arbitrary gross payment', () => {
     const { contract, contractAddress, ctx } = deployAndActivate();
-    const r1 = contract.circuits.buyTokens(ctx, 100n, 100n, 10_000n, 50n, 100n, 1n);
+    const openingGross = expectedGross(0n, 100n);
+    const openingFees = fees(openingGross);
+    const r1 = contract.circuits.buyTokens(ctx, 100n, openingGross, openingFees.creator, openingFees.platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
     expect(trackLedger(lastLedger, ledger(r1.context.currentQueryContext.state)).tokensSold).toBe(100n);
 
-    const gross = 1090n; // 10 tokens at price 109 (sold=100 checkpoint)
-    const floorCreatorFee = (gross * 50n) / 10_000n; // 5, floor of 5.45
-    const floorPlatformFee = (gross * 100n) / 10_000n; // 10, floor of 10.9
-    const rFloor = contract.circuits.buyTokens(ctx2, 10n, 109n, gross, floorCreatorFee, floorPlatformFee, 2n);
+    const gross = expectedGross(100n, 10n);
+    const floorCreatorFee = (gross * 50n) / 10_000n;
+    const floorPlatformFee = (gross * 100n) / 10_000n;
+    const rFloor = contract.circuits.buyTokens(ctx2, 10n, gross, floorCreatorFee, floorPlatformFee, 2n);
     expect(trackLedger(lastLedger, ledger(rFloor.context.currentQueryContext.state)).tokensSold).toBe(110n);
 
-    expect(() =>
-      contract.circuits.buyTokens(ctx2, 10n, 109n, gross, floorCreatorFee, floorPlatformFee + 1n, 2n),
-    ).toThrow('Platform fee mismatch');
+    expect(() => contract.circuits.buyTokens(ctx2, 10n, gross, floorCreatorFee, floorPlatformFee + 1n, 2n)).toThrow(
+      'Platform fee mismatch',
+    );
   });
 
   it('every buy requires receiveUnshielded, does not throw locally', () => {
@@ -382,19 +529,17 @@ describe('bonding_curve.compact — quadratic pricing', () => {
     // receiveUnshielded is wired into every buy (unconditional — this
     // contract is Tier C/NIGHT only).
     const { contract, ctx } = deployAndActivate();
-    const price = expectedPrice(0n);
-    const gross = 5n * price;
+    const gross = expectedGross(0n, 5n);
     const { creator, platform } = fees(gross);
-    const r = contract.circuits.buyTokens(ctx, 5n, price, gross, creator, platform, 1n);
+    const r = contract.circuits.buyTokens(ctx, 5n, gross, creator, platform, 1n);
     expect(trackLedger(lastLedger, ledger(r.context.currentQueryContext.state)).tokensSold).toBe(5n);
   });
 
   it('claimCurveRefund succeeds once after cancellation, for a buyer who actually paid', () => {
     const { contract, contractAddress, ctx } = deployAndActivate();
-    const price = expectedPrice(0n);
-    const gross = 10n * price;
+    const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
-    const r1 = contract.circuits.buyTokens(ctx, 10n, price, gross, creator, platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, gross, creator, platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
 
     const r2 = contract.circuits.cancelCurve(ctx2);
@@ -405,10 +550,9 @@ describe('bonding_curve.compact — quadratic pricing', () => {
 
   it('claimCurveRefund rejects when the curve is not cancelled', () => {
     const { contract, contractAddress, ctx } = deployAndActivate();
-    const price = expectedPrice(0n);
-    const gross = 10n * price;
+    const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
-    const r1 = contract.circuits.buyTokens(ctx, 10n, price, gross, creator, platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, gross, creator, platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
 
     expect(() => contract.circuits.claimCurveRefund(ctx2, fakeBytes32(5))).toThrow('Curve not cancelled');
@@ -424,10 +568,9 @@ describe('bonding_curve.compact — quadratic pricing', () => {
 
   it('claimCurveRefund rejects double-claim', () => {
     const { contract, contractAddress, ctx } = deployAndActivate();
-    const price = expectedPrice(0n);
-    const gross = 10n * price;
+    const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
-    const r1 = contract.circuits.buyTokens(ctx, 10n, price, gross, creator, platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, gross, creator, platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
     const r2 = contract.circuits.cancelCurve(ctx2);
     const ctx3 = nextContext(contractAddress, r2.context);
@@ -439,10 +582,9 @@ describe('bonding_curve.compact — quadratic pricing', () => {
 
   it('Phase 5 hygiene fix: claimCurveRefund rejects an empty (all-zero) recipient address', () => {
     const { contract, contractAddress, ctx } = deployAndActivate();
-    const price = expectedPrice(0n);
-    const gross = 10n * price;
+    const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
-    const r1 = contract.circuits.buyTokens(ctx, 10n, price, gross, creator, platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, gross, creator, platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
     const r2 = contract.circuits.cancelCurve(ctx2);
     const ctx3 = nextContext(contractAddress, r2.context);
@@ -489,11 +631,10 @@ describe('bonding_curve.compact — quadratic pricing', () => {
   it('graduates automatically at 100% sell-through', () => {
     const { contract, ctx } = deployAndActivate();
 
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = CURVE_SUPPLY * claimedPrice;
+    const grossPayment = expectedGross(0n, CURVE_SUPPLY);
     const { creator, platform } = fees(grossPayment);
 
-    const result = contract.circuits.buyTokens(ctx, CURVE_SUPPLY, claimedPrice, grossPayment, creator, platform, 1n);
+    const result = contract.circuits.buyTokens(ctx, CURVE_SUPPLY, grossPayment, creator, platform, 1n);
 
     const state = ledger(result.context.currentQueryContext.state);
     expect(state.tokensSold).toBe(CURVE_SUPPLY);
@@ -503,25 +644,23 @@ describe('bonding_curve.compact — quadratic pricing', () => {
   it('rejects buys once the curve has graduated', () => {
     const { contract, contractAddress, ctx } = deployAndActivate();
 
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = CURVE_SUPPLY * claimedPrice;
+    const grossPayment = expectedGross(0n, CURVE_SUPPLY);
     const { creator, platform } = fees(grossPayment);
-    const r1 = contract.circuits.buyTokens(ctx, CURVE_SUPPLY, claimedPrice, grossPayment, creator, platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, CURVE_SUPPLY, grossPayment, creator, platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
 
-    expect(() =>
-      contract.circuits.buyTokens(ctx2, 1n, expectedPrice(CURVE_SUPPLY), expectedPrice(CURVE_SUPPLY), 0n, 0n, 2n),
-    ).toThrow('Bonding curve not active');
+    expect(() => contract.circuits.buyTokens(ctx2, 1n, expectedPrice(CURVE_SUPPLY), 0n, 0n, 2n)).toThrow(
+      'Bonding curve not active',
+    );
   });
 
   it('rejects buying more tokens than remain on the curve', () => {
     const { contract, ctx } = deployAndActivate();
-    const claimedPrice = expectedPrice(0n);
     const overAmount = CURVE_SUPPLY + 1n;
 
-    expect(() =>
-      contract.circuits.buyTokens(ctx, overAmount, claimedPrice, overAmount * claimedPrice, 0n, 0n, 1n),
-    ).toThrow('Insufficient tokens remaining');
+    expect(() => contract.circuits.buyTokens(ctx, overAmount, expectedGross(0n, overAmount), 0n, 0n, 1n)).toThrow(
+      'Insufficient tokens remaining',
+    );
   });
 
   it('rejects the creator buying their own public bonding curve', () => {
@@ -568,19 +707,17 @@ describe('bonding_curve.compact — quadratic pricing', () => {
     const r3 = contract.circuits.activateCurve(ctx2, 1000n);
     const ctx3 = nextContext(contractAddress, r3.context);
 
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = 10n * claimedPrice;
+    const grossPayment = expectedGross(0n, 10n);
     const { creator, platform } = fees(grossPayment);
-    expect(() => contract.circuits.buyTokens(ctx3, 10n, claimedPrice, grossPayment, creator, platform, 1n)).toThrow(
+    expect(() => contract.circuits.buyTokens(ctx3, 10n, grossPayment, creator, platform, 1n)).toThrow(
       'Creator cannot buy their own bonding curve',
     );
   });
 
   it('requires the curve to be activated before any buy', () => {
     const { contract, ctx } = deployAndAdvanceToPublic(); // phase is Public, but curve not yet activated
-    const claimedPrice = expectedPrice(0n);
 
-    expect(() => contract.circuits.buyTokens(ctx, 10n, claimedPrice, 10n * claimedPrice, 1n, 1n, 1n)).toThrow(
+    expect(() => contract.circuits.buyTokens(ctx, 10n, expectedGross(0n, 10n), 1n, 1n, 1n)).toThrow(
       'Bonding curve not active',
     );
   });
@@ -614,14 +751,11 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
 
     // curveSupply=1000, so buying the whole curve (1000 tokens) is well
     // under WALLET_CAP (50,000,000) in this test's numbers.
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = CURVE_SUPPLY * claimedPrice;
+    const grossPayment = expectedGross(0n, CURVE_SUPPLY);
     const { creator, platform } = fees(grossPayment);
 
     // A full sell-through buy is comfortably under the cap and must succeed.
-    expect(() =>
-      contract.circuits.buyTokens(ctx, CURVE_SUPPLY, claimedPrice, grossPayment, creator, platform, 1n),
-    ).not.toThrow();
+    expect(() => contract.circuits.buyTokens(ctx, CURVE_SUPPLY, grossPayment, creator, platform, 1n)).not.toThrow();
   });
 
   it('regression: buyTokens rejects a purchase that would push cumulativePurchases over the cap', () => {
@@ -665,14 +799,13 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
     const rv = contract.circuits.verifyBuyerEligibility(ctx2a);
     const ctx2 = nextContext(contractAddress, rv.context);
 
-    const claimedPrice = expectedPrice(0n);
     const tokenAmount = tightCap + 1n; // exceeds tightCap (5)
-    const grossPayment = tokenAmount * claimedPrice;
+    const grossPayment = expectedGross(0n, tokenAmount);
     const { creator, platform } = fees(grossPayment);
 
-    expect(() =>
-      contract.circuits.buyTokens(ctx2, tokenAmount, claimedPrice, grossPayment, creator, platform, 1n),
-    ).toThrow('Purchase exceeds 5% wallet cap');
+    expect(() => contract.circuits.buyTokens(ctx2, tokenAmount, grossPayment, creator, platform, 1n)).toThrow(
+      'Purchase exceeds 5% wallet cap',
+    );
   });
 
   it('FIXED: cumulativePurchases is shared across separate buyTokens calls for the same identity', () => {
@@ -687,12 +820,11 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
     const d = deployAndActivate();
     const buyerDerivedKey = deriveUserPublicKey(fakeBytes32(3), LAUNCH_ID);
 
-    const claimedPrice = expectedPrice(0n);
     const tokenAmount = 25n;
-    const grossPayment = tokenAmount * claimedPrice;
+    const grossPayment = expectedGross(0n, tokenAmount);
     const { creator, platform } = fees(grossPayment);
 
-    const r = d.contract.circuits.buyTokens(d.ctx, tokenAmount, claimedPrice, grossPayment, creator, platform, 1n);
+    const r = d.contract.circuits.buyTokens(d.ctx, tokenAmount, grossPayment, creator, platform, 1n);
     const ctx2 = nextContext(d.contractAddress, r.context);
 
     // Reading cumulativePurchases for the buyer's REAL derived key (via the
@@ -1171,11 +1303,10 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
     const rv5 = d.contract.circuits.verifyBuyerEligibility(ctx5a);
     const ctx5 = nextContext(d.contractAddress, rv5.context);
 
-    const claimedPrice = expectedPrice(0n);
     const publicAmount = 10n;
-    const grossPayment = publicAmount * claimedPrice;
+    const grossPayment = expectedGross(0n, publicAmount);
     const { creator, platform } = fees(grossPayment);
-    const r6 = d.contract.circuits.buyTokens(ctx5, publicAmount, claimedPrice, grossPayment, creator, platform, 3n);
+    const r6 = d.contract.circuits.buyTokens(ctx5, publicAmount, grossPayment, creator, platform, 3n);
     const ctx6 = nextContext(d.contractAddress, r6.context);
 
     const capAfterPublic = d.contract.circuits.checkCap(ctx6, buyerKey);
@@ -1459,10 +1590,9 @@ describe('bonding_curve.compact — the design requirement: withdrawFees and gra
   /** Buys the whole curve so it graduates, accruing real fees along the way. */
   function deployActivateAndGraduate() {
     const d = deployAndActivate();
-    const claimedPrice = expectedPrice(0n);
-    const grossPayment = CURVE_SUPPLY * claimedPrice;
+    const grossPayment = expectedGross(0n, CURVE_SUPPLY);
     const { creator, platform } = fees(grossPayment);
-    const r = d.contract.circuits.buyTokens(d.ctx, CURVE_SUPPLY, claimedPrice, grossPayment, creator, platform, 1n);
+    const r = d.contract.circuits.buyTokens(d.ctx, CURVE_SUPPLY, grossPayment, creator, platform, 1n);
     const ctx = nextContext(d.contractAddress, r.context);
     return { ...d, ctx, creatorFees: creator, platformFees: platform };
   }
@@ -1514,10 +1644,9 @@ describe('bonding_curve.compact — the design requirement: withdrawFees and gra
     // Fees are now only withdrawable once Graduated, at which point
     // cancellation can never happen again.
     const { contract, contractAddress, ctx } = deployAndActivate();
-    const price = expectedPrice(0n);
-    const gross = 10n * price;
+    const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
-    const r1 = contract.circuits.buyTokens(ctx, 10n, price, gross, creator, platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, gross, creator, platform, 1n);
     const ctx2 = nextContext(contractAddress, r1.context);
     const r2 = contract.circuits.cancelCurve(ctx2);
     const ctx3 = nextContext(contractAddress, r2.context);
@@ -1530,10 +1659,9 @@ describe('bonding_curve.compact — the design requirement: withdrawFees and gra
   it('fix (2026-07-30): withdrawFees rejects while the curve is still Active, even before any cancellation', () => {
     const { contract, ctx, creatorFees, platformFees } = (() => {
       const { contract, contractAddress, ctx } = deployAndActivate();
-      const price = expectedPrice(0n);
-      const gross = 10n * price;
+      const gross = expectedGross(0n, 10n);
       const { creator, platform } = fees(gross);
-      const r1 = contract.circuits.buyTokens(ctx, 10n, price, gross, creator, platform, 1n);
+      const r1 = contract.circuits.buyTokens(ctx, 10n, gross, creator, platform, 1n);
       return {
         contract,
         ctx: nextContext(contractAddress, r1.context),
@@ -1695,16 +1823,14 @@ describe('bonding_curve.compact — buyer verification is separate from buying',
     // proof of its own, and is still accepted.
     const { contract, contractAddress, ctx } = deployAndActivate();
 
-    const p1 = expectedPrice(0n);
-    const g1 = 10n * p1;
+    const g1 = expectedGross(0n, 10n);
     const f1 = fees(g1);
-    const r1 = contract.circuits.buyTokens(ctx, 10n, p1, g1, f1.creator, f1.platform, 1n);
+    const r1 = contract.circuits.buyTokens(ctx, 10n, g1, f1.creator, f1.platform, 1n);
     const ctx1 = nextContext(contractAddress, r1.context);
 
-    const p2 = expectedPrice(10n);
-    const g2 = 10n * p2;
+    const g2 = expectedGross(10n, 10n);
     const f2 = fees(g2);
-    const r2 = contract.circuits.buyTokens(ctx1, 10n, p2, g2, f2.creator, f2.platform, 2n);
+    const r2 = contract.circuits.buyTokens(ctx1, 10n, g2, f2.creator, f2.platform, 2n);
 
     expect(ledger(r2.context.currentQueryContext.state).tokensSold).toBe(20n);
   });
@@ -1718,10 +1844,9 @@ describe('bonding_curve.compact — buyer verification is separate from buying',
     const rUpdate = contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123));
     const ctxU = nextContext(contractAddress, rUpdate.context);
 
-    const price = expectedPrice(0n);
-    const gross = 10n * price;
+    const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
-    expect(() => contract.circuits.buyTokens(ctxU, 10n, price, gross, creator, platform, 1n)).toThrow(
+    expect(() => contract.circuits.buyTokens(ctxU, 10n, gross, creator, platform, 1n)).toThrow(
       'Allowlist changed since this buyer was verified',
     );
   });
@@ -1731,10 +1856,9 @@ describe('bonding_curve.compact — buyer verification is separate from buying',
     const r = contract.circuits.activateCurve(ctx, 1000n);
     const ctxA = nextContext(contractAddress, r.context);
 
-    const price = expectedPrice(0n);
-    const gross = 10n * price;
+    const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
-    expect(() => contract.circuits.buyTokens(ctxA, 10n, price, gross, creator, platform, 1n)).toThrow(
+    expect(() => contract.circuits.buyTokens(ctxA, 10n, gross, creator, platform, 1n)).toThrow(
       'Buyer has not proven allowlist membership',
     );
   });
@@ -2209,5 +2333,33 @@ describe('bonding_curve.compact — the allowlist is fixed once the launch is de
     expect(() => d.contract.circuits.updateAllowlistRoot(ctxC, fakeBytes32(123))).toThrow(
       'Allowlist is fixed once the launch has graduated or been cancelled',
     );
+  });
+});
+
+describe('bonding_curve.compact — the curve parameters a launch may deploy with', () => {
+  it('refuses a curve that starts at zero, where the first buy would be free', () => {
+    // With a zero base the sum of the prices of the opening positions is
+    // itself zero, so a buyer could take any amount for nothing.
+    expect(() => deployWithPrices(0n, MAX_PRICE)).toThrow('basePrice must be positive');
+  });
+
+  it('accepts the smallest positive base', () => {
+    expect(() => deployWithPrices(1n, MAX_PRICE)).not.toThrow();
+  });
+
+  it('refuses prices and supplies beyond what the cost arithmetic is bounded for', () => {
+    // These two bounds are what hold every product in curveCostRange under
+    // the compiler's 124-bit ceiling. Both sit far above any real launch —
+    // the supply bound exceeds the platform's own 1e9 hard cap — but a
+    // deploy past them would be arithmetic the circuit cannot carry.
+    expect(() => deployWithPrices(BASE_PRICE, 2_147_483_648n)).toThrow('maxPrice out of safe range');
+    expect(() => deployWithPrices(BASE_PRICE, MAX_PRICE, 1_073_741_824n)).toThrow('curveSupply out of safe range');
+    expect(() => deployWithPrices(BASE_PRICE, 2_147_483_647n)).not.toThrow();
+    expect(() => deployWithPrices(BASE_PRICE, MAX_PRICE, 1_073_741_823n)).not.toThrow();
+  });
+
+  it('still refuses a maximum at or below the base', () => {
+    expect(() => deployWithPrices(500n, 500n)).toThrow('maxPrice must exceed basePrice');
+    expect(() => deployWithPrices(500n, 499n)).toThrow('maxPrice must exceed basePrice');
   });
 });

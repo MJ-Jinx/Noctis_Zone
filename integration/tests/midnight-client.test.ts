@@ -75,6 +75,7 @@ import {
   type MerkleProofEntry,
   type UserSecretKey,
 } from '../../contracts/midnight/witnesses.js';
+import { buyCost } from '../curve-pricing.js';
 import {
   checkTreasuryHealth,
   computeBondingCurveFees,
@@ -937,21 +938,45 @@ describe('NoctisLaunchManager.revealDarkVeilBuyCommit', () => {
 });
 
 describe('NoctisLaunchManager.buyTokens', () => {
-  it('computes fee slices via computeBondingCurveFees and calls buyTokens with all 6 args in order', async () => {
+  const CURVE = { base_price: 100n, max_price: 1_000n, curve_supply: 1_000_000n };
+
+  it('prices the range itself and calls buyTokens with all 5 args in order', async () => {
     const buyTokensFn = vi.fn().mockResolvedValue({ ok: true });
     const client = new NoctisMidnightClient(USER_SK);
     client.bondingCurve = fakeHandle({ buyTokens: buyTokensFn });
     const manager = new NoctisLaunchManager(client);
 
-    await manager.buyTokens(1_000n, 50n, 1_000_000n, 9_500n);
+    // The gross is not an argument: it is what the curve charges for the
+    // 1,000 positions starting at 500,000, which the circuit recomputes and
+    // will refuse anything else for.
+    const expectedGross = buyCost('quadratic', CURVE, 500_000n, 1_000n);
+    const { creatorFee, platformFee } = computeBondingCurveFees(expectedGross);
+    await manager.buyTokens(1_000n, CURVE, 500_000n, 9_500n);
 
-    expect(buyTokensFn).toHaveBeenCalledWith(1_000n, 50n, 1_000_000n, 5_000n, 10_000n, 9_500n);
+    expect(buyTokensFn).toHaveBeenCalledWith(1_000n, expectedGross, creatorFee, platformFee, 9_500n);
+  });
+
+  it('charges more for the same size the further along the curve it sits', async () => {
+    // A flat-priced batch would charge the same either way. Asserted through
+    // the client rather than the pricing module, so a client that stopped
+    // passing the position through would fail here.
+    const buyTokensFn = vi.fn().mockResolvedValue({ ok: true });
+    const client = new NoctisMidnightClient(USER_SK);
+    client.bondingCurve = fakeHandle({ buyTokens: buyTokensFn });
+    const manager = new NoctisLaunchManager(client);
+
+    await manager.buyTokens(1_000n, CURVE, 0n, 1n);
+    await manager.buyTokens(1_000n, CURVE, 900_000n, 2n);
+
+    const early = buyTokensFn.mock.calls[0]?.[1] as bigint;
+    const late = buyTokensFn.mock.calls[1]?.[1] as bigint;
+    expect(late).toBeGreaterThan(early);
   });
 
   it('throws when bondingCurve is not connected', async () => {
     const client = new NoctisMidnightClient(USER_SK);
     const manager = new NoctisLaunchManager(client);
-    await expect(manager.buyTokens(1n, 1n, 1n, 1n)).rejects.toThrow(/bonding_curve not connected/);
+    await expect(manager.buyTokens(1n, CURVE, 0n, 1n)).rejects.toThrow(/bonding_curve not connected/);
   });
 });
 

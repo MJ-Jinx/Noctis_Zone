@@ -663,71 +663,112 @@ pure circuit computeRegistrationCommit(
   });
 }
 
-// Verify a price calculation using multiplication only (no division in-circuit)
-// Given:  price = basePrice + ((maxPrice - basePrice) * sold^2) / curveSupply^2
-// Verify claimedPrice is the FLOOR of that true value:
-//   claimedPrice * curveSupply^2 <= basePrice*curveSupply^2 + priceRange*sold^2
-//                                 < (claimedPrice + 1) * curveSupply^2
+// 6 * sum of i^2 for i in [0, k), which is (k-1)*k*(2k-1), and 0 at k = 0.
 //
-// Fix (2026-07-09): the previous version checked EXACT equality on Field-
-// cast values, which only has a solution when the true price happens to be
-// an exact integer — true for a small minority of `sold` values, so most
-// real purchases could never construct a passing claimedPrice at all. Field
-// only supports == (no <, <=), which is what forced exact equality in the
-// first place.
+// The factor of 6 is carried rather than divided out — Compact cannot
+// divide in-circuit, and the caller below pairs this with a denominator
+// that carries the same 6, so it cancels in the comparison instead.
+pure circuit sixSumSquaresBelow(k: Uint<30>): Uint<91> {
+  // Both subtractions would underflow at k = 0, and the product is zero
+  // there anyway, so guard them rather than special-casing the result.
+  const kMinusOne = k == 0 ? 0 : (k - 1) as Uint<30>;
+  const twoKMinusOne = k == 0 ? 0 : (((2 * (k as Uint<31>)) as Uint<31>) - 1) as Uint<31>;
+  const pair = ((kMinusOne as Uint<60>) * (k as Uint<60>)) as Uint<60>;
+  return ((pair as Uint<91>) * (twoKMinusOne as Uint<91>)) as Uint<91>;
+}
+
+// What a buy of `amount` tokens costs when `sold` are already gone, as an
+// exact (numerator, denominator) pair.
 //
-// This version avoids Field entirely by declaring every operand at a
-// realistic, narrow Uint width, so relational operators stay available for
-// a floor-rounding double inequality instead. Compact's non-Field
-// multiplication has a real, empirically-confirmed ceiling — NOT simply
-// "fits in the target's declared width" as the compiler's own error message
-// implies: a same-width-operand multiplication only compiles when the
-// RESULT type is Uint<124> or narrower (Uint<125>+ forces the "cast to
-// Field" error even when the true value provably fits — confirmed by
-// bisection: Uint<122> result compiles, Uint<125> does not, regardless of
-// operand width or headroom). Every width below is chosen to respect that
-// 124-bit ceiling on each individual multiplication step:
-//   curveSupply/sold           <= 2^40  (~1.0995e12, matches the existing
-//                                        curveSupply constructor bound)
-//   curveSupply^2, sold^2      <= 2^80  (40+40, one mult., well under 124)
-//   basePrice/maxPrice/        <= 2^44  (~1.76e13 — vastly more than any
-//     claimedPrice/priceRange              realistic microNIGHT price-per-
-//                                          token could ever be)
-//   price * supply^2           <= 2^124 (44+80, exactly at the ceiling)
-// The two 124-bit products are then only ADDED (never multiplied further),
-// and addition has no comparable ceiling — the pre-existing, already-
-// compiling ledger code in this same file adds two Uint<128> values, so
-// summing two Uint<124> values into a Uint<125> is unremarkable by
-// comparison. Narrowing casts are runtime-checked (confirmed empirically:
-// an out-of-range cast throws, it does not silently wrap), so this is safe
-// even if a caller somehow bypassed the bound asserts below.
-circuit verifyPrice(
+// The curve is P(x) = basePrice + priceRange * x^2 / curveSupply^2, so a buy
+// spanning positions [sold, sold+amount) costs the SUM of the prices of the
+// positions it takes, not the price of the first one repeated. Summing the
+// squares in closed form:
+//
+//   numerator   = 6*S^2*n*base + r*(sixSumSquaresBelow(s+n) - sixSumSquaresBelow(s))
+//   denominator = 6*S^2
+//
+// where s = sold, n = amount, S = curveSupply, r = maxPrice - basePrice.
+//
+// Returned unreduced so the caller decides the rounding direction. A buy
+// must round UP, which is what makes buying a range in one call cost the
+// same or more than buying it in pieces — the additivity that stops a
+// subdivided trade being cheaper than a whole one.
+//
+// WIDTHS. Compact's non-Field multiplication has an empirically-confirmed
+// ceiling: a multiplication only compiles when its RESULT type is Uint<124>
+// or narrower, regardless of operand width or how much headroom the true
+// value has (Uint<122> compiles, Uint<125> does not). Writing sigma for the
+// bits in a token count and pi for the bits in a price, the three products
+// here each land on the same constraint, 3*sigma + pi <= 121:
+//
+//   r * delta            pi + (3*sigma + 1)
+//   6 * S^2 * n * base   3 + 2*sigma + sigma + pi
+//   claimedGross * den   (sigma + pi) + (3 + 2*sigma)
+//
+// So sigma = 30 and pi = 31, enforced by the constructor's bounds on
+// curveSupply and maxPrice. Both are far above anything a real launch
+// reaches: sigma = 30 covers a token count of 1,073,741,823, above
+// CLAUDE.md's own 1,000,000,000 hard cap on total supply, and pi = 31
+// covers a price of 2,147,483,647 microNIGHT per token.
+//
+// Narrowing casts are runtime-checked — an out-of-range cast throws rather
+// than silently wrapping — so these hold even if a caller reached this with
+// values the asserts had not already bounded.
+pure circuit curveCostRange(
+  sold: Uint<30>,
+  amount: Uint<30>,
+  supply: Uint<30>,
+  base: Uint<31>,
+  range: Uint<31>
+): [Uint<126>, Uint<63>] {
+  const supplySquared = ((supply as Uint<60>) * (supply as Uint<60>)) as Uint<60>;
+  const denominator = ((6 as Uint<63>) * (supplySquared as Uint<63>)) as Uint<63>;
+
+  const flat = ((denominator as Uint<93>) * (amount as Uint<93>)) as Uint<93>;
+  const term1 = ((flat as Uint<124>) * (base as Uint<124>)) as Uint<124>;
+
+  const upper = sixSumSquaresBelow(((sold as Uint<31>) + (amount as Uint<31>)) as Uint<30>);
+  const lower = sixSumSquaresBelow(sold);
+  const delta = (upper - lower) as Uint<91>;
+  const term2 = ((delta as Uint<122>) * (range as Uint<122>)) as Uint<122>;
+
+  return [((term1 as Uint<126>) + (term2 as Uint<126>)) as Uint<126>, denominator];
+}
+
+// Verify a caller's claimed cost is the CEILING of what the curve charges
+// for the range being bought:
+//
+//   claimedGross * den >= num   and   claimedGross * den < num + den
+//
+// which together say claimedGross is the smallest integer at or above
+// num/den. Ceiling rather than floor because every rounding decision on a
+// buy must favour the curve, not the buyer.
+circuit verifyCurveCost(
   sold: Uint<128>,
-  claimedPrice: Uint<128>
+  amount: Uint<128>,
+  claimedGross: Uint<128>
 ): Boolean {
-  assert(disclose(sold <= 1099511627775), "sold exceeds safe range"); // 2^40 - 1
-  assert(disclose(claimedPrice <= 17592186044415), "claimedPrice exceeds safe range"); // 2^44 - 1
+  assert(disclose(sold <= 1073741823), "sold exceeds safe range"); // 2^30 - 1
+  assert(disclose(amount <= 1073741823), "amount exceeds safe range"); // 2^30 - 1
+  assert(disclose(claimedGross <= 2305843009213693951), "claimedGross exceeds safe range"); // 2^61 - 1
 
-  const soldN = sold as Uint<40>;
-  const curveSupplyN = curveSupply as Uint<40>;
-  const claimedPriceN = claimedPrice as Uint<44>;
-  const basePriceN = basePrice as Uint<44>;
-  const priceRangeN = (maxPrice - basePrice) as Uint<44>;
+  const cost = curveCostRange(
+    sold as Uint<30>,
+    amount as Uint<30>,
+    curveSupply as Uint<30>,
+    basePrice as Uint<31>,
+    (maxPrice - basePrice) as Uint<31>
+  );
+  const numerator = cost[0];
+  const denominator = cost[1];
 
-  const supplySquared = ((curveSupplyN as Uint<80>) * (curveSupplyN as Uint<80>)) as Uint<80>;
-  const soldSquared = ((soldN as Uint<80>) * (soldN as Uint<80>)) as Uint<80>;
-
-  const term1 = ((basePriceN as Uint<124>) * (supplySquared as Uint<124>)) as Uint<124>;
-  const term2 = ((priceRangeN as Uint<124>) * (soldSquared as Uint<124>)) as Uint<124>;
-  const trueValueTimesSupplySquared = ((term1 as Uint<125>) + (term2 as Uint<125>)) as Uint<125>;
-
-  const claimedTimesSupplySquared = ((claimedPriceN as Uint<124>) * (supplySquared as Uint<124>)) as Uint<124>;
-  const nextClaimedTimesSupplySquared =
-    ((claimedTimesSupplySquared as Uint<125>) + (supplySquared as Uint<125>)) as Uint<125>;
+  const claimedTimesDen = ((claimedGross as Uint<124>) * (denominator as Uint<124>)) as Uint<124>;
+  const numPlusDen = ((numerator as Uint<127>) + (denominator as Uint<127>)) as Uint<127>;
 
   return disclose(
-    (claimedTimesSupplySquared as Uint<125>) <= trueValueTimesSupplySquared
-      && trueValueTimesSupplySquared < nextClaimedTimesSupplySquared
+    (claimedTimesDen as Uint<127>) >= (numerator as Uint<127>)
+      && (claimedTimesDen as Uint<127>) < numPlusDen
   );
 }
 
@@ -885,11 +926,18 @@ constructor(
   creatorAddr_: Bytes<32>,
   lpEscrowAddr_: Bytes<32>
 ) {
-  // Sanity bound on curveSupply so curveSupply^2 * priceRange in verifyPrice
-  // can't be pushed into Uint<128> overflow by a misconfigured deploy.
-  assert(disclose(curveSupply_ > 0 && curveSupply_ <= 1000000000000), "curveSupply out of safe range");
+  // These two bounds are what keep every multiplication in curveCostRange
+  // under Compact's 124-bit product ceiling — see that circuit's WIDTHS
+  // note for the derivation. Both sit above anything a real launch reaches:
+  // the token bound exceeds CLAUDE.md's 1,000,000,000 hard cap on total
+  // supply, and the price bound is 2,147,483,647 microNIGHT per token.
+  assert(disclose(curveSupply_ > 0 && curveSupply_ <= 1073741823), "curveSupply out of safe range"); // 2^30 - 1
   assert(disclose(maxPrice_ > basePrice_), "maxPrice must exceed basePrice");
-  assert(disclose(maxPrice_ <= 17592186044415), "maxPrice out of safe range"); // 2^44 - 1
+  assert(disclose(maxPrice_ <= 2147483647), "maxPrice out of safe range"); // 2^31 - 1
+  // A curve starting at zero would hand its first buyer whatever they asked
+  // for at no cost, however large, since the sum of the prices of the
+  // positions they take would itself be zero.
+  assert(disclose(basePrice_ > 0), "basePrice must be positive");
 
   launchId = disclose(launchId_);
   allowlistRoot = disclose(allowlistRoot_);
@@ -1876,7 +1924,6 @@ export circuit verifyBuyerEligibility(): [] {
 // arbitrary buyers the way a Tier A/B public curve is.
 export circuit buyTokens(
   tokenAmount: Uint<128>,
-  claimedPrice: Uint<128>,
   grossPayment: Uint<128>,
   claimedCreatorFee: Uint<128>,
   claimedPlatformFee: Uint<128>,
@@ -1890,20 +1937,13 @@ export circuit buyTokens(
   assert(disclose(tokenAmount > 0), "Must buy positive amount");
   assert(disclose(tokenAmount <= remaining), "Insufficient tokens remaining");
 
-  // Verify the claimed price matches the quadratic bonding curve formula —
-  // see verifyPrice for the actual cross-multiplication check.
+  // Verify the payment is what the curve charges for the range of positions
+  // this buy takes — the SUM of their prices, rounded up. See
+  // verifyCurveCost for the cross-multiplication that establishes it.
   assert(
-    disclose(verifyPrice(tokensSold, claimedPrice)),
-    "Price verification failed"
+    disclose(verifyCurveCost(tokensSold, tokenAmount, grossPayment)),
+    "Payment does not match the curve's cost for this range"
   );
-
-  // Compute the gross payment (tokenAmount * claimedPrice) and verify it
-  // matches what the caller provided.
-  assert(disclose(tokenAmount <= 1099511627775), "tokenAmount exceeds safe range"); // 2^40 - 1
-  assert(disclose(claimedPrice <= 17592186044415), "claimedPrice exceeds safe range"); // 2^44 - 1
-  const expectedGross =
-    ((tokenAmount as Uint<40>) as Uint<84>) * ((claimedPrice as Uint<44>) as Uint<84>);
-  assert(disclose(grossPayment == (expectedGross as Uint<128>)), "Payment amount mismatch");
 
   // Verify each claimed fee slice against the fee config's basis points.
   assert(disclose(verifyFeeSlice(grossPayment, feeConfig.creatorBps, claimedCreatorFee)), "Creator fee mismatch");

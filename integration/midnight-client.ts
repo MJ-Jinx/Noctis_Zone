@@ -75,6 +75,7 @@ import {
   vestingWitnesses,
 } from '../contracts/midnight/witnesses.js';
 import { asEffectContract } from './compact-adapter.js';
+import { buyCost, type CurveParams } from './curve-pricing.js';
 
 // ============================================================================
 // PER-PSM COMPILED CONTRACT FACTORIES
@@ -1163,12 +1164,20 @@ export class NoctisLaunchManager {
    * Cardano transaction, not a Midnight circuit call — build and submit
    * that through the Cardano tx-building path instead.
    */
-  async buyTokens(tokenAmount: bigint, claimedPrice: bigint, grossPayment: bigint, timestamp: bigint) {
+  async buyTokens(tokenAmount: bigint, curve_: CurveParams, tokensSold: bigint, timestamp: bigint) {
     const curve = required(this.client.bondingCurve, 'bonding_curve');
 
+    // Computed here rather than accepted from the caller. What the curve
+    // charges is a function of its own sealed parameters and how much has
+    // already sold, so there is no figure a caller could supply that this
+    // could not derive — and the circuit recomputes it independently and
+    // refuses anything else. `buyCost` is the same shared mirror the Cardano
+    // curves are checked against, so all three tiers price from one
+    // implementation.
+    const grossPayment = buyCost('quadratic', curve_, tokensSold, tokenAmount);
     const { creatorFee, platformFee } = computeBondingCurveFees(grossPayment);
 
-    return curve.callTx.buyTokens(tokenAmount, claimedPrice, grossPayment, creatorFee, platformFee, timestamp);
+    return curve.callTx.buyTokens(tokenAmount, grossPayment, creatorFee, platformFee, timestamp);
   }
 
   // --- Graduation (sequential, not atomic — see file header) ---
