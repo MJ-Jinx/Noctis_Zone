@@ -320,3 +320,47 @@ describe('creator_escrow.compact — cancelLaunch authorization (GitHub #68 fix,
     expect(() => contract.circuits.cancelLaunch(ctx2)).toThrow('Already cancelled');
   });
 });
+
+describe('creator_escrow.compact — a dissolved CTO leaves a claimable escrow', () => {
+  /** Graduates with nothing accrued: escrowAmount and claimedAmount both 0. */
+  function deployAndCloseEmpty(graduationTimestamp = 500n) {
+    const d = deploy();
+    const pinned = nextContextAtTime(d.contractAddress, d.ctx, Number(graduationTimestamp));
+    const r = d.contract.circuits.closeEscrowAtGraduation(pinned, graduationTimestamp);
+    return { ...d, ctx: nextContext(d.contractAddress, r.context) };
+  }
+
+  it('returns to Closed even when nothing is claimable at that instant', () => {
+    // The transition used to be conditional on there being unclaimed funds,
+    // so an escrow holding nothing stayed in CTORedirected — a state
+    // claimFees refuses — with no way back. An escrow closing empty is not
+    // exotic: neither tier's bonding curve deposits here today, so this is
+    // the shape one currently graduates in.
+    const { contract, contractAddress, ctx } = deployAndCloseEmpty();
+    const communityKey = deriveCommunityKey(fakeBytes32(4));
+    const rTrigger = contract.circuits.triggerCTO(ctx, fakeBytes32(300), communityKey);
+    const ctxCto = nextContext(contractAddress, rTrigger.context);
+
+    const rDissolve = contract.circuits.dissolveCTO(ctxCto, fakeBytes32(301));
+    expect(ledger(rDissolve.context.currentQueryContext.state).escrowState).toBe(EscrowState.Closed);
+  });
+
+  it('a fee arriving after that dissolve is claimable, rather than locked forever', () => {
+    // The consequence as the scenario it really is. The escrow does not stop
+    // existing when a CTO dissolves: depositFees still accepts, ctoTriggered
+    // is false so the fees are the creator's again, and before this fix
+    // claimFees refused every one of them for the life of the launch.
+    const { contract, contractAddress, ctx } = deployAndCloseEmpty();
+    const communityKey = deriveCommunityKey(fakeBytes32(4));
+    const rTrigger = contract.circuits.triggerCTO(ctx, fakeBytes32(302), communityKey);
+    const ctxCto = nextContext(contractAddress, rTrigger.context);
+    const rDissolve = contract.circuits.dissolveCTO(ctxCto, fakeBytes32(303));
+    const ctxDissolved = nextContext(contractAddress, rDissolve.context);
+
+    const rDeposit = contract.circuits.depositFees(ctxDissolved, 4_000n);
+    const ctxDeposited = nextContext(contractAddress, rDeposit.context);
+    const pinnedLater = nextContextAtTime(contractAddress, ctxDeposited, 700);
+    const rSecond = contract.circuits.claimFees(pinnedLater, 4_000n, 700n, fakeBytes32(5));
+    expect(ledger(rSecond.context.currentQueryContext.state).claimedAmount).toBe(4_000n);
+  });
+});

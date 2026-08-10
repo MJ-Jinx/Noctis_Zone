@@ -222,3 +222,54 @@ describe('lp_escrow.compact — CTO support', () => {
     );
   });
 });
+
+// dissolveCTO was the only state-changing, access-controlled circuit in any
+// of these contracts with no test calling it at all — every other uncovered
+// circuit is a read-only getter. It governs who controls a launch's locked
+// LP after a community takeover is reversed, so it gets the same treatment
+// its trigger counterpart already had.
+describe('lp_escrow.compact — dissolveCTO', () => {
+  function deployAndTrigger() {
+    const d = deploy();
+    const r = d.contract.circuits.triggerCTO(d.ctx, fakeBytes32(220), fakeBytes32(4));
+    return { ...d, ctx: nextContext(d.contractAddress, r.context) };
+  }
+
+  it('clears ctoTriggered and the community wallet with a governor signature', () => {
+    const { contract, ctx } = deployAndTrigger();
+    const result = contract.circuits.dissolveCTO(ctx, fakeBytes32(221));
+    const state = ledger(result.context.currentQueryContext.state);
+    expect(state.ctoTriggered).toBe(false);
+    expect(state.communityWallet).toEqual(fakeBytes32(0));
+  });
+
+  it('rejects a caller who is not the governor', () => {
+    const attacker = new Contract<PrivateState>({
+      getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(99) }],
+      getCommunitySecret: (_ctx) => [undefined, { bytes: fakeBytes32(4) }],
+    });
+    const { ctx } = deployAndTrigger();
+    expect(() => attacker.circuits.dissolveCTO(ctx, fakeBytes32(222))).toThrow('Only governor can dissolve CTO');
+  });
+
+  it('rejects a dissolve when no CTO is active', () => {
+    const { contract, ctx } = deploy();
+    expect(() => contract.circuits.dissolveCTO(ctx, fakeBytes32(223))).toThrow('CTO not triggered');
+  });
+
+  it('requires the dissolve to name the proposal that authorised it', () => {
+    const { contract, ctx } = deployAndTrigger();
+    expect(() => contract.circuits.dissolveCTO(ctx, fakeBytes32(0))).toThrow('CTO dissolve must name the proposal');
+  });
+
+  it('refuses to act on a proposal this contract has already consumed', () => {
+    // A governance outcome is spent once here. Without this, one passed
+    // proposal could be replayed to flip authority back and forth.
+    const { contract, contractAddress, ctx } = deployAndTrigger();
+    const r = contract.circuits.dissolveCTO(ctx, fakeBytes32(224));
+    const ctx2 = nextContext(contractAddress, r.context);
+    const rRetrigger = contract.circuits.triggerCTO(ctx2, fakeBytes32(225), fakeBytes32(4));
+    const ctx3 = nextContext(contractAddress, rRetrigger.context);
+    expect(() => contract.circuits.dissolveCTO(ctx3, fakeBytes32(224))).toThrow('already been acted on here');
+  });
+});

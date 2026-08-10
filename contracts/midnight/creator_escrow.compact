@@ -302,14 +302,27 @@ export circuit dissolveCTO(proposalId: Bytes<32>): [] {
   escrowAmount = disclose((escrowAmount + unclaimedPostCto) as Uint<128>);
   postCtoFees = disclose(communityClaimedAmount);
 
-  // Return to Closed (claimable) state if there are still unclaimed funds.
-  // Simplification: assumes CTO was triggered post-graduation, the common
-  // case in practice — if triggerCTO ever fires pre-graduation (escrowState
-  // was Active, not Closed), dissolving still routes to Closed rather than
-  // back to Active. Revisit if a pre-graduation CTO trigger path is needed.
-  if (disclose(claimedAmount < escrowAmount)) {
-    escrowState = EscrowState.Closed;
-  }
+  // Return to Closed, whether or not anything is claimable right now.
+  //
+  // This used to be conditional on `claimedAmount < escrowAmount`, which left
+  // an escrow that happened to be fully drawn down sitting in CTORedirected
+  // permanently. Nothing is stranded at that instant — there is nothing to
+  // claim — but the escrow does not stop existing: depositFees still accepts
+  // fees afterwards, `ctoTriggered` being false routes them to the creator's
+  // own balance, and claimFees requires Closed. Every fee arriving after that
+  // point would have been unclaimable by anyone, forever.
+  //
+  // depositFees already refuses FullyClaimed and Cancelled for exactly this
+  // reason — "deposit would be unclaimable". A dissolved CTO left behind the
+  // same shape without the same guard, so the state machine is what changes
+  // here rather than the deposit check: after a dissolve the escrow really is
+  // claimable again, and Closed is what says so.
+  //
+  // Simplification, unchanged: this assumes CTO was triggered
+  // post-graduation, the common case — if triggerCTO ever fires
+  // pre-graduation (escrowState was Active, not Closed), dissolving still
+  // routes to Closed rather than back to Active.
+  escrowState = EscrowState.Closed;
 }
 
 // Deposit fees into escrow. After CTO, fees go to the post-CTO accumulator
