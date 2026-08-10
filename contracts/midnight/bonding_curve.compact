@@ -178,8 +178,17 @@ struct BuyRecord {
   timestamp: Uint<64>;
 }
 
-// Input for buy record ID generation
+// Input for buy record ID generation.
+//
+// `domain` leads every hashed struct in this file, and every one carries a
+// different constant. `persistentHash` hashes a value's ENCODED FIELDS, not
+// its type — two structs with the same field types in the same order hash
+// identically for the same values, and a `Vector<n, Bytes<32>>` hashes
+// identically to an n-field struct of `Bytes<32>`. So a distinct leading
+// constant, not the declared type, is what keeps one kind of commitment out
+// of another's value space.
 struct BuyRecordIdInput {
+  domain: Bytes<32>;
   buyerKey: Bytes<32>;
   launchId: Bytes<32>;
   amount: Uint<128>;
@@ -191,6 +200,7 @@ struct BuyRecordIdInput {
 // field — same fix and reasoning as eligibility_gate.compact's parallel
 // struct (this merged Tier C contract has its own copy of the same bug).
 struct RegistrationCommitInput {
+  domain: Bytes<32>;
   userKey: Bytes<32>;
   launchId: Bytes<32>;
   bondAmount: Uint<128>;
@@ -241,6 +251,7 @@ struct BuyCommit {
 
 // Input for computing buy commitment from private data
 struct BuyCommitInput {
+  domain: Bytes<32>;
   buyerKey: Bytes<32>;
   launchId: Bytes<32>;
   tokenAmount: Uint<128>;
@@ -248,18 +259,7 @@ struct BuyCommitInput {
   nonce: Bytes<32>;
 }
 
-// Input for computing nullifier (prevents double-buying)
-// Fix (2026-07-21, High): computeNullifier below (buyerKey +
-// launchId, both public) is no longer used to GATE submitBuyCommit — see
-// BuyNullifierInput/computeBuyNullifier and that circuit's own comment for
-// why. Kept only as a standalone pure hash helper; nothing in this file
-// calls it anymore.
-struct NullifierInput {
-  buyerKey: Bytes<32>;
-  launchId: Bytes<32>;
-}
-
-// Input for computing the REAL buy nullifier (fix, 2026-07-21).
+// Input for computing the buy nullifier.
 struct BuyNullifierInput {
   domain: Bytes<32>;
   buyerSecret: Bytes<32>;
@@ -279,6 +279,7 @@ export struct FairLaunchCert {
 
 // Input for certificate hash computation
 struct CertHashInput {
+  domain: Bytes<32>;
   launchId: Bytes<32>;
   totalParticipants: Uint<64>;
   totalTokensAllocated: Uint<128>;
@@ -655,6 +656,7 @@ pure circuit computeRegistrationCommit(
   bond: Uint<128>
 ): Bytes<32> {
   return persistentHash<RegistrationCommitInput>(RegistrationCommitInput {
+    domain: pad(32, "noctis:dv:reg:commit:v1"),
     userKey: userKey,
     launchId: launch,
     bondAmount: bond
@@ -816,6 +818,7 @@ pure circuit computeBuyCommit(
   nonce: Bytes<32>
 ): Bytes<32> {
   return persistentHash<BuyCommitInput>(BuyCommitInput {
+    domain: pad(32, "noctis:dv:buy:commit:v1"),
     buyerKey: buyerKey,
     launchId: launch,
     tokenAmount: tokenAmount,
@@ -824,28 +827,11 @@ pure circuit computeBuyCommit(
   });
 }
 
-// Compute nullifier — unique per (buyer, launch), prevents double-buying
-// without revealing which buyer is associated with which commitment
-// Fix (2026-07-21, High): no longer called by submitBuyCommit/
-// cancelBuyCommit — see computeBuyNullifier below.
-pure circuit computeNullifier(
-  buyerKey: Bytes<32>,
-  launch: Bytes<32>
-): Bytes<32> {
-  return persistentHash<NullifierInput>(NullifierInput {
-    buyerKey: buyerKey,
-    launchId: launch
-  });
-}
-
-// Fix (2026-07-21, Compact security-review pass — High): same
-// finding and fix as eligibility_gate.compact's computeBuyNullifier (this
-// merged Tier C contract has its own identical copy of the guarded
-// circuit) — the buy nullifier used to be a free caller-supplied parameter
-// on submitBuyCommit, letting a single registrant submit unlimited buy
-// commitments, and computeNullifier's public inputs made every registrant's
-// nullifier precomputable by anyone. Fixed by deriving from the caller's
-// SECRET key bytes instead of their public derived key.
+// A buyer's nullifier for this launch. Derived from the caller's SECRET
+// key bytes, so only the holder of that secret can construct it and no
+// observer can precompute a registrant's nullifier from public data —
+// which is what lets submitBuyCommit admit exactly one commitment per
+// registrant without naming who committed.
 pure circuit computeBuyNullifier(
   buyerSecret: Bytes<32>,
   launch: Bytes<32>
@@ -866,6 +852,7 @@ pure circuit computeCertHash(
   closeTime: Uint<64>
 ): Bytes<32> {
   return persistentHash<CertHashInput>(CertHashInput {
+    domain: pad(32, "noctis:dv:cert:v1"),
     launchId: launch,
     totalParticipants: participants,
     totalTokensAllocated: tokensAllocated,
@@ -1992,6 +1979,7 @@ export circuit buyTokens(
 
   // Record the buy
   const recordId = persistentHash<BuyRecordIdInput>(BuyRecordIdInput {
+    domain: pad(32, "noctis:curve:buy:record:v1"),
     buyerKey: caller.bytes,
     launchId: launchId,
     amount: tokenAmount,

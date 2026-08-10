@@ -35,15 +35,11 @@ const LAUNCH_ID = fakeBytes32(9);
 // Doc-sync note (Phase 2, 2026-07-11): the standalone darkveil.compact this
 // comment used to reference for Tier B no longer exists — Tier B's
 // eligibility_gate.compact merged in the same logic (mirrors this file's
-// own merge). packages/zk-proofs/src/darkveil.ts still exists purely as
-// a pure struct-hashing helper module (computeBuyCommit/computeNullifier
-// are unaffected by which domain a buyerKey came from), reused by both
-// this file and eligibility_gate.test.ts. For THIS merged contract's
-// tests, the buyerKey itself must come from eligibility-gate.ts's
-// deriveUserPublicKey (the ONE unified identity this merge standardized
-// on), not darkveil.ts's own deriveUserPublicKey (still under the
-// "noctis:darkveil:user:pk:v1" domain, which no on-chain circuit derives
-// under anymore, either tier, after this merge).
+// own merge). packages/zk-proofs/src/darkveil.ts holds the DarkVeil-phase
+// struct hashes both merged contracts compute identically, and is reused by
+// both this file and eligibility_gate.test.ts. The buyerKey those hashes
+// take comes from eligibility-gate.ts's deriveUserPublicKey — the ONE
+// unified identity this merge standardized on.
 // Design requirement: the allowlist leaf is no longer a free
 // witness — verifyAllowlist derives it in-circuit as
 // hashAllowlistLeaf(caller), so the off-chain tree must be built with the

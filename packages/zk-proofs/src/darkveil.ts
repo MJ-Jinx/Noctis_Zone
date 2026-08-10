@@ -1,48 +1,26 @@
-// Mirrors the `pure circuit` helpers in contracts/midnight/darkveil.compact.
-// Domain strings and struct field orders are copied verbatim from that file
-// — do not change either without updating the contract to match.
+// The DarkVeil-phase hashes, shared by both tiers.
 //
-// STALE FILE WARNING (2026-07-15): the standalone darkveil.compact this
-// file's doc comments cite no longer exists — its logic was merged into
-// eligibility_gate.compact (Tier B) and bonding_curve.compact (Tier C)
-// well before this comment was written. computeBuyCommit/computeNullifier/
-// computeCertHash below are still correct (they only hash caller-supplied
-// bytes, no identity derivation of their own) and safe to keep using.
-// deriveUserPublicKey/deriveGovernorKey below are NOT — see each function's
-// own comment for why using them for a real buyerKey silently produces a
-// hash that never matches on-chain.
+// DarkVeil has no contract of its own: its logic lives inside
+// eligibility_gate.compact (Tier B) and bonding_curve.compact (Tier C),
+// which each carry an identical copy of these `pure circuit` helpers —
+// same domain strings, same struct field order. That is why this module is
+// named for the phase rather than for either contract, and why one twin
+// serves both tiers.
+//
+// Domain strings and struct field orders are copied verbatim from those
+// files — do not change either without updating both contracts to match.
+// The commitment a buyer submits has to equal what revealBuyCommit
+// recomputes on-chain, so a drift here is a reveal that can never succeed;
+// the contract tests exercise that round trip and go red on any mismatch.
+//
+// `domain` leads every struct below because `persistentHash` hashes a
+// value's ENCODED FIELDS, not its type: two structs with the same field
+// types in the same order hash identically for the same values, as does a
+// `Vector<n, Bytes<32>>` against an n-field struct of `Bytes<32>`. The
+// distinct leading constant is what separates these values from every
+// other hash the contracts compute.
 
-import { bytes32Type, hashDomainKey, persistentHash, structType, uintType } from './compact-types.js';
-
-/**
- * @deprecated STALE DOMAIN, DO NOT USE for a real buyerKey
- * (2026-07-15). Hashes under the pre-merge domain
- * 'noctis:darkveil:user:pk:v1', which no longer matches either deployed
- * contract — both eligibility_gate.compact (Tier B) and
- * bonding_curve.compact (Tier C) derive identity under the unified
- * 'noctis:user:pk:v1' domain today (see either file's own "Identity note").
- * Using THIS function's output as computeBuyCommit's buyerKey produces a
- * commitment hash that will never match what revealBuyCommit recomputes
- * on-chain — every reveal would fail. Use
- * contracts/midnight/witnesses.ts's real deriveUserPublicKey(sk,
- * DOMAINS.CURVE_USER, launchId) instead (same function also correctly
- * covers Tier B, since ELIGIBILITY_USER and CURVE_USER are the same
- * string). The launch ID is required: identity is scoped per launch.
- */
-export function deriveUserPublicKey(secretKeyBytes: Uint8Array): Uint8Array {
-  return hashDomainKey('noctis:darkveil:user:pk:v1', secretKeyBytes);
-}
-
-/**
- * @deprecated STALE DOMAIN, DO NOT USE (2026-07-15) — same issue as
- * deriveUserPublicKey above, for the governor identity instead. Use
- * contracts/midnight/witnesses.ts's real deriveRoleKey(sk,
- * DOMAINS.CURVE_GOVERNOR) — a governor is one party across every launch,
- * so its key is not launch-scoped.
- */
-export function deriveGovernorKey(secretKeyBytes: Uint8Array): Uint8Array {
-  return hashDomainKey('noctis:darkveil:governor:pk:v1', secretKeyBytes);
-}
+import { bytes32Type, pad32, persistentHash, structType, uintType } from './compact-types.js';
 
 interface BuyCommitInput {
   buyerKey: Uint8Array;
@@ -52,7 +30,10 @@ interface BuyCommitInput {
   nonce: Uint8Array;
 }
 
-const buyCommitInputType = structType<BuyCommitInput>([
+const BUY_COMMIT_DOMAIN = 'noctis:dv:buy:commit:v1';
+
+const buyCommitInputType = structType<BuyCommitInput & { domain: Uint8Array }>([
+  ['domain', bytes32Type],
   ['buyerKey', bytes32Type],
   ['launchId', bytes32Type],
   ['tokenAmount', uintType(128)],
@@ -60,24 +41,9 @@ const buyCommitInputType = structType<BuyCommitInput>([
   ['nonce', bytes32Type],
 ]);
 
-/** darkveil.compact:161 — `computeBuyCommit`. */
+/** `computeBuyCommit` — eligibility_gate.compact and bonding_curve.compact. */
 export function computeBuyCommit(input: BuyCommitInput): Uint8Array {
-  return persistentHash(buyCommitInputType, input);
-}
-
-interface NullifierInput {
-  buyerKey: Uint8Array;
-  launchId: Uint8Array;
-}
-
-const nullifierInputType = structType<NullifierInput>([
-  ['buyerKey', bytes32Type],
-  ['launchId', bytes32Type],
-]);
-
-/** darkveil.compact:179 — `computeNullifier`. */
-export function computeNullifier(input: NullifierInput): Uint8Array {
-  return persistentHash(nullifierInputType, input);
+  return persistentHash(buyCommitInputType, { domain: pad32(BUY_COMMIT_DOMAIN), ...input });
 }
 
 interface CertHashInput {
@@ -88,7 +54,10 @@ interface CertHashInput {
   closeTimestamp: bigint;
 }
 
-const certHashInputType = structType<CertHashInput>([
+const CERT_HASH_DOMAIN = 'noctis:dv:cert:v1';
+
+const certHashInputType = structType<CertHashInput & { domain: Uint8Array }>([
+  ['domain', bytes32Type],
   ['launchId', bytes32Type],
   ['totalParticipants', uintType(64)],
   ['totalTokensAllocated', uintType(128)],
@@ -96,7 +65,7 @@ const certHashInputType = structType<CertHashInput>([
   ['closeTimestamp', uintType(64)],
 ]);
 
-/** darkveil.compact:190 — `computeCertHash`. */
+/** `computeCertHash` — eligibility_gate.compact and bonding_curve.compact. */
 export function computeCertHash(input: CertHashInput): Uint8Array {
-  return persistentHash(certHashInputType, input);
+  return persistentHash(certHashInputType, { domain: pad32(CERT_HASH_DOMAIN), ...input });
 }

@@ -27,16 +27,20 @@ interface ProposalIdInput {
   timestamp: bigint;
 }
 
-const proposalIdInputType = structType<ProposalIdInput>([
+const proposalIdInputType = structType<ProposalIdInput & { domain: Uint8Array }>([
+  ['domain', bytes32Type],
   ['launchId', bytes32Type],
   ['proposerKey', bytes32Type],
   ['descriptionHash', bytes32Type],
   ['timestamp', uintType(64)],
 ]);
 
-/** cto_governance.compact:174 — `computeProposalId`. */
+/** `computeProposalId` — the id `createProposal` returns and every later vote names. */
 export function computeProposalId(input: ProposalIdInput): Uint8Array {
-  return persistentHash(proposalIdInputType, input);
+  return persistentHash(proposalIdInputType, {
+    domain: pad32('noctis:cto:proposal:id:v1'),
+    ...input,
+  });
 }
 
 interface VoteNullifierInput {

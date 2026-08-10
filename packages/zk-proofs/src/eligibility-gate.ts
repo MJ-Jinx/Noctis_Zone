@@ -43,38 +43,37 @@ export function isKeyZero(keyBytes: Uint8Array): boolean {
   return keyBytes.every((b) => b === 0);
 }
 
-interface CompositeKeyInput {
-  userKey: Uint8Array;
-  launchId: Uint8Array;
-}
-
-const compositeKeyInputType = structType<CompositeKeyInput>([
-  ['userKey', bytes32Type],
-  ['launchId', bytes32Type],
-]);
-
-/** eligibility_gate.compact:156 — `compositeKey`. Prevents cross-launch replay of the same user key. */
-export function compositeKey(input: CompositeKeyInput): Uint8Array {
-  return persistentHash(compositeKeyInputType, input);
-}
-
 interface RegistrationCommitInput {
   userKey: Uint8Array;
   launchId: Uint8Array;
   bondAmount: bigint;
-  nonce: Uint8Array;
 }
 
-const registrationCommitInputType = structType<RegistrationCommitInput>([
+const REGISTRATION_COMMIT_DOMAIN = 'noctis:dv:reg:commit:v1';
+
+/**
+ * Field order and domain match `computeRegistrationCommit` in BOTH
+ * eligibility_gate.compact (Tier B) and bonding_curve.compact (Tier C),
+ * which carry identical copies.
+ *
+ * There is deliberately no `nonce`: a prover-chosen one made the commitment
+ * non-deterministic per registrant, and this value IS the double-registration
+ * nullifier, so it has to be the same 32 bytes every time a given identity
+ * registers for a given launch at a given bond.
+ */
+const registrationCommitInputType = structType<RegistrationCommitInput & { domain: Uint8Array }>([
+  ['domain', bytes32Type],
   ['userKey', bytes32Type],
   ['launchId', bytes32Type],
   ['bondAmount', uintType(128)],
-  ['nonce', bytes32Type],
 ]);
 
-/** eligibility_gate.compact:164 — `computeRegistrationCommit`. This is the value inserted into `registrationNullifiers`. */
+/** `computeRegistrationCommit` — the value inserted into `registrationNullifiers`. */
 export function computeRegistrationCommit(input: RegistrationCommitInput): Uint8Array {
-  return persistentHash(registrationCommitInputType, input);
+  return persistentHash(registrationCommitInputType, {
+    domain: pad32(REGISTRATION_COMMIT_DOMAIN),
+    ...input,
+  });
 }
 
 // ============================================================================

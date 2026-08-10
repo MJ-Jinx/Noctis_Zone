@@ -89,6 +89,29 @@ describe('eligibility-gate.ts — parity with the compiled circuit', () => {
     const state = eligibilityGateLedger(rRegister.context.currentQueryContext.state);
     expect(state.lockedBonds.member(myKey)).toBe(true);
     expect(state.lockedBonds.lookup(myKey)).toBe(1000n);
+
+    // computeRegistrationCommit is the double-registration nullifier, and
+    // the circuit derives it in-circuit rather than reading the caller's —
+    // so a twin that drifts from it produces no error anywhere, it just
+    // stops describing what the contract does. That is exactly how this
+    // one came to carry a field the contract had dropped. Comparing the
+    // computed value against the set the circuit actually wrote is the
+    // check that notices.
+    const myNullifier = eligibilityGate.computeRegistrationCommit({
+      userKey: myKey,
+      launchId,
+      bondAmount: 1000n,
+    });
+    expect(state.registrationNullifiers.member(myNullifier)).toBe(true);
+
+    // A commitment for the same identity at a different bond is a
+    // different 32 bytes — without this, a twin that ignored its inputs
+    // entirely would satisfy the assertion above.
+    expect(
+      state.registrationNullifiers.member(
+        eligibilityGate.computeRegistrationCommit({ userKey: myKey, launchId, bondAmount: 1001n }),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -158,6 +181,31 @@ describe('cto-governance.ts — parity with the compiled circuit', () => {
       1_000_000n, // bondAmount — filing takes a real bond, at the breakGlassBondMin floor deployed above
     );
     const proposalId = rCreate.result as Uint8Array;
+
+    // The id every later vote, tally and anchor names. createProposal
+    // derives it from the proposer's own identity, so an off-chain caller
+    // that wants to address a proposal it just filed has to be able to
+    // reconstruct the same 32 bytes.
+    expect(
+      ctoGovernance.computeProposalId({
+        launchId,
+        proposerKey: myVoterKey,
+        descriptionHash: fakeBytes32(40),
+        timestamp: SILENCE_THRESHOLD,
+      }),
+    ).toEqual(proposalId);
+
+    // And a different description is a different proposal — without this,
+    // a twin ignoring its inputs would satisfy the equality above.
+    expect(
+      ctoGovernance.computeProposalId({
+        launchId,
+        proposerKey: myVoterKey,
+        descriptionHash: fakeBytes32(41),
+        timestamp: SILENCE_THRESHOLD,
+      }),
+    ).not.toEqual(proposalId);
+
     const ctx2 = nextContext(contractAddress, rCreate.context);
     const voteTime = SILENCE_THRESHOLD + 1n;
     const pinnedVoteCtx = nextContextAtTime(contractAddress, ctx2, Number(voteTime));

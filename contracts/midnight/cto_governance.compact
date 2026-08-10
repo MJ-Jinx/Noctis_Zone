@@ -174,7 +174,15 @@ export struct BreakGlassChallenge {
   state: BreakGlassState;
 }
 
+// `domain` leads every hashed struct in this file, and every one carries a
+// different constant. `persistentHash` hashes a value's ENCODED FIELDS, not
+// its type — two structs with the same field types in the same order hash
+// identically for the same values, and a `Vector<n, Bytes<32>>` hashes
+// identically to an n-field struct of `Bytes<32>`. So a distinct leading
+// constant, not the declared type, is what keeps one kind of commitment out
+// of another's value space.
 struct ProposalIdInput {
+  domain: Bytes<32>;
   launchId: Bytes<32>;
   proposerKey: Bytes<32>;
   descriptionHash: Bytes<32>;
@@ -515,6 +523,7 @@ pure circuit computeProposalId(
   timestamp: Uint<64>
 ): Bytes<32> {
   return persistentHash<ProposalIdInput>(ProposalIdInput {
+    domain: pad(32, "noctis:cto:proposal:id:v1"),
     launchId: launch,
     proposerKey: proposer,
     descriptionHash: descHash,

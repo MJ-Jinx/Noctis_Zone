@@ -138,16 +138,18 @@ export struct AdminPublicKey {
   bytes: Bytes<32>;
 }
 
-// Input for deriving a composite key (user + launch) to prevent cross-launch replay
-struct CompositeKeyInput {
-  userKey: Bytes<32>;
-  launchId: Bytes<32>;
-}
-
 // Input for computing a registration commitment from private data
 // Fix (2026-07-21, Medium): dropped the prover-chosen `nonce`
 // field — see computeRegistrationCommit's own comment for why.
+// `domain` leads every hashed struct in this file, and every one carries a
+// different constant. `persistentHash` hashes a value's ENCODED FIELDS, not
+// its type — two structs with the same field types in the same order hash
+// identically for the same values, and a `Vector<n, Bytes<32>>` hashes
+// identically to an n-field struct of `Bytes<32>`. So a distinct leading
+// constant, not the declared type, is what keeps one kind of commitment out
+// of another's value space.
 struct RegistrationCommitInput {
+  domain: Bytes<32>;
   userKey: Bytes<32>;
   launchId: Bytes<32>;
   bondAmount: Uint<128>;
@@ -195,6 +197,7 @@ struct BuyCommit {
 
 // Input for computing buy commitment from private data
 struct BuyCommitInput {
+  domain: Bytes<32>;
   buyerKey: Bytes<32>;
   launchId: Bytes<32>;
   tokenAmount: Uint<128>;
@@ -222,6 +225,7 @@ export struct FairLaunchCert {
 
 // Input for certificate hash computation
 struct CertHashInput {
+  domain: Bytes<32>;
   launchId: Bytes<32>;
   totalParticipants: Uint<64>;
   totalTokensAllocated: Uint<128>;
@@ -526,14 +530,6 @@ pure circuit isKeyZero(key: UserPublicKey): Boolean {
   return key == default<UserPublicKey>;
 }
 
-// Compute composite key for (user, launch) — prevents cross-launch replay
-pure circuit compositeKey(userKey: Bytes<32>, launch: Bytes<32>): Bytes<32> {
-  return persistentHash<CompositeKeyInput>(CompositeKeyInput {
-    userKey: userKey,
-    launchId: launch
-  });
-}
-
 // Compute registration commitment from private data
 // Fix (2026-07-21, Medium): previously took a prover-chosen
 // `nonce`, making re-registration possible — each call with a fresh nonce
@@ -551,6 +547,7 @@ pure circuit computeRegistrationCommit(
   bond: Uint<128>
 ): Bytes<32> {
   return persistentHash<RegistrationCommitInput>(RegistrationCommitInput {
+    domain: pad(32, "noctis:dv:reg:commit:v1"),
     userKey: userKey,
     launchId: launch,
     bondAmount: bond
@@ -568,6 +565,7 @@ pure circuit computeBuyCommit(
   nonce: Bytes<32>
 ): Bytes<32> {
   return persistentHash<BuyCommitInput>(BuyCommitInput {
+    domain: pad(32, "noctis:dv:buy:commit:v1"),
     buyerKey: buyerKey,
     launchId: launch,
     tokenAmount: tokenAmount,
@@ -620,6 +618,7 @@ pure circuit computeCertHash(
   closeTime: Uint<64>
 ): Bytes<32> {
   return persistentHash<CertHashInput>(CertHashInput {
+    domain: pad(32, "noctis:dv:cert:v1"),
     launchId: launch,
     totalParticipants: participants,
     totalTokensAllocated: tokensAllocated,

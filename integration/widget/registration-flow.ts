@@ -258,7 +258,6 @@ export async function registerOnChain(session: DarkVeilSession, params: Register
     userKey: userPubKey.bytes,
     launchId: params.launchIdBytes,
     bondAmount: params.bondAmount,
-    nonce: identity.registrationNonce,
   });
 
   const manager = new NoctisLaunchManager(client);

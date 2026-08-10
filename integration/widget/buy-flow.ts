@@ -83,11 +83,10 @@ export async function submitBuyCommit(
     nonce: buyNonce,
   });
 
-  // Fix (2026-07-21, High): submitBuyCommit no longer takes a
-  // nullifier parameter — the contract now derives it in-circuit from the
-  // caller's own secret key (see computeBuyNullifier in
-  // eligibility_gate.compact/bonding_curve.compact). computeNullifier's old
-  // public-key-based client-side computation is no longer needed here.
+  // submitBuyCommit takes no nullifier parameter: the contract derives it
+  // in-circuit from the caller's own secret key (see computeBuyNullifier in
+  // eligibility_gate.compact/bonding_curve.compact), so there is nothing
+  // for this client to compute or supply.
   return manager.submitDarkVeilBuyCommit(commitment, params.timestamp);
 }
 
