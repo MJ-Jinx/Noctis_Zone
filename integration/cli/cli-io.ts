@@ -34,6 +34,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Network as LucidNetwork } from '@lucid-evolution/lucid';
+import { assertBlueprintMatchesBuild } from '../blueprint-fingerprint.js';
 
 /** Reads all of stdin as a UTF-8 string. Identical across all 32 CLI files (2 syntactic variants, same behavior). */
 export async function readStdin(): Promise<string> {
@@ -133,13 +134,23 @@ export const CARDANO_NETWORK_MAP: Record<'preview' | 'preprod' | 'mainnet', Luci
 };
 
 export interface PlutusBlueprint {
-  validators: Array<{ title: string; compiledCode: string }>;
+  validators: Array<{ title: string; compiledCode: string; hash?: string }>;
 }
 
-/** Loads contracts/cardano/plutus.json relative to the CALLING CLI's own __dirname — see this module's own header for why that's safe post-bundling. */
+/**
+ * Loads contracts/cardano/plutus.json relative to the CALLING CLI's own
+ * __dirname — see this module's own header for why that's safe post-bundling.
+ *
+ * The blueprint is also checked against the one this bundle was built for. The
+ * two travel to the live server as hand-copied files rather than through git,
+ * so they can arrive apart; see blueprint-fingerprint.ts for what that costs
+ * and why a hash comparison is the check that answers it.
+ */
 export function loadPlutusBlueprint(callerDirname: string): PlutusBlueprint {
   const blueprintPath = join(callerDirname, '..', '..', '..', 'contracts', 'cardano', 'plutus.json');
-  return JSON.parse(readFileSync(blueprintPath, 'utf8'));
+  const blueprint: PlutusBlueprint = JSON.parse(readFileSync(blueprintPath, 'utf8'));
+  assertBlueprintMatchesBuild(blueprint, blueprintPath);
+  return blueprint;
 }
 
 /** Finds one compiled validator's CBOR by its real plutus.json title, matching every CLI's existing error-message text exactly. */

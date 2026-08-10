@@ -10,7 +10,8 @@
 // error. Run `npm run build:widgets` for those. This file no longer builds
 // or references either widget.
 
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -761,7 +762,33 @@ async function copyWasmFiles() {
 	}
 }
 
+/**
+ * A stable identifier for the set of scripts contracts/cardano/plutus.json
+ * describes, injected into every bundle so a CLI can refuse a blueprint it was
+ * not built for.
+ *
+ * THE TWIN: blueprint-fingerprint.ts computes this same value at runtime and
+ * compares. Both are deliberately tiny, and blueprint-fingerprint.test.ts pins
+ * the algorithm against a fixture so neither can drift silently. Change one and
+ * you must change the other.
+ *
+ * Built from the compiler's own per-validator `hash` field, sorted by title —
+ * not from the file's bytes, which differ harmlessly between a Windows checkout
+ * and a Linux server by line endings alone.
+ */
+function blueprintFingerprint() {
+	const path = join(__dirname, "..", "contracts", "cardano", "plutus.json");
+	const blueprint = JSON.parse(readFileSync(path, "utf8"));
+	const lines = blueprint.validators
+		.map((v) => `${v.title}:${v.hash ?? ""}`)
+		.sort()
+		.join("\n");
+	return createHash("sha256").update(lines, "utf8").digest("hex");
+}
+
 async function run() {
+	const fingerprint = blueprintFingerprint();
+	console.log(`blueprint fingerprint: ${fingerprint}`);
 	const configs = [
 		cliConfig,
 		allowlistTreeCliConfig,
@@ -805,7 +832,15 @@ async function run() {
 		batchActionCliConfig,
 		reclaimReferenceScriptsCliConfig,
 		rebuildCapStateCliConfig,
-	];
+	]
+		// Stamp every bundle with the blueprint it was built against. Applied
+		// here rather than on each config so a new CLI cannot be added without
+		// it — the check is only worth having if nothing can opt out by
+		// accident.
+		.map((c) => ({
+			...c,
+			define: { ...c.define, __BLUEPRINT_FINGERPRINT__: JSON.stringify(fingerprint) },
+		}));
 
 	if (watch) {
 		const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));
