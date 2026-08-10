@@ -11,6 +11,10 @@ const witnesses: Witnesses<PrivateState> = {
 
 const TOKEN_ALLOCATION = 90_000_000n;
 const VEST_DAYS = 90n;
+// CLAUDE.md: TOTAL_SUPPLY = 1B, CREATOR_ALLOC_MAX = 10% — so 100M is the
+// ceiling this fixture's 90M sits just under.
+const TOTAL_SUPPLY = 1_000_000_000n;
+const MAX_CREATOR_PERCENT = 10n;
 const VEST_SECONDS = VEST_DAYS * 86_400n; // 7,776,000
 
 // Phase 3 security fix (2026-07-12): startVesting/claimVested now bind their
@@ -23,14 +27,16 @@ const VEST_SECONDS = VEST_DAYS * 86_400n; // 7,776,000
 // anchor, fixed here so every test in this file agrees on it.
 const NOW = 1_780_000_000;
 
-function deploy() {
+function deploy(allocation: bigint = TOKEN_ALLOCATION, totalSupply: bigint = TOTAL_SUPPLY) {
   const contract = new Contract<PrivateState>(witnesses);
   const { init, contractAddress, ctx } = deployForTest(
     contract,
     undefined,
     fakeBytes32(9),
-    TOKEN_ALLOCATION,
+    allocation,
     VEST_DAYS,
+    totalSupply,
+    MAX_CREATOR_PERCENT,
   );
   return { contract, init, contractAddress, ctx };
 }
@@ -294,5 +300,40 @@ describe('vesting.compact — cancelLaunch authorization (GitHub #68 fix, 2026-0
     const r1 = contract.circuits.cancelLaunch(ctx);
     const ctx2 = nextContext(contractAddress, r1.context);
     expect(() => contract.circuits.cancelLaunch(ctx2)).toThrow('Already cancelled');
+  });
+});
+
+describe('vesting.compact — the creator allocation is bounded by the launch it comes from', () => {
+  it('seals the supply and the share, so the bound can be read back rather than trusted', () => {
+    const { init } = deploy();
+    const state = ledger(init.currentContractState.data);
+    expect(state.totalSupply).toBe(TOTAL_SUPPLY);
+    expect(state.maxCreatorPercent).toBe(MAX_CREATOR_PERCENT);
+  });
+
+  it('accepts an allocation at exactly the permitted share', () => {
+    expect(() => deploy(TOTAL_SUPPLY / 10n)).not.toThrow();
+  });
+
+  it('rejects an allocation one token above the permitted share', () => {
+    // The whole point: without this bound a vesting contract could be
+    // deployed to release more than the launch's entire supply, and no
+    // other contract would ever see it — they each bound only their own
+    // allocation, and none can call another.
+    expect(() => deploy(TOTAL_SUPPLY / 10n + 1n)).toThrow(
+      'Creator allocation exceeds the permitted share of total supply',
+    );
+  });
+
+  it('rejects an allocation larger than the whole supply', () => {
+    expect(() => deploy(TOTAL_SUPPLY * 2n)).toThrow('Creator allocation exceeds the permitted share of total supply');
+  });
+
+  it('rejects a zero allocation, which would vest nothing forever', () => {
+    expect(() => deploy(0n)).toThrow('Token allocation must be positive');
+  });
+
+  it('rejects a zero total supply, which would make any share unbounded', () => {
+    expect(() => deploy(TOKEN_ALLOCATION, 0n)).toThrow('Total supply must be positive');
   });
 });

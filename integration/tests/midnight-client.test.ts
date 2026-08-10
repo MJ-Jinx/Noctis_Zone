@@ -445,16 +445,18 @@ describe('NoctisMidnightClient.deployCreatorEscrow / connectCreatorEscrow', () =
 });
 
 describe('NoctisMidnightClient.deployVesting / connectVesting', () => {
-  it('passes [launchId, tokenAllocation, vestDays]', async () => {
+  it('passes [launchId, tokenAllocation, vestDays, totalSupply, maxCreatorPercent]', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployVesting(FAKE_PROVIDERS, {
       launchId: fakeBytes32(50),
       tokenAllocation: 50_000_000n,
       vestDays: 180n,
+      totalSupply: 1_000_000_000n,
+      maxCreatorPercent: 10n,
     });
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.privateStateId).toBe('vesting');
-    expect(call.args).toEqual([fakeBytes32(50), 50_000_000n, 180n]);
+    expect(call.args).toEqual([fakeBytes32(50), 50_000_000n, 180n, 1_000_000_000n, 10n]);
   });
 
   it('connectVesting calls findDeployedContract with the given contractAddress', async () => {
@@ -612,6 +614,8 @@ describe('NoctisMidnightClient.getDeployments', () => {
       launchId: fakeBytes32(90),
       tokenAllocation: 1n,
       vestDays: 100n,
+      totalSupply: 1_000_000_000n,
+      maxCreatorPercent: 10n,
     });
     const deployments = client.getDeployments();
     expect(deployments.vesting).toEqual({

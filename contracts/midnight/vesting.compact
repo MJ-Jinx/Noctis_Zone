@@ -54,6 +54,15 @@ sealed ledger creatorKey: Bytes<32>;
 sealed ledger tokenAllocation: Uint<128>;
 sealed ledger vestDays: Uint<16>;
 
+// The launch supply `tokenAllocation` is a share of, and the share it may
+// not exceed. Exported rather than sealed-and-private: this contract's whole
+// claim on a launch is "the creator gets this much", and a reader can only
+// judge that against the whole it comes out of. Together they let anyone
+// check the bound the constructor enforced without trusting the deployer's
+// word for either number.
+export sealed ledger totalSupply: Uint<128>;
+export sealed ledger maxCreatorPercent: Uint<8>;
+
 export ledger vestingState: VestingState;
 export ledger claimedTokens: Uint<128>;
 export ledger vestStartTimestamp: Uint<64>;
@@ -93,14 +102,37 @@ pure circuit deriveGovernorKey(sk: UserSecretKey): Bytes<32> {
 constructor(
   launchId_: Bytes<32>,
   tokenAllocation_: Uint<128>,
-  vestDays_: Uint<16>
+  vestDays_: Uint<16>,
+  totalSupply_: Uint<128>,
+  maxCreatorPercent_: Uint<8>
 ) {
   // Force active selection: vestDays must be 90-365, no default
   assert(disclose(vestDays_ >= 90), "Vesting must be at least 90 days");
   assert(disclose(vestDays_ <= 365), "Vesting must be at most 365 days");
 
+  // The creator allocation this contract will release is bounded by the
+  // launch's own supply, as a share of it — so the amount and the whole it
+  // comes out of are sealed together and can be read against each other by
+  // anyone. Percent-times-supply rather than a division, since there is no
+  // in-circuit division; both operands are far below the 124-bit product
+  // ceiling (supply is at most a 30-bit count, the percent an 8-bit one).
+  assert(disclose(totalSupply_ > 0), "Total supply must be positive");
+  assert(disclose(maxCreatorPercent_ > 0), "Max creator percent must be positive");
+  assert(disclose(maxCreatorPercent_ <= 100), "Max creator percent cannot exceed 100");
+  assert(disclose(tokenAllocation_ > 0), "Token allocation must be positive");
+  assert(disclose(totalSupply_ <= 1099511627775), "Total supply exceeds safe range"); // 2^40 - 1
+  assert(
+    disclose(
+      ((tokenAllocation_ as Uint<40>) as Uint<48>) * (100 as Uint<48>)
+        <= ((totalSupply_ as Uint<40>) as Uint<48>) * ((maxCreatorPercent_ as Uint<8>) as Uint<48>)
+    ),
+    "Creator allocation exceeds the permitted share of total supply"
+  );
+
   launchId = disclose(launchId_);
   tokenAllocation = disclose(tokenAllocation_);
+  totalSupply = disclose(totalSupply_);
+  maxCreatorPercent = disclose(maxCreatorPercent_);
   vestDays = disclose(vestDays_);
 
   const govSecret = getGovernorSecret();

@@ -481,7 +481,15 @@ export class NoctisMidnightClient {
 
   async deployVesting(
     providers: ContractProviders,
-    args: { launchId: Uint8Array; tokenAllocation: bigint; vestDays: bigint },
+    args: {
+      launchId: Uint8Array;
+      tokenAllocation: bigint;
+      vestDays: bigint;
+      /** The launch supply `tokenAllocation` is a share of — sealed alongside it. */
+      totalSupply: bigint;
+      /** CLAUDE.md: CREATOR_ALLOC_MAX. The constructor refuses an allocation above this share. */
+      maxCreatorPercent: bigint;
+    },
   ): Promise<PsmRecord> {
     const witnesses = vestingWitnesses(this.userSecretKey, this.governorSecretKey);
     const compiled = compileVesting(witnesses);
@@ -489,7 +497,7 @@ export class NoctisMidnightClient {
       compiledContract: compiled,
       privateStateId: 'vesting',
       initialPrivateState: undefined,
-      args: [args.launchId, args.tokenAllocation, args.vestDays],
+      args: [args.launchId, args.tokenAllocation, args.vestDays, args.totalSupply, args.maxCreatorPercent],
     });
     this.vesting = deployed;
     return toRecord(deployed);
