@@ -112,10 +112,9 @@ use noctis/thread_nft
 /// simply declaring a wide-enough validity range and claiming a
 /// timestamp near its far end. Found while researching Phase 5b (real DEX
 /// migration) of the Tier A Preprod Milestone — see internal tracking
-/// for the full cross-contract audit (this same gap exists in
-/// bonding_curve_tier_b.ak's ExpireCurve, lp_escrow.ak's
-/// ExecuteDexChange, and cto_governance.ak's AnchorProposal/
-/// ExpireProposal, all fixed in the same pass). `max_width` is generous
+/// for the full cross-contract audit — every other permissionless,
+/// timestamp-gated redeemer on the platform carries this same bound,
+/// applied in the same pass. `max_width` is generous
 /// (10 minutes) relative to Preprod's real ~20s block time, comfortably
 /// covering real network/build delays while still closing the gap.
 fn validity_range_is_narrow(range: Interval, max_width: Int) -> Bool {

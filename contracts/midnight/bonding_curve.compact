@@ -79,13 +79,10 @@ import CompactStandardLibrary;
 // PRIVACY ANALYSIS section), so enforcing payment there costs no
 // additional disclosure beyond what the feature already does — reviewed
 // against the privacy/selective-disclosure gold standard before landing,
-// not after. Tier B's identical gap (also zero payment enforcement, any
-// currency) is NOT fixed here — ADA can't be verified via receiveUnshielded
-// the same way NIGHT can (same root cause as the Tier B curve migration). Resolved separately —
-// Tier B's DarkVeil settlement (ADA payment + token delivery) moved
-// to Cardano entirely (`ClaimDarkVeilTokens` on bonding_curve_tier_b.ak),
-// since Compact can never custody ADA. This contract needed no change for
-// that fix — it's Tier C only.
+// not after. Tier B settles its DarkVeil purchases on Cardano instead, for
+// a reason that is structural rather than a matter of scope: Compact can
+// never custody ADA, so payment there is enforced where the ada actually is.
+// This contract is Tier C only and needed no change for it.
 //
 // Identity note: eligibility_gate.compact, bonding_curve.compact, and
 // darkveil.compact previously derived the caller's UserPublicKey under
@@ -366,12 +363,12 @@ export ledger phase: LaunchPhase;
 
 // Per-user cumulative purchase amount (in token units). This is the SAME
 // map both revealBuyCommit (DarkVeil-side) and buyTokens (public-curve-
-// side) read/write inline, atomically, keyed by the same in-circuit-
-// derived caller identity — see the file header's "known remaining gap"
-// note for what this does and doesn't fully cover yet. (Security audit
-// fix, the design requirement: the standalone `checkAndUpdateCap` circuit that used to
-// also expose this map to an arbitrary caller-supplied key was removed —
-// see its former location near checkCap below.)
+// side) read/write inline, atomically, keyed by the same in-circuit-derived
+// caller identity — which is what makes one wallet's cap span both phases
+// rather than resetting between them. (Security audit fix, the design
+// requirement: the standalone `checkAndUpdateCap` circuit that used to also
+// expose this map to an arbitrary caller-supplied key was removed — see its
+// former location near checkCap below.)
 export ledger cumulativePurchases: Map<Bytes<32>, Uint<128>>;
 
 // Total supply of the launch token (for 5% cap calculation) — distinct
@@ -1190,9 +1187,9 @@ export circuit submitBuyCommit(
 //      HERE rather than at submitBuyCommit: the amount is already about to
 //      become public at this exact point, so requiring receiveUnshielded
 //      here discloses nothing beyond what revealing already does.
-//   2. Cumulative cap enforcement — DarkVeil purchases now count toward
-//      the same cumulativePurchases map buyTokens (public phase) reads
-//      and writes inline, closing the previously "known remaining gap."
+//   2. Cumulative cap enforcement — DarkVeil purchases count toward the
+//      same cumulativePurchases map buyTokens (public phase) reads and
+//      writes inline, so one wallet has one allowance across both phases.
 // Fix (2026-07-21, Compact security-review pass): revealBuyCommit
 // previously took real NIGHT via receiveUnshielded and accrued it ONLY into
 // totalRaisedCommitted — a field nothing in this file ever pays out
@@ -1579,11 +1576,10 @@ export circuit cancelDarkVeil(): [] {
 // ============================================================================
 
 // Check and update the per-wallet 5% cumulative cap. Kept as its own public
-// circuit (not just inlined into buyTokens) since off-chain DarkVeil
-// tooling may still want to call this directly during the DarkVeil phase —
-// though see the file header's "known remaining gap" note: darkveil.compact
-// itself does not call this today, so DarkVeil purchases aren't actually
-// routed through here yet.
+// circuit (not just inlined into buyTokens) so off-chain tooling can ask the
+// same question the curve asks. Both phases enforce the cap inline against
+// `cumulativePurchases` — revealBuyCommit for DarkVeil, buyTokens for the
+// public curve — so neither depends on this circuit being called.
 // Design requirement: this circuit used to be exported here as
 // well, taking an arbitrary caller-supplied `callerKey` with no
 // authorization and no payment, which would not have bound the
@@ -1966,12 +1962,12 @@ export circuit buyTokens(
     "Allowlist changed since this buyer was verified"
   );
 
-  // Fix (2026-07-10): enforce the 5% cumulative cap atomically, in the
-  // same circuit call, against the same cumulativePurchases map DarkVeil
-  // registration/checkAndUpdateCap uses — no cross-contract call needed
-  // now that this is one contract instead of two. See the file header's
-  // "known remaining gap" note: this makes the PUBLIC-phase side of the
-  // cap real; DarkVeil-phase purchases still aren't counted here yet.
+  // Fix (2026-07-10): enforce the 5% cumulative cap atomically, in the same
+  // circuit call, against the same cumulativePurchases map revealBuyCommit
+  // writes for the DarkVeil phase — no cross-contract call needed now that
+  // this is one contract instead of two. Both phases draw down one wallet's
+  // single allowance, which is what "5% across DarkVeil and the public phase
+  // combined" has to mean to be true.
   const priorCumulative = cumulativePurchases.member(disclose(caller.bytes))
     ? cumulativePurchases.lookup(disclose(caller.bytes))
     : 0;
