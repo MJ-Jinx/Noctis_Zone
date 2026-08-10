@@ -26,7 +26,7 @@ vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
 import { CML, type Constr, credentialToAddress, Lucid } from '@lucid-evolution/lucid';
 import type { StakingPosition } from '../staking-submitter.js';
 import { extendedHexToBech32PrivateKey, keyHashFromAddress, StakingSubmitter } from '../staking-submitter.js';
-import { settlementDatum } from '../tier-a-schemas.js';
+import { settlementDatum, threadNftAssetName } from '../tier-a-schemas.js';
 
 function fakeKeyHash(fill: number): string {
   return fill.toString(16).padStart(2, '0').repeat(28);
@@ -45,6 +45,10 @@ const TOKEN_ASSET_NAME = '42'.repeat(4);
 const TOKEN_UNIT = TOKEN_POLICY + TOKEN_ASSET_NAME;
 const CREATOR_KEY_HASH = fakeKeyHash(0x11);
 const GOVERNOR_KEY_HASH = fakeKeyHash(0x22);
+const THREAD_POLICY = 'cc'.repeat(28);
+
+/** The pool's own thread NFT — the token findPoolUtxo authenticates on. */
+const POOL_THREAD_NFT = THREAD_POLICY + threadNftAssetName('stakingPool', LAUNCH_ID_HEX);
 
 function poolDatumFields(overrides: Record<string, unknown> = {}) {
   return {
@@ -57,11 +61,25 @@ function poolDatumFields(overrides: Record<string, unknown> = {}) {
     // Two bytes, so a fixture can address bits either side of a byte
     // boundary without needing its own map.
     claimed_bits: '0000',
+    thread_nft_policy: THREAD_POLICY,
     ...overrides,
   };
 }
-function poolUtxo(fields: Record<string, unknown> = {}, assets: Record<string, bigint> = {}) {
-  return { datum: { Pool: [poolDatumFields(fields)] }, assets };
+/**
+ * A real pool UTXO carries its thread NFT — that is what distinguishes it from
+ * anything else anyone pays to the shared staking address, and no pool has
+ * existed without one. Merged UNDER the caller's assets so a test can still
+ * override it, and `bare` describes a pool that genuinely lacks it.
+ */
+function poolUtxo(
+  fields: Record<string, unknown> = {},
+  assets: Record<string, bigint> = {},
+  opts: { bare?: boolean } = {},
+) {
+  return {
+    datum: { Pool: [poolDatumFields(fields)] },
+    assets: opts.bare ? assets : { [POOL_THREAD_NFT]: 1n, ...assets },
+  };
 }
 function positionUtxo(overrides: Record<string, unknown> = {}, assets: Record<string, bigint> = {}) {
   return {
@@ -191,7 +209,45 @@ describe('StakingSubmitter.findPoolUtxo / readPoolDatum', () => {
   it('throws when staking was never enabled for this launch (no Pool UTXO)', async () => {
     const { builder } = makeFakeTxBuilder();
     const submitter = makeSubmitter(builder, [positionUtxo()]);
-    await expect(submitter.readPoolDatum()).rejects.toThrow(/No staking Pool UTXO found/);
+    await expect(submitter.readPoolDatum()).rejects.toThrow(/carries launch .* stakingPool thread NFT/);
+  });
+
+  // staking_pool.ak is unparameterized, so one address holds every launch's
+  // pool AND every position of every launch. Paying a UTXO there runs no
+  // validator, so its datum is a claim by whoever created it.
+  it('refuses a Pool UTXO that claims the launch but carries no thread NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const submitter = makeSubmitter(builder, [poolUtxo({}, {}, { bare: true })]);
+    await expect(submitter.readPoolDatum()).rejects.toThrow(/carries launch .* stakingPool thread NFT/);
+  });
+
+  it('refuses to choose when a second Pool UTXO also answers to the launch', async () => {
+    // The forger mints under their own policy and names it in their own datum,
+    // which satisfies the token check. What they cannot do is arrive alone.
+    const { builder } = makeFakeTxBuilder();
+    const forgerPolicy = 'ee'.repeat(28);
+    const submitter = makeSubmitter(builder, [
+      poolUtxo(),
+      poolUtxo(
+        { thread_nft_policy: forgerPolicy },
+        { [forgerPolicy + threadNftAssetName('stakingPool', LAUNCH_ID_HEX)]: 1n },
+        { bare: true },
+      ),
+    ]);
+    await expect(submitter.readPoolDatum()).rejects.toThrow(/Refusing to guess/);
+  });
+
+  it('does not mistake a Position for the Pool, even carrying the pool NFT', async () => {
+    // Both variants share the address, so this is worth pinning — but be
+    // precise about what enforces it. Today the NFT check does all the work:
+    // a Position datum has no thread_nft_policy field, so no unit derived from
+    // one can match, and deleting the Pool-variant check leaves this test
+    // green (measured, not assumed). The variant check is kept anyway, because
+    // it is the thing that would still hold if a Position ever gained a policy
+    // field — at which point the NFT check alone would start accepting one.
+    const { builder } = makeFakeTxBuilder();
+    const submitter = makeSubmitter(builder, [positionUtxo({}, { [POOL_THREAD_NFT]: 1n })]);
+    await expect(submitter.readPoolDatum()).rejects.toThrow(/carries launch .* stakingPool thread NFT/);
   });
 });
 

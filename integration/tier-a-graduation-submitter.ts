@@ -59,6 +59,7 @@
 
 import type { Assets, LucidEvolution, Network as LucidNetwork, SpendingValidator, UTxO } from '@lucid-evolution/lucid';
 import { Blockfrost, CML, Constr, Data, Lucid, validatorToAddress } from '@lucid-evolution/lucid';
+import { selectLaunchUtxo } from './launch-utxo-lookup.js';
 import { BONDING_CURVE_REDEEMER, LP_ESCROW_REDEEMER, VESTING_REDEEMER } from './redeemer-indices.js';
 import {
   type BondingCurveDatumData,
@@ -66,6 +67,7 @@ import {
   type LpEscrowDatumData,
   LpEscrowDatumSchema,
   loadValidator,
+  type ThreadNftRole,
   type VestingDatumData,
   VestingDatumSchema,
 } from './tier-a-schemas.js';
@@ -133,22 +135,23 @@ export class TierAGraduationSubmitter {
     this.lucidPromise = Lucid(new Blockfrost(config.blockfrostUrl, config.blockfrostProjectId), config.network);
   }
 
-  private async findUtxo<T extends { launch_id: string }>(
+  /**
+   * This launch's own UTXO in one role, authenticated by its thread NFT.
+   *
+   * All three of these validators are unparameterized, so every launch's
+   * curve, escrow and vesting UTXOs sit at three shared addresses. Matching on
+   * the datum's `launch_id` alone matched a claim anyone could author, and
+   * taking the first match meant a second UTXO answering to the same launch
+   * was silently passed over. See launch-utxo-lookup.ts.
+   */
+  private async findUtxo<T extends { launch_id: string; thread_nft_policy: string }>(
     lucid: LucidEvolution,
     address: string,
+    role: ThreadNftRole,
     schema: unknown,
   ): Promise<{ utxo: UTxO; datum: T }> {
     const utxos = await lucid.utxosAt(address);
-    for (const utxo of utxos) {
-      if (!utxo.datum) continue;
-      try {
-        const decoded = Data.from<T>(utxo.datum, schema as never);
-        if (decoded.launch_id === this.config.launchIdHex) {
-          return { utxo, datum: decoded };
-        }
-      } catch {}
-    }
-    throw new Error(`No UTXO found for launch_id ${this.config.launchIdHex} at ${address}`);
+    return selectLaunchUtxo<T>(utxos, address, this.config.launchIdHex, role, schema);
   }
 
   /**
@@ -178,11 +181,13 @@ export class TierAGraduationSubmitter {
     const { utxo: curveUtxo, datum: curveDatum } = await this.findUtxo<BondingCurveDatumData>(
       lucid,
       this.bondingCurveAddress,
+      'bondingCurve',
       BondingCurveDatumSchema,
     );
     const { utxo: lpUtxo, datum: lpDatum } = await this.findUtxo<LpEscrowDatumData>(
       lucid,
       this.lpEscrowAddress,
+      'lpEscrow',
       LpEscrowDatumSchema,
     );
 
@@ -311,6 +316,7 @@ export class TierAGraduationSubmitter {
     const { utxo: vestingUtxo, datum: vestingDatum } = await this.findUtxo<VestingDatumData>(
       lucid,
       this.vestingAddress,
+      'vesting',
       VestingDatumSchema,
     );
 

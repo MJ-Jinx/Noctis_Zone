@@ -51,6 +51,7 @@ import type {
 } from '@lucid-evolution/lucid';
 import { Blockfrost, CML, Constr, Data, getAddressDetails, Lucid, validatorToAddress } from '@lucid-evolution/lucid';
 import { clearedBitmapHex, setBit, testBit } from './claim-bitmap.js';
+import { selectStakingPoolUtxo } from './launch-utxo-lookup.js';
 import { STAKING_POOL_REDEEMER } from './redeemer-indices.js';
 import {
   type StakingDatumData,
@@ -126,18 +127,27 @@ export class StakingSubmitter {
     }
   }
 
-  /** The one Pool UTXO for this launch — thrown if staking was never enabled/seeded (Graduate's staking_seeded check). */
+  /**
+   * The one Pool UTXO for this launch, authenticated by its thread NFT.
+   *
+   * staking_pool.ak is unparameterized, so every launch's pool and every
+   * position of every launch share one address. The datum's `launch_id` is a
+   * claim by whoever created the UTXO — paying to a script address runs no
+   * validator — so the pool's role-tagged thread NFT is what distinguishes it,
+   * and a second UTXO answering to the same launch stops the lookup rather
+   * than being silently passed over. Same pair `pool_thread_nft_intact`
+   * checks on-chain. See launch-utxo-lookup.ts.
+   *
+   * Throws if staking was never enabled/seeded (Graduate's staking_seeded
+   * check) — as it did before, though the message now names the missing NFT.
+   */
   async findPoolUtxo(lucid: LucidEvolution): Promise<{ utxo: UTxO; datum: StakingPoolDatumData }> {
     const utxos = await this.allUtxos(lucid);
-    for (const utxo of utxos) {
-      const decoded = this.decodeDatum(utxo);
-      if (decoded && 'Pool' in decoded) {
-        const pool = decoded.Pool[0];
-        if (pool.launch_id === this.config.launchIdHex) return { utxo, datum: pool };
-      }
-    }
-    throw new Error(
-      `No staking Pool UTXO found for launch_id ${this.config.launchIdHex} — staking may not be enabled for this launch.`,
+    return selectStakingPoolUtxo<StakingPoolDatumData>(
+      utxos,
+      this.address,
+      this.config.launchIdHex,
+      StakingDatumSchema,
     );
   }
 
@@ -148,7 +158,20 @@ export class StakingSubmitter {
     return datum;
   }
 
-  /** Every real Position UTXO belonging to one staker, for this launch — the panel's "your stakes" list. */
+  /**
+   * Every real Position UTXO belonging to one staker, for this launch — the
+   * panel's "your stakes" list.
+   *
+   * Deliberately NOT authenticated by a thread NFT the way findPoolUtxo above
+   * is, and the Position datum deliberately carries no policy field to do it
+   * with: a position is created once per stake action, so there is no
+   * singleton for a token to mark. Nothing here needs one either. This returns
+   * every match rather than choosing among them, so there is no first-wins
+   * decision to get wrong, and a forged position gains its author nothing —
+   * `Unstake` pays out the UTXO's own real value, never the `staked_amount`
+   * its datum claims, and the reward tree derives weight from that same real
+   * balance.
+   */
   async findPositions(stakerAddress: string): Promise<StakingPosition[]> {
     const lucid = await this.lucidPromise;
     const stakerVkh = keyHashFromAddress(stakerAddress);

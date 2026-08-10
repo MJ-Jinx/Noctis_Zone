@@ -29,6 +29,7 @@ vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
 });
 
 import { applyParamsToScript, credentialToAddress, Lucid } from '@lucid-evolution/lucid';
+import { cip68FungibleAssetName, cip68ReferenceAssetName, threadNftAssetName } from '../tier-a-schemas.js';
 import { TokenMetadataSubmitter, toHex } from '../token-metadata-submitter.js';
 
 function fakeKeyHash(fill: number): string {
@@ -44,9 +45,33 @@ const BONDING_CURVE_HASH = 'bb'.repeat(28);
 const CTO_GOVERNANCE_HASH = 'cc'.repeat(28);
 const CTO_GOVERNANCE_NFT_POLICY = 'dd'.repeat(28);
 const TOKEN_POLICY_ID = 'ee'.repeat(28);
-const TOKEN_ASSET_NAME_HEX = toHex(new TextEncoder().encode('tok'));
+// A real launch token is CIP-68 label 333 over its base name, and the metadata
+// UTXO is found by the matching label-100 reference NFT. An unlabelled name
+// would still round-trip through the derivation, but only because stripping a
+// label off a name that has none leaves something consistent — it would not
+// exercise the real one.
+const TOKEN_BASE_NAME_HEX = toHex(new TextEncoder().encode('tok'));
+const TOKEN_ASSET_NAME_HEX = cip68FungibleAssetName(TOKEN_BASE_NAME_HEX);
+const REFERENCE_NFT_UNIT = TOKEN_POLICY_ID + cip68ReferenceAssetName(TOKEN_BASE_NAME_HEX);
 const CURVE_ADDR = addrFor(fakeKeyHash(0x77));
 const CREATOR_ADDR = addrFor(fakeKeyHash(0x11));
+// One thread-NFT policy per launch, one role-tagged asset name per validator —
+// CTO_GOVERNANCE_NFT_POLICY is that policy, named for the role this file
+// already used it for.
+const CURVE_THREAD_NFT_UNIT = CTO_GOVERNANCE_NFT_POLICY + threadNftAssetName('bondingCurve', LAUNCH_ID_HEX);
+
+/**
+ * The curve UTXO token_metadata.ak reads as a reference input to derive live
+ * creator authority. Only the fields the lookup itself reads matter here — the
+ * validator's own use of it is not what these tests exercise.
+ */
+function curveDatumFields(overrides: Record<string, unknown> = {}) {
+  return {
+    launch_id: LAUNCH_ID_HEX,
+    thread_nft_policy: CTO_GOVERNANCE_NFT_POLICY,
+    ...overrides,
+  };
+}
 
 function hex(value: string): string {
   return Buffer.from(value, 'utf8').toString('hex');
@@ -126,11 +151,36 @@ function makeFakeTxBuilder(cborResult = 'unsigned-cbor-1') {
   return { builder, calls };
 }
 
+interface FixtureUtxo {
+  datum?: unknown;
+  assets: Record<string, bigint>;
+  txHash?: string;
+  outputIndex?: number;
+  /** Opt out of the authenticating token, to describe a UTXO that lacks it. */
+  bare?: boolean;
+}
+
+/**
+ * Every metadata UTXO a real launch has carries its CIP-68 reference NFT, and
+ * every curve UTXO carries its thread NFT — those are what the two lookups
+ * authenticate on, and the validator requires the same pair. Added here rather
+ * than in each fixture so a test says only what it is about, and merged UNDER
+ * the fixture's own assets so an explicit value still wins.
+ */
+function asChainUtxos(unit: string, utxos: FixtureUtxo[] | undefined, fallback: FixtureUtxo[]) {
+  return (utxos ?? fallback).map((u, i) => ({
+    txHash: u.txHash ?? i.toString(16).padStart(2, '0').repeat(32),
+    outputIndex: u.outputIndex ?? 0,
+    ...u,
+    assets: u.bare ? u.assets : { [unit]: 1n, ...u.assets },
+  }));
+}
+
 function makeSubmitter(
   builder: ReturnType<typeof makeFakeTxBuilder>['builder'],
   opts: {
-    metadataUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
-    curveUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
+    metadataUtxos?: FixtureUtxo[];
+    curveUtxos?: FixtureUtxo[];
     creatorUtxos?: Array<{
       txHash: string;
       outputIndex: number;
@@ -142,9 +192,14 @@ function makeSubmitter(
   const fakeLucid = {
     selectWallet: { fromAddress: vi.fn() },
     utxosAt: vi.fn().mockImplementation((address: string) => {
-      if (address === addressRefs.spend) return Promise.resolve(opts.metadataUtxos ?? []);
+      if (address === addressRefs.spend)
+        return Promise.resolve(asChainUtxos(REFERENCE_NFT_UNIT, opts.metadataUtxos, []));
       if (address === CURVE_ADDR)
-        return Promise.resolve(opts.curveUtxos ?? [{ txHash: 'curve-tx', outputIndex: 0, assets: {} }]);
+        return Promise.resolve(
+          asChainUtxos(CURVE_THREAD_NFT_UNIT, opts.curveUtxos, [
+            { txHash: 'curve-tx', outputIndex: 0, assets: {}, datum: curveDatumFields() },
+          ]),
+        );
       if (address === CREATOR_ADDR)
         return Promise.resolve(opts.creatorUtxos ?? [{ txHash: 'aa'.repeat(32), outputIndex: 0, assets: {} }]);
       return Promise.resolve([]);
@@ -223,6 +278,123 @@ describe('TokenMetadataSubmitter.getCurrentMetadata', () => {
   });
 });
 
+// token_metadata.ak is unparameterized, so every launch's metadata sits at one
+// shared address, and paying a UTXO there runs no validator — its datum is a
+// claim by whoever created it. The reference NFT is what the validator itself
+// checks (carries_own_reference_nft), so it is what this reader checks too: a
+// reader matching on anything looser would accept UTXOs the chain rejects, and
+// display a forger's metadata as the launch's own.
+describe('TokenMetadataSubmitter — which UTXO it reads and revises', () => {
+  it('ignores a metadata UTXO that claims the launch but carries no reference NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      metadataUtxos: [{ datum: metadataDatumFields(), assets: {}, bare: true }],
+    });
+    await expect(submitter.getCurrentMetadata()).resolves.toBeNull();
+  });
+
+  it('ignores a reference NFT minted under a policy the datum does not name', async () => {
+    // The name alone is not enough: CIP-68 binds the pair, and the launch
+    // token's policy is a one-shot that can never mint a second one.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      metadataUtxos: [
+        {
+          datum: metadataDatumFields(),
+          assets: { ['ff'.repeat(28) + cip68ReferenceAssetName(TOKEN_BASE_NAME_HEX)]: 1n },
+          bare: true,
+        },
+      ],
+    });
+    await expect(submitter.getCurrentMetadata()).resolves.toBeNull();
+  });
+
+  it('ignores the label-333 fungible token in place of the label-100 reference NFT', async () => {
+    // Same policy, same base name — only the CIP-67 label differs, and every
+    // holder of the token has one.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      metadataUtxos: [
+        {
+          datum: metadataDatumFields(),
+          assets: { [TOKEN_POLICY_ID + TOKEN_ASSET_NAME_HEX]: 1n },
+          bare: true,
+        },
+      ],
+    });
+    await expect(submitter.getCurrentMetadata()).resolves.toBeNull();
+  });
+
+  it('refuses to choose when a second metadata UTXO also answers to the launch', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const forgerPolicy = 'ff'.repeat(28);
+    const { submitter } = makeSubmitter(builder, {
+      metadataUtxos: [
+        { datum: metadataDatumFields(), assets: {}, txHash: '11'.repeat(32) },
+        {
+          datum: metadataDatumFields({ token_policy_id: forgerPolicy }),
+          assets: { [forgerPolicy + cip68ReferenceAssetName(TOKEN_BASE_NAME_HEX)]: 1n },
+          bare: true,
+          txHash: '22'.repeat(32),
+        },
+      ],
+    });
+    await expect(submitter.getCurrentMetadata()).rejects.toThrow(/Refusing to guess/);
+  });
+
+  it('surfaces a provider failure rather than reporting the launch unminted', async () => {
+    // The other half of what a bare catch hid: a Blockfrost outage and a
+    // genuinely pre-mint launch are not the same state, and rendering both as
+    // "no metadata yet" makes the page confidently wrong during an outage.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter, fakeLucid } = makeSubmitter(builder, {});
+    fakeLucid.utxosAt.mockRejectedValue(new Error('Blockfrost 503'));
+    await expect(submitter.getCurrentMetadata()).rejects.toThrow(/Blockfrost 503/);
+  });
+
+  it('refuses a curve reference input that carries no thread NFT', async () => {
+    // The curve is only ever a reference input here, but live_curve_creator
+    // requires its thread NFT — so picking the wrong one builds a transaction
+    // the node rejects for a reason naming neither the launch nor the input.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      metadataUtxos: [{ datum: metadataDatumFields(), assets: { lovelace: 2_000_000n } }],
+      curveUtxos: [{ datum: curveDatumFields(), assets: {}, bare: true }],
+    });
+    await expect(
+      submitter.buildUpdateMetadata({
+        callerAddress: CREATOR_ADDR,
+        curveAddress: CURVE_ADDR,
+        newMetadata: { name: 'Renamed', description: 'A mock launch', decimals: 0 },
+        currentTimestamp: 1000,
+      }),
+    ).rejects.toThrow(/carries launch .* bondingCurve thread NFT/);
+  });
+
+  it('ignores another launch’s curve sitting at the same address', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const otherLaunch = toHex(new TextEncoder().encode('launch-tokmeta-2'));
+    const { submitter } = makeSubmitter(builder, {
+      metadataUtxos: [{ datum: metadataDatumFields(), assets: { lovelace: 2_000_000n } }],
+      curveUtxos: [
+        {
+          datum: curveDatumFields({ launch_id: otherLaunch }),
+          assets: { [CTO_GOVERNANCE_NFT_POLICY + threadNftAssetName('bondingCurve', otherLaunch)]: 1n },
+          bare: true,
+        },
+      ],
+    });
+    await expect(
+      submitter.buildUpdateMetadata({
+        callerAddress: CREATOR_ADDR,
+        curveAddress: CURVE_ADDR,
+        newMetadata: { name: 'Renamed', description: 'A mock launch', decimals: 0 },
+        currentTimestamp: 1000,
+      }),
+    ).rejects.toThrow(/carries launch .* bondingCurve thread NFT/);
+  });
+});
+
 describe('TokenMetadataSubmitter.buildUpdateMetadata', () => {
   it('throws when the caller has no UTXOs', async () => {
     const { builder } = makeFakeTxBuilder();
@@ -281,7 +453,7 @@ describe('TokenMetadataSubmitter.buildUpdateMetadata', () => {
     });
     // The metadata UTXO's own value is re-locked unchanged — the reference
     // NFT stays put, which the validator requires on both sides.
-    expect(assetsArg).toEqual({ lovelace: 2_000_000n });
+    expect(assetsArg).toEqual({ lovelace: 2_000_000n, [REFERENCE_NFT_UNIT]: 1n });
   });
 
   it('rejects metadata missing a field the 333 sub-standard requires', async () => {

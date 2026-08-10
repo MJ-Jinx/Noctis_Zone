@@ -57,7 +57,10 @@ import {
   validatorToAddress,
   validatorToScriptHash,
 } from '@lucid-evolution/lucid';
+import { LaunchUtxoNotFoundError, selectCip68MetadataUtxo, selectLaunchUtxo } from './launch-utxo-lookup.js';
 import {
+  type BondingCurveDatumData,
+  BondingCurveDatumSchema,
   buildCip68FungibleMetadata,
   type Cip68FungibleMetadata,
   type Cip68MetadataData,
@@ -151,36 +154,52 @@ export class TokenMetadataSubmitter {
     return utxo.datum;
   }
 
-  /** Finds the token_metadata UTXO for this launch among all UTXOs at the shared spend address, matched by launch_id in the datum. */
+  /**
+   * This launch's token_metadata UTXO, authenticated by its CIP-68 reference
+   * NFT.
+   *
+   * token_metadata.ak is unparameterized, so every launch's metadata sits at
+   * one shared address and a datum's `launch_id` is a claim by whoever paid
+   * the UTXO there. The reference NFT is what the validator itself checks
+   * (`carries_own_reference_nft`), and it can only exist because
+   * launch_token_policy minted it in the launch's genesis transaction — a
+   * one-shot policy, so exactly one of these exists per launch forever.
+   * Matching what the validator matches means this reader cannot accept a
+   * UTXO the chain would reject. See launch-utxo-lookup.ts.
+   */
   private async findMetadataUtxo(lucid: LucidEvolution): Promise<UTxO> {
     const utxos = await lucid.utxosAt(this.spendAddress);
     const launchIdHex = toHex(this.config.launchId);
-    for (const utxo of utxos) {
-      if (!utxo.datum) continue;
-      let decoded: TokenMetadataDatumData;
-      try {
-        decoded = Data.from<TokenMetadataDatumData>(utxo.datum, TokenMetadataDatumSchema);
-      } catch {
-        continue;
-      }
-      if (decoded.extra.launch_id === launchIdHex) return utxo;
-    }
-    throw new Error(`No token_metadata UTXO found for launch_id ${launchIdHex} at ${this.spendAddress}`);
+    const { utxo } = selectCip68MetadataUtxo<TokenMetadataDatumData>(
+      utxos,
+      this.spendAddress,
+      launchIdHex,
+      TokenMetadataDatumSchema,
+    );
+    return utxo;
   }
 
-  /** Finds this launch's real bonding_curve.ak UTXO — needed as a reference input for both the mint and every UpdateMetadata call, per token_metadata.ak's own live_curve_creator check. */
+  /**
+   * This launch's real bonding_curve.ak UTXO — a reference input for both the
+   * mint and every UpdateMetadata call, per token_metadata.ak's own
+   * live_curve_creator check.
+   *
+   * That check requires the curve's thread NFT on the reference input, so it
+   * is the same token this lookup selects on. Picking any other UTXO builds a
+   * transaction the validator rejects, and the rejection names neither the
+   * launch nor the reference input — so failing here, by name, is the whole
+   * value of authenticating a reader that only ever feeds a reference input.
+   */
   private async findCurveUtxo(lucid: LucidEvolution, curveAddress: Address): Promise<UTxO> {
     const utxos = await lucid.utxosAt(curveAddress);
-    // The curve UTXO is the one carrying the launch's own native asset in
-    // curve-supply quantities — callers pass an address that's already
-    // launch-specific in practice (Tier A: one UTXO per launch at the
-    // shared bonding_curve.ak address), so the first result is sufficient;
-    // a real integration would disambiguate by decoding BondingCurveDatum
-    // and matching launch_id, mirroring findMetadataUtxo above.
-    if (utxos.length === 0) {
-      throw new Error(`No bonding_curve UTXO found at ${curveAddress}`);
-    }
-    return utxos[0];
+    const { utxo } = selectLaunchUtxo<BondingCurveDatumData>(
+      utxos,
+      curveAddress,
+      toHex(this.config.launchId),
+      'bondingCurve',
+      BondingCurveDatumSchema,
+    );
+    return utxo;
   }
 
   /**
@@ -210,8 +229,16 @@ export class TokenMetadataSubmitter {
     try {
       const utxo = await this.findMetadataUtxo(lucid);
       datum = Data.from<TokenMetadataDatumData>(this.requireDatum(utxo), TokenMetadataDatumSchema);
-    } catch {
-      return null;
+    } catch (err) {
+      // Only "there is no metadata UTXO" means null — that is the real
+      // pre-mint state this method promises to report. A bare `catch` here
+      // also reported null when two UTXOs claimed the launch and when
+      // Blockfrost was simply unreachable, so a contested launch and an
+      // outage both rendered as "not minted yet" on the Token Profile page.
+      if (err instanceof LaunchUtxoNotFoundError) {
+        return null;
+      }
+      throw err;
     }
     const metadata: Record<string, string> = {};
     for (const [key, value] of datum.metadata.entries()) {

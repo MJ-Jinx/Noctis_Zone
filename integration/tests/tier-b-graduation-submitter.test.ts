@@ -24,6 +24,7 @@ vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
 });
 
 import { CML, credentialToAddress, Lucid } from '@lucid-evolution/lucid';
+import { type ThreadNftRole, threadNftAssetName } from '../tier-a-schemas.js';
 import { TierBGraduationSubmitter } from '../tier-b-graduation-submitter.js';
 
 function fakeKeyHash(fill: number): string {
@@ -42,6 +43,10 @@ const TOKEN_POLICY = 'aa'.repeat(28);
 const TOKEN_ASSET_NAME = '42'.repeat(4);
 const TOKEN_UNIT = TOKEN_POLICY + TOKEN_ASSET_NAME;
 const GOVERNOR_ADDR = addrFor(fakeKeyHash(0x11));
+const THREAD_POLICY = 'cc'.repeat(28);
+
+/** The unit a real launch's state UTXO carries for one role. */
+const threadNft = (role: ThreadNftRole) => THREAD_POLICY + threadNftAssetName(role, LAUNCH_ID_HEX);
 
 function curveDatum(overrides: Record<string, unknown> = {}) {
   return {
@@ -58,6 +63,7 @@ function curveDatum(overrides: Record<string, unknown> = {}) {
     dv_allocation_root: toHex(new Uint8Array(32).fill(9)),
     dv_claimed: [fakeKeyHash(0x88)],
     dv_settled: true,
+    thread_nft_policy: THREAD_POLICY,
     ...overrides,
   };
 }
@@ -68,6 +74,7 @@ function lpDatum(overrides: Record<string, unknown> = {}) {
     lock_timestamp: 0n,
     lp_state: 'Unlocked',
     lp_token_amount: 150_000_000n,
+    thread_nft_policy: THREAD_POLICY,
     ...overrides,
   };
 }
@@ -77,6 +84,7 @@ function vestDatum(overrides: Record<string, unknown> = {}) {
     launch_id: LAUNCH_ID_HEX,
     vesting_state: 'NotStarted',
     vest_start_timestamp: 0n,
+    thread_nft_policy: THREAD_POLICY,
     ...overrides,
   };
 }
@@ -124,21 +132,45 @@ function nextTxHash() {
 
 const addressRefs = { curve: '', lp: '', vesting: '' };
 
+interface FixtureUtxo {
+  datum: unknown;
+  assets: Record<string, bigint>;
+  /** Opt out of the thread NFT, to describe a UTXO that genuinely lacks one. */
+  noThreadNft?: boolean;
+  txHash?: string;
+}
+
+/**
+ * Every state UTXO a real launch has carries its role's thread NFT — that is
+ * what the lookup authenticates on, and no launch has produced one without it
+ * since the NFTs were introduced. Added here rather than in each fixture so a
+ * test says only what it is actually about, and merged UNDER the fixture's own
+ * assets so an explicit value still wins.
+ */
+function asChainUtxos(role: ThreadNftRole, utxos: FixtureUtxo[] | undefined) {
+  return (utxos ?? []).map((u, i) => ({
+    txHash: u.txHash ?? i.toString(16).padStart(2, '0').repeat(32),
+    outputIndex: 0,
+    ...u,
+    assets: u.noThreadNft ? u.assets : { [threadNft(role)]: 1n, ...u.assets },
+  }));
+}
+
 function makeSubmitter(
   builder: ReturnType<typeof makeFakeTxBuilder>['builder'],
   opts: {
-    curveUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
-    lpUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
-    vestingUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
+    curveUtxos?: FixtureUtxo[];
+    lpUtxos?: FixtureUtxo[];
+    vestingUtxos?: FixtureUtxo[];
   } = {},
 ) {
   const awaitTx = vi.fn().mockResolvedValue(true);
   const fakeLucid = {
     selectWallet: { fromAddress: vi.fn() },
     utxosAt: vi.fn().mockImplementation((address: string) => {
-      if (address === addressRefs.curve) return Promise.resolve(opts.curveUtxos ?? []);
-      if (address === addressRefs.lp) return Promise.resolve(opts.lpUtxos ?? []);
-      if (address === addressRefs.vesting) return Promise.resolve(opts.vestingUtxos ?? []);
+      if (address === addressRefs.curve) return Promise.resolve(asChainUtxos('bondingCurveTierB', opts.curveUtxos));
+      if (address === addressRefs.lp) return Promise.resolve(asChainUtxos('lpEscrow', opts.lpUtxos));
+      if (address === addressRefs.vesting) return Promise.resolve(asChainUtxos('vesting', opts.vestingUtxos));
       return Promise.resolve([]);
     }),
     awaitTx,
@@ -165,6 +197,62 @@ function makeSubmitter(
 beforeEach(() => {
   vi.mocked(Lucid).mockReset();
   txHashCounter = 0;
+});
+
+// The lookup's own properties are covered against Tier A. What is distinct
+// here is the role tag: Tier A and Tier B curves are separate validators at
+// separate addresses, but they are both "the curve", and their thread NFTs
+// differ only by the role byte the asset name starts with.
+describe('TierBGraduationSubmitter — which UTXO it graduates', () => {
+  it('refuses a curve UTXO that claims the launch but carries no thread NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum(), assets: {}, noThreadNft: true }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /carries launch .* bondingCurveTierB thread NFT/,
+    );
+  });
+
+  it('does not accept a Tier A curve NFT in place of a Tier B one', async () => {
+    // Same policy, same launch, same 31 bytes of launch id — only the leading
+    // role byte differs. A lookup that checked the policy alone would take it.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [
+        {
+          datum: curveDatum(),
+          assets: { [threadNft('bondingCurve')]: 1n },
+          noThreadNft: true,
+        },
+      ],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /carries launch .* bondingCurveTierB thread NFT/,
+    );
+  });
+
+  it('refuses to choose when a second UTXO also answers to the launch', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const forgerPolicy = 'ee'.repeat(28);
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [
+        { datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) },
+        {
+          datum: curveDatum({ thread_nft_policy: forgerPolicy }),
+          assets: { [forgerPolicy + threadNftAssetName('bondingCurveTierB', LAUNCH_ID_HEX)]: 1n },
+          noThreadNft: true,
+          txHash: '22'.repeat(32),
+        },
+      ],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /Refusing to guess/,
+    );
+  });
 });
 
 describe('TierBGraduationSubmitter.graduateAndSealLp — guard rails (same as Tier A)', () => {

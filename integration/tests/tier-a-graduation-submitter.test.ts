@@ -24,6 +24,7 @@ vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
 
 import { CML, credentialToAddress, Lucid } from '@lucid-evolution/lucid';
 import { TierAGraduationSubmitter } from '../tier-a-graduation-submitter.js';
+import { type ThreadNftRole, threadNftAssetName } from '../tier-a-schemas.js';
 
 function fakeKeyHash(fill: number): string {
   return fill.toString(16).padStart(2, '0').repeat(28);
@@ -41,6 +42,10 @@ const TOKEN_POLICY = 'aa'.repeat(28);
 const TOKEN_ASSET_NAME = '42'.repeat(4);
 const TOKEN_UNIT = TOKEN_POLICY + TOKEN_ASSET_NAME;
 const GOVERNOR_ADDR = addrFor(fakeKeyHash(0x11));
+const THREAD_POLICY = 'cc'.repeat(28);
+
+/** The unit a real launch's state UTXO carries for one role. */
+const threadNft = (role: ThreadNftRole) => THREAD_POLICY + threadNftAssetName(role, LAUNCH_ID_HEX);
 
 function curveDatum(overrides: Record<string, unknown> = {}) {
   return {
@@ -53,6 +58,7 @@ function curveDatum(overrides: Record<string, unknown> = {}) {
     staking_seeded: false,
     token_policy_id: TOKEN_POLICY,
     token_asset_name: TOKEN_ASSET_NAME,
+    thread_nft_policy: THREAD_POLICY,
     ...overrides,
   };
 }
@@ -63,6 +69,7 @@ function lpDatum(overrides: Record<string, unknown> = {}) {
     lock_timestamp: 0n,
     lp_state: 'Unlocked',
     lp_token_amount: 150_000_000n,
+    thread_nft_policy: THREAD_POLICY,
     ...overrides,
   };
 }
@@ -72,6 +79,7 @@ function vestDatum(overrides: Record<string, unknown> = {}) {
     launch_id: LAUNCH_ID_HEX,
     vesting_state: 'NotStarted',
     vest_start_timestamp: 0n,
+    thread_nft_policy: THREAD_POLICY,
     ...overrides,
   };
 }
@@ -136,21 +144,45 @@ function nextTxHash() {
 
 const addressRefs = { curve: '', lp: '', vesting: '' };
 
+interface FixtureUtxo {
+  datum: unknown;
+  assets: Record<string, bigint>;
+  /** Opt out of the thread NFT, to describe a UTXO that genuinely lacks one. */
+  noThreadNft?: boolean;
+  txHash?: string;
+}
+
+/**
+ * Every state UTXO a real launch has carries its role's thread NFT — that is
+ * what the lookup authenticates on, and no launch has produced one without it
+ * since the NFTs were introduced. Added here rather than in each fixture so a
+ * test says only what it is actually about, and merged UNDER the fixture's own
+ * assets so an explicit value still wins.
+ */
+function asChainUtxos(role: ThreadNftRole, utxos: FixtureUtxo[] | undefined) {
+  return (utxos ?? []).map((u, i) => ({
+    txHash: u.txHash ?? i.toString(16).padStart(2, '0').repeat(32),
+    outputIndex: 0,
+    ...u,
+    assets: u.noThreadNft ? u.assets : { [threadNft(role)]: 1n, ...u.assets },
+  }));
+}
+
 function makeSubmitter(
   builder: ReturnType<typeof makeFakeTxBuilder>['builder'],
   opts: {
-    curveUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
-    lpUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
-    vestingUtxos?: Array<{ datum: unknown; assets: Record<string, bigint> }>;
+    curveUtxos?: FixtureUtxo[];
+    lpUtxos?: FixtureUtxo[];
+    vestingUtxos?: FixtureUtxo[];
   } = {},
 ) {
   const awaitTx = vi.fn().mockResolvedValue(true);
   const fakeLucid = {
     selectWallet: { fromAddress: vi.fn() },
     utxosAt: vi.fn().mockImplementation((address: string) => {
-      if (address === addressRefs.curve) return Promise.resolve(opts.curveUtxos ?? []);
-      if (address === addressRefs.lp) return Promise.resolve(opts.lpUtxos ?? []);
-      if (address === addressRefs.vesting) return Promise.resolve(opts.vestingUtxos ?? []);
+      if (address === addressRefs.curve) return Promise.resolve(asChainUtxos('bondingCurve', opts.curveUtxos));
+      if (address === addressRefs.lp) return Promise.resolve(asChainUtxos('lpEscrow', opts.lpUtxos));
+      if (address === addressRefs.vesting) return Promise.resolve(asChainUtxos('vesting', opts.vestingUtxos));
       return Promise.resolve([]);
     }),
     awaitTx,
@@ -177,6 +209,85 @@ function makeSubmitter(
 beforeEach(() => {
   vi.mocked(Lucid).mockReset();
   txHashCounter = 0;
+});
+
+// bonding_curve.ak, lp_escrow.ak and vesting.ak are all unparameterized, so
+// every launch's UTXO of each kind sits at one shared address and anyone can
+// pay another one there with any datum they care to write. Matching the datum's
+// launch_id alone matched that claim.
+describe('TierAGraduationSubmitter — which UTXO it graduates', () => {
+  it('refuses a curve UTXO that claims the launch but carries no thread NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum(), assets: {}, noThreadNft: true }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /carries launch .* bondingCurve thread NFT/,
+    );
+  });
+
+  it('refuses to choose when a second UTXO also answers to the launch', async () => {
+    // A forger can mint under their own policy and satisfy the token check, so
+    // the lookup must stop rather than pick a winner — the genuine UTXO and
+    // the planted one are indistinguishable to a reader that trusts the datum.
+    const { builder } = makeFakeTxBuilder();
+    const planted = {
+      datum: curveDatum({ thread_nft_policy: 'ee'.repeat(28) }),
+      assets: { ['ee'.repeat(28) + threadNftAssetName('bondingCurve', LAUNCH_ID_HEX)]: 1n },
+      noThreadNft: true,
+      txHash: '22'.repeat(32),
+    };
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) }, planted],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /Refusing to guess/,
+    );
+  });
+
+  it('refuses an LP escrow UTXO with no thread NFT, not only the curve', async () => {
+    // Each of the three addresses is looked up separately, so each needs its
+    // own evidence — a check that reached only the first would still leave the
+    // other two selecting on a claim.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [{ datum: curveDatum(), assets: {} }],
+      lpUtxos: [{ datum: lpDatum(), assets: {}, noThreadNft: true }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /carries launch .* lpEscrow thread NFT/,
+    );
+  });
+
+  it('refuses a vesting UTXO with no thread NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      vestingUtxos: [{ datum: vestDatum(), assets: {}, noThreadNft: true }],
+    });
+    await expect(submitter.startVesting(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /carries launch .* vesting thread NFT/,
+    );
+  });
+
+  it('ignores another launch’s UTXO sitting at the same address', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const otherLaunch = toHex(new TextEncoder().encode('launch-grad-2'));
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [
+        {
+          datum: curveDatum({ launch_id: otherLaunch }),
+          assets: { [THREAD_POLICY + threadNftAssetName('bondingCurve', otherLaunch)]: 1n },
+          noThreadNft: true,
+        },
+      ],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+    await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(
+      /carries launch .* bondingCurve thread NFT/,
+    );
+  });
 });
 
 describe('TierAGraduationSubmitter.graduateAndSealLp — guard rails', () => {
@@ -378,7 +489,13 @@ describe('TierAGraduationSubmitter.startVesting', () => {
 
     await submitter.startVesting(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000);
     const [, , assetsArg] = payToContractCalls[0] as [string, unknown, Record<string, bigint>];
-    expect(assetsArg).toBe(existingAssets);
+    // By value, not identity. The old assertion was `toBe(existingAssets)`,
+    // which held only because the fixture object was handed straight back —
+    // it would have passed just as well against a builder that never read the
+    // UTXO. The thread NFT belongs in the expectation for the same reason it
+    // belongs on the UTXO: re-locking "its own assets" has to carry it, or
+    // the next lookup finds nothing.
+    expect(assetsArg).toStrictEqual({ ...existingAssets, [threadNft('vesting')]: 1n });
   });
 
   it('requires the governor as signer', async () => {
