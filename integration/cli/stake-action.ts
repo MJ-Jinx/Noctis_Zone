@@ -55,7 +55,7 @@ interface Input {
   amount?: string; // stringified bigint
   // stake — optional backdating for real Preprod verification of the
   // 7-day bonding period without a literal 7-day wait (see staking-
-  // submitter.ts's stakeCore comment for why this is safe to accept).
+  // submitter().ts's stakeCore comment for why this is safe to accept).
   stakeTimestampMs?: number;
 
   // unstake — identifies which of the staker's positions to close
@@ -107,21 +107,34 @@ async function main() {
   const blueprint = loadPlutusBlueprint(__dirname);
   const stakingPoolScriptCbor = loadValidatorCbor(blueprint, 'staking_pool.staking_pool.spend');
 
-  const submitter = new StakingSubmitter({
-    blockfrostProjectId: input.blockfrostProjectId,
-    blockfrostUrl: input.blockfrostUrl,
-    network: CARDANO_NETWORK_MAP[input.network],
-    stakingPoolScriptCbor,
-    launchIdHex: input.launchIdHex,
-    threadNftPolicyId: input.threadNftPolicyId,
-  });
+  // Lazily constructed, and that ordering is the point: the submitter opens a
+  // Blockfrost connection in its constructor and stores the promise, which
+  // nothing awaits until a method runs. Built before the per-action field
+  // checks below, a request that was never valid still opened a connection —
+  // and when that connection then failed, its rejection had no awaiter, so
+  // Node printed a stack trace to stderr AFTER the real {"error"} answer had
+  // already gone to stdout. The output contract held; a human reading the
+  // terminal saw a crash next to a correct message.
+  //
+  // Each case validates its own fields on their own lines before calling
+  // `submitter()`, so an invalid request never reaches the network at all.
+  let submitterInstance: StakingSubmitter | null = null;
+  const submitter = (): StakingSubmitter =>
+    (submitterInstance ??= new StakingSubmitter({
+      blockfrostProjectId: input.blockfrostProjectId,
+      blockfrostUrl: input.blockfrostUrl,
+      network: CARDANO_NETWORK_MAP[input.network],
+      stakingPoolScriptCbor,
+      launchIdHex: input.launchIdHex,
+      threadNftPolicyId: input.threadNftPolicyId,
+    }));
 
   let result: unknown;
   switch (input.action) {
     case 'stake': {
       const mnemonic = requireField(input, 'stakerMnemonic', input.action);
       const amount = BigInt(requireField(input, 'amount', input.action));
-      result = await submitter.stake(
+      result = await submitter().stake(
         mnemonic,
         amount,
         input.stakeTimestampMs === undefined
@@ -140,7 +153,7 @@ async function main() {
       );
       lucidForAddr.selectWallet.fromSeed(mnemonic);
       const stakerAddress = await lucidForAddr.wallet().address();
-      const positions = await submitter.findPositions(stakerAddress);
+      const positions = await submitter().findPositions(stakerAddress);
       if (positions.length === 0) throw new Error('No staking positions found for this wallet.');
       const position =
         input.positionTxHash !== undefined
@@ -149,7 +162,7 @@ async function main() {
             )
           : positions[0];
       if (!position) throw new Error('Specified position not found.');
-      result = await submitter.unstake(mnemonic, position);
+      result = await submitter().unstake(mnemonic, position);
       break;
     }
     case 'claim-rewards': {
@@ -157,14 +170,14 @@ async function main() {
       const payoutAmount = BigInt(requireField(input, 'payoutAmount', input.action));
       const leafIndex = requireField(input, 'leafIndex', input.action);
       const merkleProof = requireField(input, 'merkleProof', input.action);
-      result = await submitter.claimRewards(mnemonic, payoutAmount, leafIndex, merkleProof);
+      result = await submitter().claimRewards(mnemonic, payoutAmount, leafIndex, merkleProof);
       break;
     }
     case 'top-up': {
       const key = requireField(input, 'signerPrivateKeyExtendedHex', input.action);
       const addr = requireField(input, 'signerAddress', input.action);
       const amount = BigInt(requireField(input, 'amount', input.action));
-      result = await submitter.topUpPool(key, addr, amount);
+      result = await submitter().topUpPool(key, addr, amount);
       break;
     }
     case 'publish-reward-root': {
@@ -172,16 +185,16 @@ async function main() {
       const addr = requireField(input, 'signerAddress', input.action);
       const newRoot = requireField(input, 'newRootHex', input.action);
       const entryCount = requireField(input, 'entryCount', input.action);
-      result = await submitter.publishRewardRoot(key, addr, newRoot, entryCount);
+      result = await submitter().publishRewardRoot(key, addr, newRoot, entryCount);
       break;
     }
     case 'read-pool': {
-      result = await submitter.readPoolDatum();
+      result = await submitter().readPoolDatum();
       break;
     }
     case 'read-positions': {
       const stakerAddress = requireField(input, 'stakerAddress', input.action);
-      result = await submitter.findPositions(stakerAddress);
+      result = await submitter().findPositions(stakerAddress);
       break;
     }
     case 'build-reward-snapshot': {

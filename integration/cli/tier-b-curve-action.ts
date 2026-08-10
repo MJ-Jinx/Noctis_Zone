@@ -5,7 +5,7 @@
 // per-redeemer files, matching the class this session's own fix
 // exposed: activate/open-dv-claim/buy/claim-creator-fees/claim-platform-fees/
 // expire/claim-buyback are all thin wrappers around
-// tier-b-curve-submitter.ts's real methods — one process per call either
+// tier-b-curve-submitter().ts's real methods — one process per call either
 // way, just fewer files to keep in sync with that submitter's own method
 // signatures.
 //
@@ -91,7 +91,7 @@ interface Input {
 
   // claim-creator-fees — same extended-key signing shape as
   // governorPrivateKeyExtendedHex/governorAddress above (see
-  // tier-b-curve-submitter.ts's claimCreatorFees() doc comment for why:
+  // tier-b-curve-submitter().ts's claimCreatorFees() doc comment for why:
   // the platform wallet custody scheme never persists a mnemonic).
   signerPrivateKeyExtendedHex?: string;
   signerAddress?: string;
@@ -130,16 +130,29 @@ async function main() {
   const blueprint = loadPlutusBlueprint(__dirname);
   const compiledScriptCbor = loadValidatorCbor(blueprint, 'bonding_curve_tier_b.bonding_curve_tier_b.spend');
 
-  const submitter = new LucidTierBCurveSubmitter({
-    blockfrostProjectId: input.blockfrostProjectId,
-    blockfrostUrl: input.blockfrostUrl,
-    network: CARDANO_NETWORK_MAP[input.network],
-    compiledScriptCbor,
-    launchIdHex: input.launchIdHex,
-    threadNftPolicyId: input.threadNftPolicyId,
-    ...(input.referenceScript ? { referenceScript: input.referenceScript } : {}),
-    ...(input.executionUnits ? { executionUnits: input.executionUnits } : {}),
-  });
+  // Lazily constructed, and that ordering is the point: the submitter opens a
+  // Blockfrost connection in its constructor and stores the promise, which
+  // nothing awaits until a method runs. Built before the per-action field
+  // checks below, a request that was never valid still opened a connection —
+  // and when that connection then failed, its rejection had no awaiter, so
+  // Node printed a stack trace to stderr AFTER the real {"error"} answer had
+  // already gone to stdout. The output contract held; a human reading the
+  // terminal saw a crash next to a correct message.
+  //
+  // Each case validates its own fields on their own lines before calling
+  // `submitter()`, so an invalid request never reaches the network at all.
+  let submitterInstance: LucidTierBCurveSubmitter | null = null;
+  const submitter = (): LucidTierBCurveSubmitter =>
+    (submitterInstance ??= new LucidTierBCurveSubmitter({
+      blockfrostProjectId: input.blockfrostProjectId,
+      blockfrostUrl: input.blockfrostUrl,
+      network: CARDANO_NETWORK_MAP[input.network],
+      compiledScriptCbor,
+      launchIdHex: input.launchIdHex,
+      threadNftPolicyId: input.threadNftPolicyId,
+      ...(input.referenceScript ? { referenceScript: input.referenceScript } : {}),
+      ...(input.executionUnits ? { executionUnits: input.executionUnits } : {}),
+    }));
 
   let result: unknown;
   switch (input.action) {
@@ -147,7 +160,7 @@ async function main() {
       const key = requireField(input, 'governorPrivateKeyExtendedHex', input.action);
       const addr = requireField(input, 'governorAddress', input.action);
       const ts = requireTimestampMs(requireField(input, 'currentTimestampMs', input.action), 'currentTimestampMs');
-      result = await submitter.activateCurve(key, addr, ts);
+      result = await submitter().activateCurve(key, addr, ts);
       break;
     }
     // Opens the 24-hour window in which DarkVeil registrants, and only they,
@@ -159,7 +172,7 @@ async function main() {
       const addr = requireField(input, 'governorAddress', input.action);
       const count = requireField(input, 'registrantCount', input.action);
       const ts = requireTimestampMs(requireField(input, 'currentTimestampMs', input.action), 'currentTimestampMs');
-      result = await submitter.openDvClaim(key, addr, count, ts);
+      result = await submitter().openDvClaim(key, addr, count, ts);
       break;
     }
     case 'buy': {
@@ -169,7 +182,7 @@ async function main() {
       // claim window as well as public buys. Omit it only for a curve nothing
       // has been taken from yet; the submitter refuses to build a transaction
       // if what it is handed does not derive the datum's own cap_root.
-      result = await submitter.buyTokens(
+      result = await submitter().buyTokens(
         mnemonic,
         amount,
         capAccumulatorFromHex(input.capState ?? []),
@@ -180,7 +193,7 @@ async function main() {
     case 'claim-darkveil': {
       const mnemonic = requireField(input, 'buyerMnemonic', input.action);
       const claim = requireField(input, 'dvClaim', input.action);
-      result = await submitter.claimDarkVeilTokens(
+      result = await submitter().claimDarkVeilTokens(
         mnemonic,
         {
           dvAmount: BigInt(claim.dvAmount),
@@ -199,7 +212,7 @@ async function main() {
     case 'sell': {
       const mnemonic = requireField(input, 'sellerMnemonic', input.action);
       const amount = BigInt(requireField(input, 'tokenAmount', input.action));
-      result = await submitter.sellTokens(mnemonic, amount, capAccumulatorFromHex(input.capState ?? []));
+      result = await submitter().sellTokens(mnemonic, amount, capAccumulatorFromHex(input.capState ?? []));
       break;
     }
     case 'claim-creator-fees': {
@@ -210,27 +223,27 @@ async function main() {
         input.platformClaimFeeLovelace !== undefined ? BigInt(input.platformClaimFeeLovelace) : undefined;
       result =
         platformFee !== undefined
-          ? await submitter.claimCreatorFees(key, addr, amount, platformFee)
-          : await submitter.claimCreatorFees(key, addr, amount);
+          ? await submitter().claimCreatorFees(key, addr, amount, platformFee)
+          : await submitter().claimCreatorFees(key, addr, amount);
       break;
     }
     case 'claim-platform-fees': {
       const key = requireField(input, 'governorPrivateKeyExtendedHex', input.action);
       const addr = requireField(input, 'governorAddress', input.action);
       const amount = BigInt(requireField(input, 'amount', input.action));
-      result = await submitter.claimPlatformFees(key, addr, amount);
+      result = await submitter().claimPlatformFees(key, addr, amount);
       break;
     }
     case 'expire': {
       const key = requireField(input, 'governorPrivateKeyExtendedHex', input.action);
       const addr = requireField(input, 'governorAddress', input.action);
-      result = await submitter.expireCurve(key, addr);
+      result = await submitter().expireCurve(key, addr);
       break;
     }
     case 'claim-buyback': {
       const mnemonic = requireField(input, 'buyerMnemonic', input.action);
       const amount = BigInt(requireField(input, 'tokenAmount', input.action));
-      result = await submitter.claimBuyback(mnemonic, amount);
+      result = await submitter().claimBuyback(mnemonic, amount);
       break;
     }
     default:

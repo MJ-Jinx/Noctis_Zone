@@ -82,18 +82,31 @@ async function main() {
 
   const blueprint = loadPlutusBlueprint(__dirname);
 
-  const submitter = new TokenMetadataSubmitter({
-    blockfrostProjectId: input.blockfrostProjectId,
-    blockfrostUrl: input.blockfrostUrl,
-    network: CARDANO_NETWORK_MAP[input.network],
-    spendScriptCbor: loadValidatorCbor(blueprint, 'token_metadata.token_metadata.spend'),
-    bondingCurveScriptHash: input.bondingCurveScriptHash,
-    ctoGovernanceScriptHash: input.ctoGovernanceScriptHash,
-    threadNftPolicyId: input.threadNftPolicyIdHex,
-    tokenPolicyId: input.tokenPolicyIdHex,
-    tokenAssetNameHex: input.tokenAssetNameHex,
-    launchId: hexToBytes(input.launchIdHex),
-  });
+  // Lazily constructed, and that ordering is the point: the submitter opens a
+  // Blockfrost connection in its constructor and stores the promise, which
+  // nothing awaits until a method runs. Built before the per-action field
+  // checks below, a request that was never valid still opened a connection —
+  // and when that connection then failed, its rejection had no awaiter, so
+  // Node printed a stack trace to stderr AFTER the real {"error"} answer had
+  // already gone to stdout. The output contract held; a human reading the
+  // terminal saw a crash next to a correct message.
+  //
+  // Each case validates its own fields on their own lines before calling
+  // `submitter()`, so an invalid request never reaches the network at all.
+  let submitterInstance: TokenMetadataSubmitter | null = null;
+  const submitter = (): TokenMetadataSubmitter =>
+    (submitterInstance ??= new TokenMetadataSubmitter({
+      blockfrostProjectId: input.blockfrostProjectId,
+      blockfrostUrl: input.blockfrostUrl,
+      network: CARDANO_NETWORK_MAP[input.network],
+      spendScriptCbor: loadValidatorCbor(blueprint, 'token_metadata.token_metadata.spend'),
+      bondingCurveScriptHash: input.bondingCurveScriptHash,
+      ctoGovernanceScriptHash: input.ctoGovernanceScriptHash,
+      threadNftPolicyId: input.threadNftPolicyIdHex,
+      tokenPolicyId: input.tokenPolicyIdHex,
+      tokenAssetNameHex: input.tokenAssetNameHex,
+      launchId: hexToBytes(input.launchIdHex),
+    }));
 
   let result: unknown;
   switch (input.action) {
@@ -101,7 +114,7 @@ async function main() {
       const callerAddress = requireField(input, 'callerAddress', input.action);
       const metadata = requireField(input, 'metadata', input.action);
       const ts = requireTimestampMs(requireField(input, 'currentTimestampMs', input.action), 'currentTimestampMs');
-      result = await submitter.buildUpdateMetadata({
+      result = await submitter().buildUpdateMetadata({
         callerAddress,
         curveAddress: input.curveAddress,
         newMetadata: metadata,
@@ -116,13 +129,13 @@ async function main() {
       // bare `null` decodes on the PHP side identically to a process that
       // produced nothing at all. Wrapping keeps "no metadata yet"
       // distinguishable from "the CLI failed".
-      result = { metadata: await submitter.getCurrentMetadata() };
+      result = { metadata: await submitter().getCurrentMetadata() };
       break;
     }
     case 'submit-update': {
       const unsignedTxCbor = requireField(input, 'unsignedTxCbor', input.action);
       const witnessSetCbor = requireField(input, 'witnessSetCbor', input.action);
-      result = await submitter.finalizeAndSubmit(unsignedTxCbor, witnessSetCbor);
+      result = await submitter().finalizeAndSubmit(unsignedTxCbor, witnessSetCbor);
       break;
     }
     default:

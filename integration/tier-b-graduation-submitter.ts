@@ -140,6 +140,13 @@ export class TierBGraduationSubmitter {
     this.lpEscrowAddress = validatorToAddress(config.network, this.lpEscrowValidator);
     this.vestingAddress = validatorToAddress(config.network, this.vestingValidator);
     this.lucidPromise = Lucid(new Blockfrost(config.blockfrostUrl, config.blockfrostProjectId), config.network);
+    // Nothing awaits this until a method runs, so a caller that constructs the
+    // submitter and then fails before calling one leaves the rejection with no
+    // handler — and Node prints it to stderr after the real answer has already
+    // been written to stdout. Attaching a no-op handler marks it handled
+    // WITHOUT swallowing it: a later `await this.lucidPromise` still rejects
+    // with the same error, which is the whole point (verified, not assumed).
+    this.lucidPromise.catch(() => {});
   }
 
   /**
