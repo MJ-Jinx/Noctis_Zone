@@ -77,6 +77,8 @@ interface Input {
   // build-reward-snapshot — governor cron job
   tokenPolicyId?: string;
   tokenAssetName?: string;
+  /** The launch's thread-NFT policy id, from WordPress's own launch record — never from a datum. */
+  threadNftPolicyId?: string;
   durationDays?: number;
   bondingPeriodDays?: number;
 
@@ -172,6 +174,10 @@ async function main() {
       });
       const tokenPolicyId = requireField(input, 'tokenPolicyId', input.action);
       const tokenAssetName = requireField(input, 'tokenAssetName', input.action);
+      // Required, not optional: the genesis pool output is identified by this
+      // launch's thread NFT, and the policy has to come from the caller's own
+      // record rather than the datum being read.
+      const threadNftPolicyId = requireField(input, 'threadNftPolicyId', input.action);
       const durationDays = requireField(input, 'durationDays', input.action);
       const snapshot = await buildStakingRewardSnapshot(
         {
@@ -183,6 +189,7 @@ async function main() {
           launchIdHex: input.launchIdHex,
           tokenPolicyId,
           tokenAssetName,
+          threadNftPolicyId,
           durationDays,
           bondingPeriodDays: input.bondingPeriodDays,
         },

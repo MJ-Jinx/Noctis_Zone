@@ -51,7 +51,7 @@ import {
   type RewardTree,
   verifyRewardMerkleProof,
 } from './staking-reward-tree.js';
-import { type StakingDatumData, StakingDatumSchema } from './tier-a-schemas.js';
+import { type StakingDatumData, StakingDatumSchema, threadNftAssetName } from './tier-a-schemas.js';
 
 interface BlockfrostConfig {
   blockfrostProjectId: string;
@@ -112,7 +112,15 @@ export async function fetchStakeHistory(
   launchIdHex: string,
   tokenPolicyId: string,
   tokenAssetName: string,
+  threadNftPolicyId: string,
 ): Promise<StakeHistory> {
+  if (!threadNftPolicyId) {
+    throw new Error(
+      'threadNftPolicyId is required: the genesis pool output is identified by the launch thread NFT, ' +
+        "and that policy must come from the caller's own record of the launch. Reading it from the datum " +
+        'under inspection would let a forged output nominate its own policy and pass.',
+    );
+  }
   const txs = await (async () => {
     let all: BfAddressTx[] = [];
     let page = 1;
@@ -139,6 +147,7 @@ export async function fetchStakeHistory(
   let initialSeededAmount: bigint | null = null;
   const poolStartTimestampMs = txs[0].block_time * 1000;
   const tokenUnit = tokenPolicyId + tokenAssetName;
+  const poolThreadNftUnit = threadNftPolicyId + threadNftAssetName('stakingPool', launchIdHex);
 
   for (const tx of txs) {
     const utxos = await bf<BfTxUtxos>(config, `/txs/${tx.tx_hash}/utxos`);
@@ -163,11 +172,27 @@ export async function fetchStakeHistory(
         continue;
       }
       if ('Pool' in decoded && decoded.Pool[0].launch_id === launchIdHex && initialSeededAmount === null) {
-        // First-ever Pool output for this launch — the genesis seed. Its
-        // real token balance isn't in the datum itself (only claimed_so_far
-        // is), so this needs the real UTXO value — fetched separately below
-        // rather than assumed, since Blockfrost's utxos endpoint here only
-        // gave us the datum, not the amount array for this narrowed type.
+        // First-ever GENUINE Pool output for this launch — the genesis seed.
+        //
+        // Genuine is the load-bearing word. Everything above is the datum's
+        // own claim, and paying an output to a script address runs no
+        // validator, so anyone can write `Pool` and this launch_id. This
+        // figure becomes `dailyEmission`, which decides every reward the
+        // launch ever mints — so an inflated forgery landing in an EARLIER
+        // transaction than the real seed would be taken as genesis and
+        // overpay for the pool's whole life. First-wins is correct for
+        // "genesis"; it is what makes ordering worth attacking.
+        //
+        // The pool's thread NFT is what settles it, under the policy the
+        // CALLER supplies from its own record of the launch — never the one
+        // this datum nominates, which a forger would simply set to their own.
+        // Same pair `pool_thread_nft_intact` checks on-chain.
+        const poolNftHeld = await fetchOutputTokenQuantity(config, tx.tx_hash, output.output_index, poolThreadNftUnit);
+        if (poolNftHeld !== 1n) continue;
+        // Its real token balance isn't in the datum itself (only
+        // claimed_so_far is), so this needs the real UTXO value — fetched
+        // separately rather than assumed, since Blockfrost's utxos endpoint
+        // here only gave us the datum, not the amount array.
         initialSeededAmount = await fetchOutputTokenQuantity(config, tx.tx_hash, output.output_index, tokenUnit);
       } else if ('Position' in decoded && decoded.Position[0].launch_id === launchIdHex) {
         const pos = decoded.Position[0];
@@ -264,6 +289,15 @@ export interface StakingRewardSnapshotConfig {
   launchIdHex: string;
   tokenPolicyId: string;
   tokenAssetName: string;
+  /**
+   * The launch's thread-NFT policy id, from the caller's OWN record of the
+   * launch — `np_launch_meta_thread_nft_policy_id` on the WordPress side.
+   *
+   * Deliberately not read from the datum being inspected: that is what a
+   * forged pool output would nominate for itself. This is the one field that
+   * makes the genesis read evidence rather than a claim.
+   */
+  threadNftPolicyId: string;
   /** Creator's chosen runway (STAKING_DURATION_MIN_DAYS..MAX_DAYS, 1095-1825) — sourced from the launch CPT, no on-chain representation exists. */
   durationDays: number;
   /** STAKING_BONDING_PERIOD_DAYS, 7. */
@@ -305,6 +339,7 @@ export async function buildStakingRewardSnapshot(
     snapshotConfig.launchIdHex,
     snapshotConfig.tokenPolicyId,
     snapshotConfig.tokenAssetName,
+    snapshotConfig.threadNftPolicyId,
   );
 
   const totals = computeRewardSnapshot(
