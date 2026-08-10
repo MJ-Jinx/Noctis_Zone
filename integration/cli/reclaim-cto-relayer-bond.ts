@@ -26,6 +26,7 @@ declare const __dirname: string;
 interface ReclaimBondInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   callerPrivateKeyExtendedHex: string;
   blockfrostProjectId: string;
   blockfrostUrl: string;
@@ -42,6 +43,7 @@ async function main() {
   requireFieldsAllowZero(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'callerPrivateKeyExtendedHex',
     'blockfrostProjectId',
     'blockfrostUrl',
@@ -57,6 +59,7 @@ async function main() {
     compiledScriptCbor,
     callerPrivateKey: input.callerPrivateKeyExtendedHex,
     launchId: hexToBytes(input.launchIdHex),
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   const result = await submitter.reclaimRelayerBond();

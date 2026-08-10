@@ -140,6 +140,9 @@ export interface DarkVeilWidgetConfig {
     blockfrostUrl: string;
     network: LucidNetwork;
     compiledScriptCbor: string;
+    /** The launch's thread-NFT policy id, hex, as rendered by the platform.
+     *  The Tier B curve UTXO the claim spends is authenticated against it. */
+    threadNftPolicyId: string;
   };
 }
 
@@ -347,6 +350,7 @@ async function claimTierB(launchId: Uint8Array, walletApi: WalletApi, claimParam
       blockfrostUrl: cardano.blockfrostUrl,
       network: cardano.network,
       compiledScriptCbor: cardano.compiledScriptCbor,
+      threadNftPolicyId: cardano.threadNftPolicyId,
       launchId,
     },
     walletApi,

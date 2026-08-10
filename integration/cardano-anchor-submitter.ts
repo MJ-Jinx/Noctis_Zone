@@ -104,6 +104,12 @@ export interface LucidAnchorSubmitterConfig {
    *  (per CLAUDE.md's "platform-operated relayer, address is public" design)
    *  controls this — not generated or stored here. */
   relayerPrivateKey: string;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch — what the anchor UTXO is authenticated against. See
+   * launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
   /** Which launch's anchor UTXO this submitter targets — matches
    *  NoctisLaunchManager's own "one instance per launch" pattern
    *  (midnight-client.ts) rather than taking launch_id per call, since
@@ -157,6 +163,7 @@ export class LucidAnchorSubmitter implements CardanoTxSubmitter {
       launchIdHex,
       'zkAnchor',
       ZkAnchorDatumSchema as never,
+      this.config.threadNftPolicyId,
     );
     return found.utxo;
   }

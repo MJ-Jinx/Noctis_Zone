@@ -26,6 +26,7 @@ declare const __dirname: string;
 interface VoidProposalInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   governorAddress: string;
   governorPrivateKeyExtendedHex: string;
   currentTimestampMs: number;
@@ -44,6 +45,7 @@ async function main() {
   requireFieldsAllowZero(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'governorAddress',
     'governorPrivateKeyExtendedHex',
     'currentTimestampMs',
@@ -61,6 +63,7 @@ async function main() {
     compiledScriptCbor,
     governorPrivateKey: input.governorPrivateKeyExtendedHex,
     launchId: hexToBytes(input.launchIdHex),
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   const result = await submitter.voidPendingProposal(

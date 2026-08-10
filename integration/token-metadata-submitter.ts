@@ -175,6 +175,8 @@ export class TokenMetadataSubmitter {
       this.spendAddress,
       launchIdHex,
       TokenMetadataDatumSchema,
+      this.config.tokenPolicyId,
+      this.config.tokenAssetNameHex,
     );
     return utxo;
   }
@@ -198,6 +200,7 @@ export class TokenMetadataSubmitter {
       toHex(this.config.launchId),
       'bondingCurve',
       BondingCurveDatumSchema,
+      this.config.threadNftPolicyId,
     );
     return utxo;
   }

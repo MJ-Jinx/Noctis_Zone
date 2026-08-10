@@ -46,6 +46,9 @@ export interface CardanoDvAllocationAnchorSubmitterConfig {
   /** bonding_curve_tier_b.ak's compiled PlutusV3 script CBOR — plutus.json's `validators[].compiledCode` for `bonding_curve_tier_b.bonding_curve_tier_b.spend`. One shared, unparameterized script address across every Tier B launch. */
   compiledScriptCbor: string;
   launchIdHex: string;
+  /** The launch's thread-NFT policy id, hex, from the platform's own record —
+   *  what the curve UTXO is authenticated against. See launch-utxo-lookup.ts. */
+  threadNftPolicyId: string;
   /**
    * Where this validator is published as a reference script.
    *
@@ -69,6 +72,7 @@ export class CardanoDvAllocationAnchorSubmitter {
       network: config.network,
       compiledScriptCbor: config.compiledScriptCbor,
       launchIdHex: config.launchIdHex,
+      threadNftPolicyId: config.threadNftPolicyId,
       ...(config.referenceScript ? { referenceScript: config.referenceScript } : {}),
       ...(config.executionUnits ? { executionUnits: config.executionUnits } : {}),
     });

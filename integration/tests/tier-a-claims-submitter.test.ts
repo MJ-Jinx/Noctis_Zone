@@ -169,6 +169,7 @@ function makeSubmitter(
     vestingScriptCbor: '590001',
     bondingCurveScriptCbor: '590002',
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
   });
   // Real validatorToAddress output for each distinct script CBOR — capture
   // once so the utxosAt mock above can distinguish the two real addresses.

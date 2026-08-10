@@ -198,6 +198,7 @@ function makeSubmitter(
     network: 'Preprod',
     lpEscrowScriptCbor: '590002',
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
     minswap: MINSWAP_CONFIG,
   });
   addressRefs.lp = (submitter as unknown as { lpEscrowAddress: string }).lpEscrowAddress;

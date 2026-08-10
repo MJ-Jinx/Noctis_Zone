@@ -194,6 +194,7 @@ function makeSubmitter(
     lpEscrowScriptCbor: '590002',
     vestingScriptCbor: '590003',
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
   });
   addressRefs.curve = (submitter as unknown as { bondingCurveAddress: string }).bondingCurveAddress;
   addressRefs.lp = (submitter as unknown as { lpEscrowAddress: string }).lpEscrowAddress;
@@ -242,18 +243,38 @@ describe('TierBGraduationSubmitter — which UTXO it graduates', () => {
     );
   });
 
-  it('refuses to choose when a second UTXO also answers to the launch', async () => {
-    const { builder } = makeFakeTxBuilder();
+  it('graduates the genuine curve when a forged one is planted beside it', async () => {
+    // The forged datum names the forger's own policy, so a token check built
+    // from the datum accepts it. Built from the policy the platform recorded
+    // at mint, it is not a candidate at all.
+    const { builder, collectFromCalls } = makeFakeTxBuilder();
     const forgerPolicy = 'ee'.repeat(28);
     const { submitter } = makeSubmitter(builder, {
       curveUtxos: [
-        { datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) },
+        // Planted first, because provider ordering is not the caller's to choose.
         {
           datum: curveDatum({ thread_nft_policy: forgerPolicy }),
           assets: { [forgerPolicy + threadNftAssetName('bondingCurveTierB', LAUNCH_ID_HEX)]: 1n },
           noThreadNft: true,
           txHash: '22'.repeat(32),
         },
+        { datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) },
+      ],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+
+    await submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000);
+
+    const spentCurve = collectFromCalls[0]?.[0] as Array<{ txHash: string }>;
+    expect(spentCurve[0]?.txHash).toBe('11'.repeat(32));
+  });
+
+  it('still refuses when two UTXOs both carry the genuine thread NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [
+        { datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) },
+        { datum: curveDatum(), assets: {}, txHash: '22'.repeat(32) },
       ],
       lpUtxos: [{ datum: lpDatum(), assets: {} }],
     });

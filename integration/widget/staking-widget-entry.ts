@@ -36,6 +36,9 @@ export interface StakingWidgetConfig {
   /** staking_pool.ak's compiled PlutusV3 script CBOR — read server-side (PHP), inlined here same as tier-a-buy-widget-entry.ts's compiledScriptCbor. */
   compiledScriptCbor: string;
   launchIdHex: string;
+  /** The launch's thread-NFT policy id, hex, as rendered by the platform for
+   *  this launch. Its state UTXOs are authenticated against it. */
+  threadNftPolicyId: string;
   /** Same-origin REST base for getMyRewardProof(), e.g. `${site}/wp-json/np/v1/`. */
   restBaseUrl: string;
 }
@@ -83,6 +86,7 @@ function configure(newConfig: StakingWidgetConfig): void {
     network: newConfig.network,
     stakingPoolScriptCbor: newConfig.compiledScriptCbor,
     launchIdHex: newConfig.launchIdHex,
+    threadNftPolicyId: newConfig.threadNftPolicyId,
   };
   submitter = new StakingSubmitter(submitterConfig);
 }

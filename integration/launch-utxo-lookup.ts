@@ -17,14 +17,20 @@
 //      that cannot tell which UTXO is the real one must not pick one anyway.
 //      A loud failure is recoverable; building against the wrong UTXO is not.
 //
-// KNOWN LIMIT, stated plainly: the policy id is read from the datum being
-// checked, so a UTXO carrying a self-authored datum naming the forger's own
-// policy, plus a token minted under it, satisfies rule 1. What it cannot do is
-// pass rule 2 — it matches alongside the real one, and the lookup refuses. So
-// the reachable outcome is a caller that stops, never a caller that proceeds
-// against a planted UTXO. Closing rule 1 fully means taking the expected policy
-// id from the caller's own record of the launch rather than from the datum,
-// which is a config change across every submitter and CLI entry point.
+// Rule 1 rests on knowing which policy is the genuine one, and that answer
+// cannot come from the UTXO being checked. A datum names its own policy, so a
+// forger names theirs, mints a token under it, and satisfies any test derived
+// from the datum alone. The expected policy id is therefore a REQUIRED
+// argument, taken from the caller's own record of the launch — the platform's
+// launch row, written when the launch was minted, which no on-chain actor can
+// edit. Both are then checked: the token must exist under the caller's policy,
+// and the datum must name that same policy, so a UTXO disagreeing with the
+// record is refused rather than quietly preferred.
+//
+// This is deliberately not optional and has no default. A lookup that falls
+// back to the datum when the caller passes nothing is the forgeable lookup
+// again, reachable by omission — and omission is exactly what happens as new
+// entry points get written.
 //
 // THREE ENTRY POINTS, ONE CORE. They differ only in how the launch's datum is
 // reached and which token authenticates it — the matching and the refusal are
@@ -88,10 +94,38 @@ interface AuthenticatorSpec<TDatum> {
   unwrap: (decoded: unknown) => TDatum | null;
   /** The launch id this datum claims. */
   launchIdOf: (datum: TDatum) => string;
-  /** Policy id + asset name, hex, that must be present exactly once. */
-  unitOf: (datum: TDatum) => string;
+  /**
+   * Policy id + asset name, hex, that must be present exactly once — built
+   * from the policy the CALLER expects, never from the datum.
+   */
+  unit: string;
+  /**
+   * The policy this datum claims to be authenticated by. Checked against the
+   * caller's expectation, so a UTXO whose datum disagrees with the platform's
+   * record is refused rather than silently skipped for the wrong reason.
+   */
+  claimedPolicyOf: (datum: TDatum) => string;
+  /** The policy the caller expects, hex. */
+  expectedPolicy: string;
   /** Names the token in the not-found error, e.g. "bondingCurve thread NFT". */
   label: string;
+}
+
+/**
+ * A policy id has to be a real one before it can authenticate anything.
+ *
+ * An empty string concatenated with an asset name yields a unit that no UTXO
+ * carries, so the lookup would report "never minted" for what is really a
+ * misconfigured caller — the two failures need to stay distinguishable.
+ */
+function requirePolicyId(policyId: string, context: string): string {
+  if (!/^[0-9a-f]{56}$/i.test(policyId)) {
+    throw new Error(
+      `${context} needs the launch's expected policy id (28 bytes, hex) to authenticate the UTXO it finds, got: ${JSON.stringify(policyId)}. ` +
+        "It must come from the platform's own record of the launch — reading it off the datum being checked would authenticate that datum against itself.",
+    );
+  }
+  return policyId.toLowerCase();
 }
 
 /**
@@ -120,8 +154,20 @@ function selectAuthenticatedUtxo<TDatum>(
     const datum = spec.unwrap(decoded);
     if (datum === null) continue;
     if (spec.launchIdOf(datum) !== launchIdHex) continue;
-    // The token has to actually be there.
-    if ((utxo.assets[spec.unitOf(datum)] ?? 0n) !== 1n) continue;
+    // These next two OVERLAP, and the overlap is deliberate — but only one of
+    // them needs to hold for the property to, so neither is described here as
+    // load-bearing on its own. Rebuilding `unit` from the datum instead of the
+    // caller passes every test, because the line above it has already forced
+    // the two to be equal. Recorded rather than smoothed over: a reader who
+    // deletes one should know the other still closes the hole, and a reader
+    // who mutates one should not be surprised the suite stays green.
+    //
+    // What makes either sufficient is that the thread NFT is minted by a
+    // policy no forger controls. Naming the real policy in a forged datum
+    // gets you a token you cannot mint; minting under your own policy gets
+    // you a datum that disagrees with the record.
+    if (spec.claimedPolicyOf(datum).toLowerCase() !== spec.expectedPolicy) continue;
+    if ((utxo.assets[spec.unit] ?? 0n) !== 1n) continue;
     matches.push({ utxo, datum });
   }
 
@@ -159,12 +205,16 @@ export function selectLaunchUtxo<T extends LaunchScopedDatum>(
   launchIdHex: string,
   role: ThreadNftRole,
   schema: unknown,
+  expectedThreadNftPolicy: string,
 ): FoundLaunchUtxo<T> {
+  const policy = requirePolicyId(expectedThreadNftPolicy, `selectLaunchUtxo(${role})`);
   const assetName = threadNftAssetName(role, launchIdHex);
   return selectAuthenticatedUtxo<T>(utxos, address, launchIdHex, schema, {
     unwrap: (decoded) => decoded as T,
     launchIdOf: (datum) => datum.launch_id,
-    unitOf: (datum) => datum.thread_nft_policy + assetName,
+    claimedPolicyOf: (datum) => datum.thread_nft_policy,
+    expectedPolicy: policy,
+    unit: policy + assetName,
     label: `${role} thread NFT`,
   });
 }
@@ -196,12 +246,16 @@ export function selectStakingPoolUtxo<T extends LaunchScopedDatum>(
   address: string,
   launchIdHex: string,
   schema: unknown,
+  expectedThreadNftPolicy: string,
 ): FoundLaunchUtxo<T> {
+  const policy = requirePolicyId(expectedThreadNftPolicy, 'selectStakingPoolUtxo');
   const assetName = threadNftAssetName('stakingPool', launchIdHex);
   return selectAuthenticatedUtxo<T>(utxos, address, launchIdHex, schema, {
     unwrap: (decoded) => (isPoolVariant<T>(decoded) ? decoded.Pool[0] : null),
     launchIdOf: (datum) => datum.launch_id,
-    unitOf: (datum) => datum.thread_nft_policy + assetName,
+    claimedPolicyOf: (datum) => datum.thread_nft_policy,
+    expectedPolicy: policy,
+    unit: policy + assetName,
     label: 'stakingPool thread NFT',
   });
 }
@@ -231,15 +285,26 @@ export function selectCip68MetadataUtxo<T extends Cip68ScopedDatum>(
   address: string,
   launchIdHex: string,
   schema: unknown,
+  expectedTokenPolicyId: string,
+  expectedTokenAssetName: string,
 ): FoundLaunchUtxo<T> {
+  const policy = requirePolicyId(expectedTokenPolicyId, 'selectCip68MetadataUtxo');
+  if (!expectedTokenAssetName) {
+    throw new Error(
+      "selectCip68MetadataUtxo needs the launch's expected token asset name to derive the reference NFT it looks for.",
+    );
+  }
+  // The fungible token and its reference NFT share one base name behind
+  // different CIP-67 labels, so the reference name is the launch's own
+  // (fungible) name relabelled. Derived from the caller's record, so the
+  // datum cannot nominate which token vouches for it.
+  const referenceName = cip68ReferenceAssetName(cip68BaseName(expectedTokenAssetName));
   return selectAuthenticatedUtxo<T>(utxos, address, launchIdHex, schema, {
     unwrap: (decoded) => decoded as T,
     launchIdOf: (datum) => datum.extra.launch_id,
-    // The fungible token and its reference NFT share one base name behind
-    // different CIP-67 labels, so the reference name is the datum's own
-    // (fungible) name relabelled.
-    unitOf: (datum) =>
-      datum.extra.token_policy_id + cip68ReferenceAssetName(cip68BaseName(datum.extra.token_asset_name)),
+    claimedPolicyOf: (datum) => datum.extra.token_policy_id,
+    expectedPolicy: policy,
+    unit: policy + referenceName,
     label: 'CIP-68 reference NFT',
   });
 }

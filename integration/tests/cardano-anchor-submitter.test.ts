@@ -126,6 +126,7 @@ function makeSubmitter(
       compiledScriptCbor: '590000',
       relayerPrivateKey: 'ed25519_sk1fakefakefake',
       launchId: LAUNCH_ID_BYTES,
+      threadNftPolicyId: THREAD_POLICY,
     }),
     fakeLucid,
   };

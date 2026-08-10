@@ -25,6 +25,7 @@ declare const __dirname: string;
 interface SellTierACurveInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   sellerMnemonic: string;
   tokenAmount: string; // stringified bigint over stdin JSON
   blockfrostProjectId: string;
@@ -43,6 +44,7 @@ async function main() {
   requireFieldsFalsy(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'sellerMnemonic',
     'tokenAmount',
     'blockfrostProjectId',
@@ -58,6 +60,7 @@ async function main() {
     network: CARDANO_NETWORK_MAP[input.network],
     compiledScriptCbor,
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   // See buy-tier-a-curve.ts for what capState is and why an omitted one is

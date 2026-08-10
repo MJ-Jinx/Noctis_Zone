@@ -23,6 +23,7 @@ declare const __dirname: string;
 interface ClaimBuybackInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   buyerMnemonic: string;
   tokenAmount: string; // stringified bigint over stdin JSON
   blockfrostProjectId: string;
@@ -36,6 +37,7 @@ async function main() {
   requireFieldsFalsy(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'buyerMnemonic',
     'tokenAmount',
     'blockfrostProjectId',
@@ -51,6 +53,7 @@ async function main() {
     network: CARDANO_NETWORK_MAP[input.network],
     compiledScriptCbor,
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   const result = await submitter.claimBuyback(input.buyerMnemonic, BigInt(input.tokenAmount));

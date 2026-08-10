@@ -26,6 +26,7 @@ declare const __dirname: string;
 interface ExecuteProposalInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   callerPrivateKeyExtendedHex: string;
   currentTimestampMs: number;
   blockfrostProjectId: string;
@@ -43,6 +44,7 @@ async function main() {
   requireFieldsAllowZero(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'callerPrivateKeyExtendedHex',
     'currentTimestampMs',
     'blockfrostProjectId',
@@ -59,6 +61,7 @@ async function main() {
     compiledScriptCbor,
     callerPrivateKey: input.callerPrivateKeyExtendedHex,
     launchId: hexToBytes(input.launchIdHex),
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   const result = await submitter.executeProposal(

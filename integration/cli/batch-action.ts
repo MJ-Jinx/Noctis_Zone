@@ -39,6 +39,7 @@ interface Input {
   action: 'plan' | 'submit';
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   blockfrostProjectId: string;
   blockfrostUrl: string;
   tier: 'A' | 'B';
@@ -66,7 +67,15 @@ const CURVE_TITLE: Record<'A' | 'B', string> = {
 
 async function main() {
   const input = parseJsonStdin<Input>(await readStdin());
-  requireFieldsFalsy(input, ['action', 'network', 'launchIdHex', 'blockfrostProjectId', 'blockfrostUrl', 'tier']);
+  requireFieldsFalsy(input, [
+    'action',
+    'network',
+    'launchIdHex',
+    'threadNftPolicyId',
+    'blockfrostProjectId',
+    'blockfrostUrl',
+    'tier',
+  ]);
 
   const blueprint = loadPlutusBlueprint(__dirname);
   const curveScriptCbor = loadValidatorCbor(blueprint, CURVE_TITLE[input.tier]);
@@ -101,6 +110,7 @@ async function main() {
     input.launchIdHex,
     input.tier === 'A' ? 'bondingCurve' : 'bondingCurveTierB',
     schema as never,
+    input.threadNftPolicyId,
   );
 
   const open = await orders.openOrders(input.launchIdHex);

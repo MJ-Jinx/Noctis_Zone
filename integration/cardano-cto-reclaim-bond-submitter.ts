@@ -49,6 +49,13 @@ export interface CardanoCtoReclaimBondSubmitterConfig {
   /** Pays the fee/collateral only — ReclaimRelayerBond has no validator-checked signer; the payout itself is fixed to the datum's own pending_relayer_key_hash regardless of who submits. */
   callerPrivateKey: string;
   launchId: Uint8Array;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. The governance UTXO is authenticated against it — the datum
+   * cannot be allowed to nominate its own authenticator. See
+   * launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
 }
 
 export class CardanoCtoReclaimBondSubmitter {
@@ -70,7 +77,12 @@ export class CardanoCtoReclaimBondSubmitter {
   /** Pays the launch's currently-pending relayer bond to its recorded pending_relayer_key_hash — only callable once the anchored proposal has been legitimately Executed or Expired (never reachable if the governor voided it, since VoidPendingProposal already zeroes the bond). */
   async reclaimRelayerBond(): Promise<{ txHash: string }> {
     const lucid = await this.lucidPromise;
-    const anchorUtxo = await findCtoGovernanceUtxo(lucid, this.scriptAddress, this.config.launchId);
+    const anchorUtxo = await findCtoGovernanceUtxo(
+      lucid,
+      this.scriptAddress,
+      this.config.launchId,
+      this.config.threadNftPolicyId,
+    );
     const currentDatum = Data.from<CtoGovernanceDatumData>(requireCtoDatum(anchorUtxo), CtoGovernanceDatumSchema);
 
     const proposal = currentDatum.active_proposal;

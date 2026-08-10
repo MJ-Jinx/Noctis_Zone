@@ -154,6 +154,13 @@ export interface TierALpMigrationConfig {
   network: LucidNetwork;
   lpEscrowScriptCbor: string;
   launchIdHex: string;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. Every state UTXO is authenticated against it — reading the
+   * policy off the datum being checked would authenticate that datum against
+   * itself. See launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
   minswap: MinswapV2Config;
 }
 
@@ -195,6 +202,7 @@ export class TierALpMigrationSubmitter {
       this.config.launchIdHex,
       'lpEscrow',
       LpEscrowDatumSchema as never,
+      this.config.threadNftPolicyId,
     );
     return found;
   }

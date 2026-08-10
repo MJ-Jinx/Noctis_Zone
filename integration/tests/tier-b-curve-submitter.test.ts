@@ -210,6 +210,7 @@ function makeSubmitter(
     network: 'Preprod',
     compiledScriptCbor: '590000',
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
   });
 }
 

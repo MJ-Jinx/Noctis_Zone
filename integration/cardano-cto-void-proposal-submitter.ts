@@ -65,6 +65,13 @@ export interface CardanoCtoVoidProposalSubmitterConfig {
   /** Governor's private key — this redeemer is governor-signed for real, not just fee-payer. */
   governorPrivateKey: string;
   launchId: Uint8Array;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. The governance UTXO is authenticated against it — the datum
+   * cannot be allowed to nominate its own authenticator. See
+   * launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
 }
 
 export class CardanoCtoVoidProposalSubmitter {
@@ -93,7 +100,12 @@ export class CardanoCtoVoidProposalSubmitter {
    */
   async voidPendingProposal(currentTimestampMs: bigint, governorAddress: string): Promise<{ txHash: string }> {
     const lucid = await this.lucidPromise;
-    const anchorUtxo = await findCtoGovernanceUtxo(lucid, this.scriptAddress, this.config.launchId);
+    const anchorUtxo = await findCtoGovernanceUtxo(
+      lucid,
+      this.scriptAddress,
+      this.config.launchId,
+      this.config.threadNftPolicyId,
+    );
     const currentDatum = Data.from<CtoGovernanceDatumData>(requireCtoDatum(anchorUtxo), CtoGovernanceDatumSchema);
 
     const proposal = currentDatum.active_proposal;

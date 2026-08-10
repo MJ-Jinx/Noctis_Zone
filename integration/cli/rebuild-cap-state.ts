@@ -34,6 +34,7 @@ declare const __dirname: string;
 interface Input {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   blockfrostProjectId: string;
   blockfrostUrl: string;
   tier: 'A' | 'B';
@@ -46,7 +47,14 @@ const CURVE_TITLE: Record<'A' | 'B', string> = {
 
 async function main() {
   const input = parseJsonStdin<Input>(await readStdin());
-  requireFieldsFalsy(input, ['network', 'launchIdHex', 'blockfrostProjectId', 'blockfrostUrl', 'tier']);
+  requireFieldsFalsy(input, [
+    'network',
+    'launchIdHex',
+    'threadNftPolicyId',
+    'blockfrostProjectId',
+    'blockfrostUrl',
+    'tier',
+  ]);
 
   const network = CARDANO_NETWORK_MAP[input.network];
   const blueprint = loadPlutusBlueprint(__dirname);
@@ -64,6 +72,7 @@ async function main() {
     input.launchIdHex,
     input.tier === 'B' ? 'bondingCurveTierB' : 'bondingCurve',
     schema as never,
+    input.threadNftPolicyId,
   );
   if (!found.utxo.datum) throw new Error('The launch UTXO carries no inline datum.');
   const { cap_root } = Data.from<{ cap_root: string }>(found.utxo.datum, schema as never);
@@ -73,6 +82,7 @@ async function main() {
     blockfrostUrl: input.blockfrostUrl,
     bondingCurveAddress: curveAddress,
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
     tier: input.tier,
   } as never);
 

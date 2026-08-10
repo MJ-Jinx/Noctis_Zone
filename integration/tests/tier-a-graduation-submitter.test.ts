@@ -198,6 +198,7 @@ function makeSubmitter(
     lpEscrowScriptCbor: '590002',
     vestingScriptCbor: '590003',
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
   });
   addressRefs.curve = (submitter as unknown as { bondingCurveAddress: string }).bondingCurveAddress;
   addressRefs.lp = (submitter as unknown as { lpEscrowAddress: string }).lpEscrowAddress;
@@ -227,11 +228,12 @@ describe('TierAGraduationSubmitter — which UTXO it graduates', () => {
     );
   });
 
-  it('refuses to choose when a second UTXO also answers to the launch', async () => {
-    // A forger can mint under their own policy and satisfy the token check, so
-    // the lookup must stop rather than pick a winner — the genuine UTXO and
-    // the planted one are indistinguishable to a reader that trusts the datum.
-    const { builder } = makeFakeTxBuilder();
+  it('graduates the genuine curve when a forged one is planted beside it', async () => {
+    // A forger can mint under their own policy and name it in their own datum,
+    // which satisfies any token check derived from that datum. It does not
+    // satisfy one derived from the policy the platform recorded at mint, so
+    // the planted UTXO is not a candidate and the real one is chosen outright.
+    const { builder, collectFromCalls } = makeFakeTxBuilder();
     const planted = {
       datum: curveDatum({ thread_nft_policy: 'ee'.repeat(28) }),
       assets: { ['ee'.repeat(28) + threadNftAssetName('bondingCurve', LAUNCH_ID_HEX)]: 1n },
@@ -239,7 +241,27 @@ describe('TierAGraduationSubmitter — which UTXO it graduates', () => {
       txHash: '22'.repeat(32),
     };
     const { submitter } = makeSubmitter(builder, {
-      curveUtxos: [{ datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) }, planted],
+      // Planted FIRST: the shape this replaced took the first match, and
+      // provider ordering is not something an honest caller controls.
+      curveUtxos: [planted, { datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) }],
+      lpUtxos: [{ datum: lpDatum(), assets: {} }],
+    });
+
+    await submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000);
+
+    const spentCurve = collectFromCalls[0]?.[0] as Array<{ txHash: string }>;
+    expect(spentCurve[0]?.txHash).toBe('11'.repeat(32));
+  });
+
+  it('still refuses when two UTXOs both carry the genuine thread NFT', async () => {
+    // Unreachable while the thread NFT policy is one-shot — which is a property
+    // of that policy, not of the lookup, so the lookup keeps its own guard.
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      curveUtxos: [
+        { datum: curveDatum(), assets: {}, txHash: '11'.repeat(32) },
+        { datum: curveDatum(), assets: {}, txHash: '22'.repeat(32) },
+      ],
       lpUtxos: [{ datum: lpDatum(), assets: {} }],
     });
     await expect(submitter.graduateAndSealLp(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 1000)).rejects.toThrow(

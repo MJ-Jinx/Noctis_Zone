@@ -40,6 +40,10 @@ interface Input {
   action: Action;
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  /** The launch's thread-NFT policy id, from WordPress's own launch record —
+   *  never from a datum. Every action here reads the pool UTXO, and that read
+   *  is authenticated against this. */
+  threadNftPolicyId: string;
   blockfrostProjectId: string;
   blockfrostUrl: string;
 
@@ -78,8 +82,6 @@ interface Input {
   // build-reward-snapshot — governor cron job
   tokenPolicyId?: string;
   tokenAssetName?: string;
-  /** The launch's thread-NFT policy id, from WordPress's own launch record — never from a datum. */
-  threadNftPolicyId?: string;
   durationDays?: number;
   bondingPeriodDays?: number;
 
@@ -93,7 +95,14 @@ async function main() {
   const raw = await readStdin();
   const input = parseJsonStdin<Input>(raw);
 
-  requireFieldsFalsy(input, ['action', 'network', 'launchIdHex', 'blockfrostProjectId', 'blockfrostUrl']);
+  requireFieldsFalsy(input, [
+    'action',
+    'network',
+    'launchIdHex',
+    'threadNftPolicyId',
+    'blockfrostProjectId',
+    'blockfrostUrl',
+  ]);
 
   const blueprint = loadPlutusBlueprint(__dirname);
   const stakingPoolScriptCbor = loadValidatorCbor(blueprint, 'staking_pool.staking_pool.spend');
@@ -104,6 +113,7 @@ async function main() {
     network: CARDANO_NETWORK_MAP[input.network],
     stakingPoolScriptCbor,
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   let result: unknown;
@@ -184,7 +194,6 @@ async function main() {
       // Required, not optional: the genesis pool output is identified by this
       // launch's thread NFT, and the policy has to come from the caller's own
       // record rather than the datum being read.
-      const threadNftPolicyId = requireField(input, 'threadNftPolicyId', input.action);
       const durationDays = requireField(input, 'durationDays', input.action);
       const snapshot = await buildStakingRewardSnapshot(
         {
@@ -196,7 +205,7 @@ async function main() {
           launchIdHex: input.launchIdHex,
           tokenPolicyId,
           tokenAssetName,
-          threadNftPolicyId,
+          threadNftPolicyId: input.threadNftPolicyId,
           durationDays,
           bondingPeriodDays: input.bondingPeriodDays,
         },

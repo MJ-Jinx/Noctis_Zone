@@ -125,6 +125,7 @@ function makeSubmitter(
     network: 'Preprod',
     lpEscrowScriptCbor: '590000',
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
   });
 }
 

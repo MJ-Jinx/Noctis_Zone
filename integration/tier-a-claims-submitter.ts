@@ -90,6 +90,13 @@ export interface TierAClaimsConfig {
   vestingScriptCbor: string;
   bondingCurveScriptCbor: string;
   launchIdHex: string;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. Every state UTXO is authenticated against it — reading the
+   * policy off the datum being checked would authenticate that datum against
+   * itself. See launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
 }
 
 export class TierAClaimsSubmitter {
@@ -120,7 +127,7 @@ export class TierAClaimsSubmitter {
     schema: unknown,
   ): Promise<{ utxo: UTxO; datum: T }> {
     const utxos = await lucid.utxosAt(address);
-    return selectLaunchUtxo<T>(utxos, address, this.config.launchIdHex, role, schema);
+    return selectLaunchUtxo<T>(utxos, address, this.config.launchIdHex, role, schema, this.config.threadNftPolicyId);
   }
 
   /** Live on-chain vesting state — dashboard widget calls this directly

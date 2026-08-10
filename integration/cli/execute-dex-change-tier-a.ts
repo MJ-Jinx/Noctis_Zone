@@ -28,6 +28,7 @@ declare const __dirname: string;
 interface ExecuteDexChangeInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   governorAddress: string;
   governorPrivateKeyExtendedHex: string;
   currentTimestampMs: number;
@@ -42,6 +43,7 @@ async function main() {
   requireFieldsAllowZero(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'governorAddress',
     'governorPrivateKeyExtendedHex',
     'currentTimestampMs',
@@ -57,6 +59,7 @@ async function main() {
     network: CARDANO_NETWORK_MAP[input.network],
     lpEscrowScriptCbor: loadValidatorCbor(blueprint, 'lp_escrow.lp_escrow.spend'),
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   const result = await submitter.executeDexChange(

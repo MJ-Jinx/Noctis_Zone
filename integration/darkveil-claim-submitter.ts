@@ -51,6 +51,9 @@ export interface LucidDarkVeilClaimSubmitterConfig {
    *  launch — launches are told apart by `launch_id` in the datum. */
   compiledScriptCbor: string;
   launchId: Uint8Array;
+  /** The launch's thread-NFT policy id, hex, from the platform's own record —
+   *  what the curve UTXO is authenticated against. See launch-utxo-lookup.ts. */
+  threadNftPolicyId: string;
   /**
    * Where that validator is published as a reference script.
    *
@@ -73,6 +76,7 @@ export class LucidDarkVeilClaimSubmitter {
       network: config.network,
       compiledScriptCbor: config.compiledScriptCbor,
       launchIdHex: toHex(config.launchId),
+      threadNftPolicyId: config.threadNftPolicyId,
       ...(config.referenceScript ? { referenceScript: config.referenceScript } : {}),
       ...(config.executionUnits ? { executionUnits: config.executionUnits } : {}),
     });

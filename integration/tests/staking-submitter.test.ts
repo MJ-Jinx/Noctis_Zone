@@ -176,6 +176,7 @@ function makeSubmitter(
     network: 'Preprod',
     stakingPoolScriptCbor: '590000',
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
   });
 }
 
@@ -221,19 +222,27 @@ describe('StakingSubmitter.findPoolUtxo / readPoolDatum', () => {
     await expect(submitter.readPoolDatum()).rejects.toThrow(/carries launch .* stakingPool thread NFT/);
   });
 
-  it('refuses to choose when a second Pool UTXO also answers to the launch', async () => {
+  it('reads the genuine Pool when a forged one is planted beside it', async () => {
     // The forger mints under their own policy and names it in their own datum,
-    // which satisfies the token check. What they cannot do is arrive alone.
+    // which satisfies a token check derived from that datum. It does not
+    // satisfy one derived from the policy the platform recorded at mint.
     const { builder } = makeFakeTxBuilder();
     const forgerPolicy = 'ee'.repeat(28);
     const submitter = makeSubmitter(builder, [
-      poolUtxo(),
       poolUtxo(
         { thread_nft_policy: forgerPolicy },
         { [forgerPolicy + threadNftAssetName('stakingPool', LAUNCH_ID_HEX)]: 1n },
         { bare: true },
       ),
+      poolUtxo(),
     ]);
+    const datum = await submitter.readPoolDatum();
+    expect(datum.thread_nft_policy).toBe(THREAD_POLICY);
+  });
+
+  it('still refuses when two Pool UTXOs both carry the genuine thread NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const submitter = makeSubmitter(builder, [poolUtxo(), poolUtxo()]);
     await expect(submitter.readPoolDatum()).rejects.toThrow(/Refusing to guess/);
   });
 

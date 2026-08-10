@@ -160,6 +160,13 @@ export interface LucidTierACurveSubmitterConfig {
    *  shared, unparameterized script address across every Tier A launch. */
   compiledScriptCbor: string;
   launchIdHex: string;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. Every state UTXO is authenticated against it — reading the
+   * policy off the datum being checked would authenticate that datum against
+   * itself. See launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
 }
 
 export class LucidTierACurveSubmitter {
@@ -204,6 +211,7 @@ export class LucidTierACurveSubmitter {
       this.config.launchIdHex,
       'bondingCurve',
       BondingCurveDatumSchema as never,
+      this.config.threadNftPolicyId,
     );
     return found.utxo;
   }

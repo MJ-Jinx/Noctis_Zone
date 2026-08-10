@@ -45,6 +45,7 @@ interface Input {
   action: Action;
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   blockfrostProjectId: string;
   blockfrostUrl: string;
 
@@ -135,6 +136,7 @@ async function main() {
     network: CARDANO_NETWORK_MAP[input.network],
     compiledScriptCbor,
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
     ...(input.referenceScript ? { referenceScript: input.referenceScript } : {}),
     ...(input.executionUnits ? { executionUnits: input.executionUnits } : {}),
   });

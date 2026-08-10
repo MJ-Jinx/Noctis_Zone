@@ -29,6 +29,7 @@ declare const __dirname: string;
 interface AnchorDvAllocationRootInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   governorAddress: string;
   governorPrivateKeyExtendedHex: string;
   dvAllocationRootHex: string;
@@ -56,6 +57,7 @@ async function main() {
   requireFieldsFalsy(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'governorAddress',
     'governorPrivateKeyExtendedHex',
     'dvAllocationRootHex',
@@ -72,6 +74,7 @@ async function main() {
     network: CARDANO_NETWORK_MAP[input.network],
     compiledScriptCbor,
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
     ...(input.referenceScript ? { referenceScript: input.referenceScript } : {}),
     ...(input.executionUnits ? { executionUnits: input.executionUnits } : {}),
   });

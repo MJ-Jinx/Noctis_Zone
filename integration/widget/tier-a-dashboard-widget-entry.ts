@@ -68,6 +68,9 @@ export interface TierADashboardWidgetConfig {
    *  validators[].compiledCode for bonding_curve.bonding_curve.spend. */
   bondingCurveScriptCbor: string;
   launchIdHex: string;
+  /** The launch's thread-NFT policy id, hex, as rendered by the platform for
+   *  this launch. Its state UTXOs are authenticated against it. */
+  threadNftPolicyId: string;
 }
 
 export interface VestingStateSummary {
@@ -106,6 +109,7 @@ function configure(newConfig: TierADashboardWidgetConfig): void {
     vestingScriptCbor: newConfig.vestingScriptCbor,
     bondingCurveScriptCbor: newConfig.bondingCurveScriptCbor,
     launchIdHex: newConfig.launchIdHex,
+    threadNftPolicyId: newConfig.threadNftPolicyId,
   };
   submitter = new TierAClaimsSubmitter(submitterConfig);
 }

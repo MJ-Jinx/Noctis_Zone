@@ -24,6 +24,7 @@ declare const __dirname: string;
 interface ClaimVestedInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   creatorAddress: string;
   creatorPrivateKeyExtendedHex: string;
   claimAmount: string;
@@ -39,6 +40,7 @@ async function main() {
   requireFieldsAllowZero(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'creatorAddress',
     'creatorPrivateKeyExtendedHex',
     'claimAmount',
@@ -56,6 +58,7 @@ async function main() {
     vestingScriptCbor: loadValidatorCbor(blueprint, 'vesting.vesting.spend'),
     bondingCurveScriptCbor: loadValidatorCbor(blueprint, 'bonding_curve.bonding_curve.spend'),
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   const result = await submitter.claimVested(

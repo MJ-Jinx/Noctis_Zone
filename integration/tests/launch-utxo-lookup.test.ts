@@ -45,51 +45,115 @@ function utxo(opts: {
   } as never;
 }
 
-const find = (utxos: unknown[]) =>
+const find = (utxos: unknown[], expectedPolicy: string) =>
   selectLaunchUtxo<{ launch_id: string; thread_nft_policy: string }>(
     utxos as never,
     ADDRESS,
     LAUNCH,
     'bondingCurve',
     {},
+    expectedPolicy,
   );
 
 describe('selectLaunchUtxo', () => {
   it('returns the launch’s own UTXO', () => {
-    const found = find([utxo({ launch: OTHER_LAUNCH }), utxo({})]);
+    const found = find([utxo({ launch: OTHER_LAUNCH }), utxo({})], POLICY);
     expect(found.datum.launch_id).toBe(LAUNCH);
   });
 
   it('ignores a UTXO that claims the launch but carries no thread NFT', () => {
     // The datum alone is a claim, not evidence: anyone may pay a datum of any
     // shape to a shared script address.
-    expect(() => find([utxo({ assets: {} })])).toThrow(/carries launch/);
+    expect(() => find([utxo({ assets: {} })], POLICY)).toThrow(/carries launch/);
   });
 
   it('ignores a thread NFT minted for a different role', () => {
     const wrongRole = POLICY + threadNftAssetName('vesting', LAUNCH);
-    expect(() => find([utxo({ assets: { [wrongRole]: 1n } })])).toThrow(/carries launch/);
+    expect(() => find([utxo({ assets: { [wrongRole]: 1n } })], POLICY)).toThrow(/carries launch/);
   });
 
   it('ignores another launch’s UTXO at the same address', () => {
-    expect(() => find([utxo({ launch: OTHER_LAUNCH })])).toThrow(/carries launch/);
+    expect(() => find([utxo({ launch: OTHER_LAUNCH })], POLICY)).toThrow(/carries launch/);
   });
 
-  // The one that matters. A forger can mint under their own policy and satisfy
-  // the token check, so the lookup must not pick a winner — it has to stop.
-  it('refuses to choose when a second UTXO also answers to the launch', () => {
+  // The one that matters, and what the caller-supplied policy changed. A forger
+  // can mint under their OWN policy and satisfy a token check derived from the
+  // datum — so when the expectation came from the datum, the planted UTXO
+  // matched alongside the real one and the lookup could only refuse. Told which
+  // policy is genuine, it now resolves instead of stopping.
+  it('returns the genuine UTXO when a forged one is planted beside it', () => {
     const genuine = utxo({ ref: '11'.repeat(32) });
     const planted = utxo({ ref: '22'.repeat(32), policy: FORGER_POLICY });
-    expect(() => find([genuine, planted])).toThrow(/Refusing to guess/);
+    const found = find([genuine, planted], POLICY);
+    expect(found.utxo.txHash).toBe('11'.repeat(32));
+    expect(found.datum.thread_nft_policy).toBe(POLICY);
+  });
+
+  it('resolves the same pair whichever order the provider returns them in', () => {
+    // `utxosAt` ordering is not attacker-proof, and the previous shape took the
+    // first match — so order deciding the answer is the exact failure here.
+    const genuine = utxo({ ref: '11'.repeat(32) });
+    const planted = utxo({ ref: '22'.repeat(32), policy: FORGER_POLICY });
+    expect(find([planted, genuine], POLICY).utxo.txHash).toBe('11'.repeat(32));
+    expect(find([genuine, planted], POLICY).utxo.txHash).toBe('11'.repeat(32));
+  });
+
+  it('ignores a UTXO whose datum names a policy the caller does not expect', () => {
+    expect(() => find([utxo({ policy: FORGER_POLICY })], POLICY)).toThrow(/carries launch/);
+  });
+
+  it('ignores a UTXO holding the genuine token whose datum names another policy', () => {
+    // Datum and value disagreeing is not a UTXO to reason about.
+    expect(() =>
+      find(
+        [
+          {
+            txHash: '33'.repeat(32),
+            outputIndex: 0,
+            address: ADDRESS,
+            assets: { [unitFor(POLICY, LAUNCH)]: 1n },
+            datum: { launch_id: LAUNCH, thread_nft_policy: FORGER_POLICY },
+          } as never,
+        ],
+        POLICY,
+      ),
+    ).toThrow(/carries launch/);
+  });
+
+  // The refusal still has to exist. It is unreachable while the thread NFT is
+  // minted by a one-shot policy, and that is a property of the minting policy
+  // rather than of this module — so the module keeps its own guard.
+  it('still refuses when two UTXOs both carry the genuine token', () => {
+    const one = utxo({ ref: '11'.repeat(32) });
+    const two = utxo({ ref: '22'.repeat(32) });
+    expect(() => find([one, two], POLICY)).toThrow(/Refusing to guess/);
   });
 
   it('names both candidates so the ambiguity can be investigated', () => {
-    const genuine = utxo({ ref: '11'.repeat(32) });
-    const planted = utxo({ ref: '22'.repeat(32), policy: FORGER_POLICY });
-    expect(() => find([genuine, planted])).toThrow(new RegExp(`${'11'.repeat(32)}#0.*${'22'.repeat(32)}#0`));
+    const one = utxo({ ref: '11'.repeat(32) });
+    const two = utxo({ ref: '22'.repeat(32) });
+    expect(() => find([one, two], POLICY)).toThrow(new RegExp(`${'11'.repeat(32)}#0.*${'22'.repeat(32)}#0`));
+  });
+
+  describe('the expected policy is required, and must be a real one', () => {
+    // An empty string concatenated with an asset name is a unit no UTXO holds,
+    // so without this the lookup would report "never minted" for what is really
+    // a caller that forgot to pass anything — and the two need to stay apart.
+    it.each([
+      ['empty', ''],
+      ['too short', 'c0ffee'],
+      ['not hex', 'z'.repeat(56)],
+      ['undefined', undefined as unknown as string],
+    ])('rejects a %s policy, naming what it needed', (_label, bad) => {
+      expect(() => find([utxo({})], bad)).toThrow(/expected policy id/);
+    });
+
+    it('accepts the policy in upper case', () => {
+      expect(find([utxo({})], POLICY.toUpperCase()).datum.launch_id).toBe(LAUNCH);
+    });
   });
 
   it('skips a UTXO with no datum at all', () => {
-    expect(() => find([utxo({ datum: null })])).toThrow(/carries launch/);
+    expect(() => find([utxo({ datum: null })], POLICY)).toThrow(/carries launch/);
   });
 });

@@ -200,6 +200,7 @@ function makeSubmitter(builder: unknown, opts: { referenced?: boolean; datum?: R
     network: 'Preprod',
     compiledScriptCbor: STUB_SCRIPT,
     launchIdHex: LAUNCH_ID_HEX,
+    threadNftPolicyId: THREAD_POLICY,
     ...(opts.referenced
       ? {
           referenceScript: {

@@ -68,6 +68,9 @@ export interface TierABuyWidgetConfig {
    *  read the repo's plutus.json file directly. */
   compiledScriptCbor: string;
   launchIdHex: string;
+  /** The launch's thread-NFT policy id, hex, as rendered by the platform for
+   *  this launch. Its state UTXOs are authenticated against it. */
+  threadNftPolicyId: string;
 }
 
 export interface CurveStateSummary {
@@ -102,6 +105,7 @@ function configure(newConfig: TierABuyWidgetConfig): void {
     network: newConfig.network,
     compiledScriptCbor: newConfig.compiledScriptCbor,
     launchIdHex: newConfig.launchIdHex,
+    threadNftPolicyId: newConfig.threadNftPolicyId,
   };
   submitter = new LucidTierACurveSubmitter(submitterConfig);
 }

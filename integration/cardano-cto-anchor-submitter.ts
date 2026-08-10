@@ -257,6 +257,13 @@ export interface CardanoCtoAnchorSubmitterConfig {
    */
   lpEscrowScriptCbor: string;
   launchId: Uint8Array;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. The governance UTXO is authenticated against it — the datum
+   * cannot be allowed to nominate its own authenticator. See
+   * launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
 }
 
 /** Shared with cardano-cto-execute-proposal-submitter.ts /
@@ -276,6 +283,7 @@ export async function findCtoGovernanceUtxo(
   lucid: LucidEvolution,
   scriptAddress: string,
   launchId: Uint8Array,
+  threadNftPolicyId: string,
 ): Promise<UTxO> {
   const utxos = await lucid.utxosAt(scriptAddress);
   const launchIdHex = toHex(launchId);
@@ -285,6 +293,7 @@ export async function findCtoGovernanceUtxo(
     launchIdHex,
     'ctoGovernance',
     CtoGovernanceDatumSchema as never,
+    threadNftPolicyId,
   ).utxo;
 }
 
@@ -301,6 +310,7 @@ export async function findLpEscrowUtxo(
   lucid: LucidEvolution,
   lpEscrowAddress: string,
   launchId: Uint8Array,
+  threadNftPolicyId: string,
 ): Promise<UTxO> {
   const utxos = await lucid.utxosAt(lpEscrowAddress);
   return selectLaunchUtxo<{ launch_id: string; thread_nft_policy: string }>(
@@ -309,6 +319,7 @@ export async function findLpEscrowUtxo(
     toHex(launchId),
     'lpEscrow',
     LpEscrowDatumSchema as never,
+    threadNftPolicyId,
   ).utxo;
 }
 
@@ -338,7 +349,7 @@ export class CardanoCtoAnchorSubmitter {
   }
 
   private async findAnchorUtxo(lucid: LucidEvolution, launchId: Uint8Array): Promise<UTxO> {
-    return findCtoGovernanceUtxo(lucid, this.scriptAddress, launchId);
+    return findCtoGovernanceUtxo(lucid, this.scriptAddress, launchId, this.config.threadNftPolicyId);
   }
 
   /**
@@ -464,7 +475,12 @@ export class CardanoCtoAnchorSubmitter {
     // ActivateCurve, but bounded much tighter to satisfy the narrow-range
     // check. anchor_timestamp is expected to be the real submission time,
     // so a small symmetric margin around it is sufficient.
-    const lpEscrowUtxo = await findLpEscrowUtxo(lucid, this.lpEscrowAddress, this.config.launchId);
+    const lpEscrowUtxo = await findLpEscrowUtxo(
+      lucid,
+      this.lpEscrowAddress,
+      this.config.launchId,
+      this.config.threadNftPolicyId,
+    );
 
     const anchorTimestampMs = Number(params.anchorTimestamp);
     const validFrom = anchorTimestampMs - 60_000;

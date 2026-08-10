@@ -35,6 +35,7 @@ declare const __dirname: string;
 interface GraduateInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   governorAddress: string;
   governorPrivateKeyExtendedHex: string;
   lockSealTimestampMs: number;
@@ -49,6 +50,7 @@ async function main() {
   requireFieldsAllowZero(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'governorAddress',
     'governorPrivateKeyExtendedHex',
     'lockSealTimestampMs',
@@ -66,6 +68,7 @@ async function main() {
     lpEscrowScriptCbor: loadValidatorCbor(blueprint, 'lp_escrow.lp_escrow.spend'),
     vestingScriptCbor: loadValidatorCbor(blueprint, 'vesting.vesting.spend'),
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   const result = await submitter.graduate(

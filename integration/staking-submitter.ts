@@ -96,6 +96,13 @@ export interface StakingConfig {
   network: LucidNetwork;
   stakingPoolScriptCbor: string;
   launchIdHex: string;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. Every state UTXO is authenticated against it — reading the
+   * policy off the datum being checked would authenticate that datum against
+   * itself. See launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
 }
 
 export interface StakingPosition {
@@ -148,6 +155,7 @@ export class StakingSubmitter {
       this.address,
       this.config.launchIdHex,
       StakingDatumSchema,
+      this.config.threadNftPolicyId,
     );
   }
 

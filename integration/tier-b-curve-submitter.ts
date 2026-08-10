@@ -182,6 +182,13 @@ export interface LucidTierBCurveSubmitterConfig {
   compiledScriptCbor: string;
   launchIdHex: string;
   /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. Every state UTXO is authenticated against it — reading the
+   * policy off the datum being checked would authenticate that datum against
+   * itself. See launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
+  /**
    * Where this validator is published as a reference script, if it is.
    *
    * Supplied, a trade NAMES the validator instead of carrying it. This curve
@@ -459,6 +466,7 @@ export class LucidTierBCurveSubmitter {
       this.config.launchIdHex,
       'bondingCurveTierB',
       BondingCurveTierBDatumSchema as never,
+      this.config.threadNftPolicyId,
     );
     return found.utxo;
   }

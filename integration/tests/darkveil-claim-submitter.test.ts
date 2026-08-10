@@ -193,6 +193,7 @@ function makeSubmitter(
     network: 'Preprod',
     compiledScriptCbor: '590000', // arbitrary — validatorToAddress just needs valid-ish script CBOR
     launchId: LAUNCH_ID_BYTES,
+    threadNftPolicyId: THREAD_POLICY,
   });
 }
 

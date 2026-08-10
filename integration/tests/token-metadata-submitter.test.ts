@@ -325,18 +325,33 @@ describe('TokenMetadataSubmitter — which UTXO it reads and revises', () => {
     await expect(submitter.getCurrentMetadata()).resolves.toBeNull();
   });
 
-  it('refuses to choose when a second metadata UTXO also answers to the launch', async () => {
+  it('reads the genuine metadata UTXO when a forged one is planted beside it', async () => {
+    // The reference NFT is derived from the launch's own token identity as the
+    // platform recorded it, so a datum nominating a different token policy
+    // cannot vouch for itself.
     const { builder } = makeFakeTxBuilder();
     const forgerPolicy = 'ff'.repeat(28);
     const { submitter } = makeSubmitter(builder, {
       metadataUtxos: [
-        { datum: metadataDatumFields(), assets: {}, txHash: '11'.repeat(32) },
         {
           datum: metadataDatumFields({ token_policy_id: forgerPolicy }),
           assets: { [forgerPolicy + cip68ReferenceAssetName(TOKEN_BASE_NAME_HEX)]: 1n },
           bare: true,
           txHash: '22'.repeat(32),
         },
+        { datum: metadataDatumFields(), assets: {}, txHash: '11'.repeat(32) },
+      ],
+    });
+    const metadata = await submitter.getCurrentMetadata();
+    expect(metadata).not.toBeNull();
+  });
+
+  it('still refuses when two metadata UTXOs both carry the genuine reference NFT', async () => {
+    const { builder } = makeFakeTxBuilder();
+    const { submitter } = makeSubmitter(builder, {
+      metadataUtxos: [
+        { datum: metadataDatumFields(), assets: {}, txHash: '11'.repeat(32) },
+        { datum: metadataDatumFields(), assets: {}, txHash: '22'.repeat(32) },
       ],
     });
     await expect(submitter.getCurrentMetadata()).rejects.toThrow(/Refusing to guess/);

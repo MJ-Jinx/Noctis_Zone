@@ -25,6 +25,7 @@ declare const __dirname: string;
 interface ClaimCreatorFeesInput {
   network: 'preview' | 'preprod' | 'mainnet';
   launchIdHex: string;
+  threadNftPolicyId: string;
   creatorAddress: string;
   creatorPrivateKeyExtendedHex: string;
   amount: string;
@@ -39,6 +40,7 @@ async function main() {
   requireFieldsAllowZero(input, [
     'network',
     'launchIdHex',
+    'threadNftPolicyId',
     'creatorAddress',
     'creatorPrivateKeyExtendedHex',
     'amount',
@@ -55,6 +57,7 @@ async function main() {
     vestingScriptCbor: loadValidatorCbor(blueprint, 'vesting.vesting.spend'),
     bondingCurveScriptCbor: loadValidatorCbor(blueprint, 'bonding_curve.bonding_curve.spend'),
     launchIdHex: input.launchIdHex,
+    threadNftPolicyId: input.threadNftPolicyId,
   });
 
   // bonding_curve.ak now requires a real, on-chain-enforced $1 ADA

@@ -171,6 +171,7 @@ function makeSubmitter(
     lpEscrowScriptCbor: '590001',
     relayerPrivateKey: 'ed25519_sk1fakefakefake',
     launchId: LAUNCH_ID_BYTES,
+    threadNftPolicyId: THREAD_POLICY,
   });
 }
 

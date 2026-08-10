@@ -66,6 +66,13 @@ export interface CardanoCtoExecuteProposalSubmitterConfig {
   /** Pays the fee/collateral only — ExecuteProposal has no validator-checked signer. */
   callerPrivateKey: string;
   launchId: Uint8Array;
+  /**
+   * The launch's thread-NFT policy id, hex, from the platform's own record of
+   * the launch. The governance UTXO is authenticated against it — the datum
+   * cannot be allowed to nominate its own authenticator. See
+   * launch-utxo-lookup.ts.
+   */
+  threadNftPolicyId: string;
 }
 
 export class CardanoCtoExecuteProposalSubmitter {
@@ -93,7 +100,12 @@ export class CardanoCtoExecuteProposalSubmitter {
    */
   async executeProposal(currentTimestampMs: bigint): Promise<{ txHash: string }> {
     const lucid = await this.lucidPromise;
-    const anchorUtxo = await findCtoGovernanceUtxo(lucid, this.scriptAddress, this.config.launchId);
+    const anchorUtxo = await findCtoGovernanceUtxo(
+      lucid,
+      this.scriptAddress,
+      this.config.launchId,
+      this.config.threadNftPolicyId,
+    );
     const currentDatum = Data.from<CtoGovernanceDatumData>(requireCtoDatum(anchorUtxo), CtoGovernanceDatumSchema);
 
     const proposal = currentDatum.active_proposal;
