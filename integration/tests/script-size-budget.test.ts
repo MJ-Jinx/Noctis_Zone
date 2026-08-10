@@ -40,6 +40,17 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by authenticating the one datum field a challenge could not
+ * otherwise have checked at creation: nhop_challenge +883, for a `mint`
+ * handler in the same validator. Paying a script address runs nothing, so
+ * the submission time was whatever the challenger wrote; minting IS checked,
+ * and a challenge now has to carry a token this script minted against a
+ * narrow validity range. Both handlers compile to one script, so the policy
+ * id is the validator's own hash and no second address is involved.
+ *
+ * Same pass, paying a payee's real address rather than a bare enterprise one:
+ * lp_escrow +12, cto_governance +12, cto_sybil_challenge +11.
+ *
  * Last moved by requiring a payee to be NET better off by what they are
  * owed, not merely to hold it in some output: Tier A +201, Tier B +178,
  * staking_pool +209. An output at the payee's own credential is equally
@@ -92,12 +103,12 @@ for (const v of blueprint.validators) {
 const RECORDED: Record<string, number> = {
   bonding_curve: 11_129,
   bonding_curve_tier_b: 13_921,
-  cto_governance: 7_370,
-  cto_sybil_challenge: 1_294,
+  cto_governance: 7_382,
+  cto_sybil_challenge: 1_305,
   curve_order: 1_775,
   launch_token_policy: 419,
-  lp_escrow: 7_201,
-  nhop_challenge: 1_274,
+  lp_escrow: 7_213,
+  nhop_challenge: 2_157,
   staking_pool: 4_069,
   token_metadata: 4_458,
   vesting: 5_737,

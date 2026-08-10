@@ -81,7 +81,8 @@ use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
 use aiken/interval
 use aiken/interval.{Interval, IntervalBoundType}
-use cardano/address.{Address, Credential, from_script, from_verification_key}
+use cardano/address.{Address, Credential, from_script, from_verification_key,
+  with_delegation_key}
 use cardano/assets.{AssetName, PolicyId}
 use cardano/transaction.{Input, InlineDatum, Output, OutputReference, Transaction}
 use noctis/lp_escrow_datum.{
@@ -440,7 +441,15 @@ fn fee_recipient_paid(
   datum: LpEscrowDatum,
   harvested_amount: Int,
 ) -> Bool {
-  let recipient_address = from_verification_key(active_fee_recipient(datum))
+  // The payment credential, not the whole address. `from_verification_key`
+  // builds a bare ENTERPRISE address, and an ordinary Cardano wallet hands out
+  // BASE addresses — payment credential plus a staking part — so requiring the
+  // whole address to match asks for a destination almost nobody actually uses.
+  // The creator's LP trading fees are paid through here, so the effect was
+  // that a normal wallet could not receive them at all. Same fix already
+  // applied to the curve and staking payouts.
+  let recipient_credential =
+    from_verification_key(active_fee_recipient(datum)).payment_credential
   list.any(
     self.outputs,
     fn(output) {
@@ -449,7 +458,7 @@ fn fee_recipient_paid(
         // an unrelated obligation owed to the same recipient would otherwise
         // both read one output as their own.
         settlement.settles(output, own_ref),
-        output.address == recipient_address,
+        output.address.payment_credential == recipient_credential,
         assets.lovelace_of(output.value) >= harvested_amount,
       }
     },
@@ -2929,4 +2938,58 @@ test migrate_rejects_a_second_move_inside_the_cooldown() {
     }
 
   !lp_escrow.spend(Some(datum), redeemer, own_ref, self)
+}
+
+/// The creator's LP trading fees, paid to the kind of address a wallet
+/// actually issues.
+///
+/// `from_verification_key` builds an ENTERPRISE address. Real wallets hand out
+/// BASE addresses, which carry a staking part as well, so a check on the whole
+/// address asked for a destination almost nobody has — and this is the path
+/// Stream B fees reach the creator by. Identical in every respect to the
+/// passing harvest above except that the recipient delegates their stake.
+test harvest_fees_succeeds_paying_a_real_base_address_not_just_enterprise() {
+  let datum = mock_datum(Locked, 0)
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let recipient_base_address =
+    from_verification_key(#"dd") |> with_delegation_key(#"aa")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_thread_nft(), assets.merge(
+          assets.from_lovelace(2_000_000),
+          assets.from_asset(#"33", "lp", 1000),
+        )),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_thread_nft(), assets.merge(
+        assets.from_lovelace(2_000_000),
+        assets.from_asset(#"33", "lp", 1000),
+      )),
+      datum: InlineDatum(datum),
+      reference_script: None,
+    }
+  let harvest_payout =
+    Output {
+      address: recipient_base_address,
+      value: assets.from_lovelace(50_000),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output, harvest_payout],
+    }
+
+  lp_escrow.spend(Some(datum), HarvestFees { harvested_amount: 50_000 }, own_ref, self)
 }

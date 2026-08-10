@@ -75,7 +75,7 @@
 use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
 use aiken/interval
-use cardano/address.{Address, from_verification_key}
+use cardano/address.{Address, from_verification_key, with_delegation_key}
 use cardano/assets
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use noctis/settlement
@@ -154,7 +154,7 @@ fn paid_to(
   key_hash: VerificationKeyHash,
   amount: Int,
 ) -> Bool {
-  let addr = from_verification_key(key_hash)
+  let cred = from_verification_key(key_hash).payment_credential
   list.any(
     self.outputs,
     fn(output: Output) {
@@ -172,7 +172,13 @@ fn paid_to(
       // so two settlements can never ask for the same tag, and one output can
       // never answer both.
       and {
-        output.address == addr,
+        // The payment credential, not the whole address.
+        // `from_verification_key` builds a bare ENTERPRISE address, while an
+        // ordinary wallet hands out BASE addresses — payment credential plus a
+        // staking part — so matching the whole address asks for a destination
+        // almost nobody uses, and the bond could not be returned to one. Same
+        // fix already applied to the curve, staking and escrow payouts.
+        output.address.payment_credential == cred,
         assets.lovelace_of(output.value) >= amount,
         settlement.settles(output, own_ref),
       }
@@ -589,6 +595,41 @@ test resolve_rejects_one_hour_after_submission() {
     }
 
   !cto_sybil_challenge.spend(
+    Some(datum),
+    ResolveChallenge { upheld: True, current_timestamp: resolve_time },
+    own_ref,
+    self,
+  )
+}
+
+/// The challenger's bond, returned to the kind of address a wallet issues.
+///
+/// `from_verification_key` builds an ENTERPRISE address; real wallets hand out
+/// BASE ones. Matching the whole address asked for a destination almost nobody
+/// has, so a challenger proved RIGHT could not be paid back. Identical to the
+/// passing resolve above except the challenger delegates their stake.
+test resolve_upheld_succeeds_paying_a_real_base_address_not_just_enterprise() {
+  let datum = mock_datum()
+  let (own_ref, own_input) = mock_input(datum)
+  let resolve_time = datum.submitted_at + defence_ms
+  let challenger_payout =
+    Output {
+      address: from_verification_key(datum.challenger_key_hash)
+        |> with_delegation_key(#"aa"),
+      value: assets.from_lovelace(datum.bond_amount),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [challenger_payout],
+      extra_signatories: [datum.governor_pub_key_hash],
+      validity_range: interval.between(resolve_time - 10, resolve_time + 10),
+    }
+
+  cto_sybil_challenge.spend(
     Some(datum),
     ResolveChallenge { upheld: True, current_timestamp: resolve_time },
     own_ref,

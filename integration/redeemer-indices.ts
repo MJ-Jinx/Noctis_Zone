@@ -133,6 +133,17 @@ export const CTO_SYBIL_CHALLENGE_REDEEMER = { ResolveChallenge: 0 } as const;
 export const NHOP_CHALLENGE_REDEEMER = { ResolveChallenge: 0 } as const;
 
 /**
+ * The MINTING side of the same validator.
+ *
+ * `nhop_challenge.ak` declares both a `spend` and a `mint` handler, which
+ * compile to one script — so this policy id is the challenge validator's own
+ * hash, and opening a challenge means minting under it rather than merely
+ * paying its address. That is what makes the submission time a figure the
+ * chain agreed with instead of one the challenger wrote.
+ */
+export const NHOP_MINT_REDEEMER = { OpenChallenge: 0, CloseChallenge: 1 } as const;
+
+/**
  * Every table above, against the blueprint definition it must agree with.
  *
  * The test walks this in BOTH directions — every entry against the blueprint,
@@ -155,4 +166,5 @@ export const REDEEMER_TABLES: ReadonlyArray<{
   { definition: 'zk_anchor/ZkAnchorRedeemer', indices: ZK_ANCHOR_REDEEMER },
   { definition: 'cto_sybil_challenge/CtoSybilChallengeRedeemer', indices: CTO_SYBIL_CHALLENGE_REDEEMER },
   { definition: 'nhop_challenge/NHopChallengeRedeemer', indices: NHOP_CHALLENGE_REDEEMER },
+  { definition: 'nhop_challenge/NHopMintRedeemer', indices: NHOP_MINT_REDEEMER },
 ];

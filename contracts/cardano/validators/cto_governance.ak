@@ -48,7 +48,8 @@ use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
 use aiken/interval
 use aiken/interval.{Interval, IntervalBoundType}
-use cardano/address.{Address, Credential, VerificationKey, from_verification_key}
+use cardano/address.{Address, Credential, VerificationKey, from_verification_key,
+  with_delegation_key}
 use cardano/assets.{PolicyId}
 use cardano/transaction.{Input, InlineDatum, Output, OutputReference, Transaction}
 use noctis/lp_escrow_datum.{Locked, LpEscrowDatum}
@@ -395,7 +396,7 @@ fn paid_to(
   key_hash: VerificationKeyHash,
   amount: Int,
 ) -> Bool {
-  let addr = from_verification_key(key_hash)
+  let cred = from_verification_key(key_hash).payment_credential
   list.any(
     self.outputs,
     fn(output) {
@@ -405,7 +406,13 @@ fn paid_to(
         // precisely what two obligations owed to one wallet have in common,
         // so neither can tell them apart.
         settlement.settles(output, own_ref),
-        output.address == addr,
+        // The payment credential, not the whole address.
+        // `from_verification_key` builds a bare ENTERPRISE address, while an
+        // ordinary wallet hands out BASE addresses — payment credential plus a
+        // staking part — so matching the whole address asks for a destination
+        // almost nobody uses, and the bond could not be returned to one. Same
+        // fix already applied to the curve, staking and escrow payouts.
+        output.address.payment_credential == cred,
         assets.lovelace_of(output.value) >= amount,
       }
     },
@@ -2733,4 +2740,53 @@ test anchor_vote_result_rejects_unattended_ballot_claiming_failure() {
     }
 
   !cto_governance.spend(Some(datum), redeemer, own_ref, self)
+}
+
+/// The relayer's bond, returned to the kind of address a wallet issues.
+///
+/// `from_verification_key` builds an ENTERPRISE address; real wallets hand out
+/// BASE ones, carrying a staking part as well. Matching the whole address
+/// asked for a destination almost nobody has — and this contract pays a
+/// relayer's bond, a treasury share and an ops share through the same helper.
+/// Identical to the passing reclaim above except the relayer delegates stake.
+test reclaim_relayer_bond_succeeds_paying_a_real_base_address_not_just_enterprise() {
+  let proposal = mock_proposal(Passed, Executed, 1000)
+  let datum = mock_datum_with_bond(Some(proposal), 25_000_000)
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_cto_nft_value(), assets.from_lovelace(27_000_000)),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum =
+    CtoGovernanceDatum { ..datum, pending_relayer_bond: 0, pending_relayer_key_hash: #"" }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: cto_out_value(2_000_000),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let relayer_output =
+    Output {
+      address: from_verification_key(#"33") |> with_delegation_key(#"aa"),
+      value: assets.from_lovelace(25_000_000),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      reference_inputs: [mock_lp_ref_input(mock_grad_ts)],
+      outputs: [continuing_output, relayer_output],
+    }
+
+  cto_governance.spend(Some(datum), ReclaimRelayerBond, own_ref, self)
 }
