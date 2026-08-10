@@ -219,9 +219,7 @@ export interface VoteResultParams {
  * that distinguishes them — so collapsing both arms to one tag here would build
  * a datum the validator rejects for a target DEX that is a plain payment key.
  */
-function toReferenceCredential(
-  target: VoteResultParams['targetDexCredential'],
-): TargetDexCredential {
+function toReferenceCredential(target: VoteResultParams['targetDexCredential']): TargetDexCredential {
   if (target === null) {
     return null;
   }

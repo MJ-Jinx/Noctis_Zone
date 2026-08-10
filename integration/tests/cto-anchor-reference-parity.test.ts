@@ -63,7 +63,7 @@ describe('every field the reference commits to actually changes it', () => {
   // on ONE ballot, not that either binds anything.
   const base = deriveAnchorReferenceHex(PINNED_INPUT);
 
-  const variants: Array<[string, typeof PINNED_INPUT]> = [
+  const variants: [string, typeof PINNED_INPUT][] = [
     ['launch id', { ...PINNED_INPUT, launchIdHex: '02' }],
     ['ballot ordinal', { ...PINNED_INPUT, proposalCount: 1n }],
     ['Midnight ballot id', { ...PINNED_INPUT, proposalIdHex: '7a' }],
@@ -111,21 +111,19 @@ describe('the integer encoding refuses what Aiken refuses', () => {
   // instead would produce a reference the validator disagrees with, and the
   // transaction would fail on chain with nothing pointing here.
   it('throws on a negative value rather than encoding one', () => {
-    expect(() =>
-      deriveAnchorReference({ ...PINNED_INPUT, ballot: { ...PINNED_BALLOT, yesVotes: -1n } }),
-    ).toThrow(/negative/);
+    expect(() => deriveAnchorReference({ ...PINNED_INPUT, ballot: { ...PINNED_BALLOT, yesVotes: -1n } })).toThrow(
+      /negative/,
+    );
   });
 
   it('throws on a value too wide for its field', () => {
-    expect(() =>
-      deriveAnchorReference({ ...PINNED_INPUT, proposalCount: 2n ** 64n }),
-    ).toThrow(/does not fit in 8 bytes/);
+    expect(() => deriveAnchorReference({ ...PINNED_INPUT, proposalCount: 2n ** 64n })).toThrow(
+      /does not fit in 8 bytes/,
+    );
   });
 
   it('accepts the widest value each field really allows', () => {
-    expect(() =>
-      deriveAnchorReference({ ...PINNED_INPUT, proposalCount: 2n ** 64n - 1n }),
-    ).not.toThrow();
+    expect(() => deriveAnchorReference({ ...PINNED_INPUT, proposalCount: 2n ** 64n - 1n })).not.toThrow();
   });
 });
 

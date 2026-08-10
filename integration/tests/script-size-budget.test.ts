@@ -40,6 +40,12 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by cto_governance +521: an anchored ballot's bundle reference is
+ * now derived by the validator from its own datum rather than read out of the
+ * redeemer, so the script carries the preimage construction and its hash. It
+ * also changes the validator's HASH, which moves the script address — any
+ * published reference script for it has to be re-derived rather than reused.
+ *
  * Last moved by token_metadata +113: authenticating the curve reference
  * input by its thread NFT rather than by a large token holding, which a
  * graduated curve no longer has, and requiring a metadata revision to keep
@@ -114,7 +120,7 @@ for (const v of blueprint.validators) {
 const RECORDED: Record<string, number> = {
   bonding_curve: 11_129,
   bonding_curve_tier_b: 13_921,
-  cto_governance: 7_398,
+  cto_governance: 7_919,
   cto_sybil_challenge: 2_201,
   curve_order: 1_775,
   launch_token_policy: 419,
