@@ -290,8 +290,23 @@ pub type CtoGovernanceRedeemer {
   ExpireProposal { current_timestamp: Int }
   /// Clear the active proposal (after execution or expiry)
   ClearProposal
-  /// Emergency: governor sets community wallet (compromise detected)
-  EmergencySetCommunityWallet { community_wallet_hash: VerificationKeyHash }
+  /// Emergency: the governor STOPS payouts to a community wallet believed
+  /// compromised. It cannot choose where they go instead.
+  ///
+  /// Two things were bundled here before, and only one of them is urgent.
+  /// Stopping the bleeding has to be instant and unilateral, and nobody gains
+  /// by it. Choosing the replacement is neither urgent nor safe to hand to one
+  /// key: post-CTO this wallet receives the creator's fee stream and the LP
+  /// trading fees, so a governor who could name it could name their own and
+  /// keep the community's revenue — with the community's only remedy being
+  /// another ballot, behind a 90-day cooldown.
+  ///
+  /// So this clears the wallet and nothing else. Naming the replacement goes
+  /// back through the path that already exists for it: a passed
+  /// SilenceLockTrigger, whose recipient this contract writes on execution.
+  /// Fees are not lost while cleared — they stay unharvested until a
+  /// recipient exists again.
+  EmergencyFreezeCommunityWallet
   /// Fix: governor-only, within the challenge window — voids a
   /// pending anchor found to be fraudulent (same trust boundary already
   /// used throughout this codebase for off-chain-verified claims) and
@@ -870,14 +885,18 @@ validator cto_governance {
         }
       }
 
-      EmergencySetCommunityWallet { community_wallet_hash } -> {
+      EmergencyFreezeCommunityWallet -> {
         let new_datum = own_continuing_datum(self, own_ref)
         and {
           list.has(self.extra_signatories, datum.governor_credential_hash),
           datum.cto_state == CTOTriggered,
+          // Nothing to freeze if nothing is set.
+          datum.community_wallet_hash != #"",
           new_datum == CtoGovernanceDatum {
             ..datum,
-            community_wallet_hash: community_wallet_hash,
+            // Cleared, never redirected — the empty hash is already what a
+            // dissolved CTO leaves behind, so downstream reads it the same way.
+            community_wallet_hash: #"",
           },
           single_own_utxo(self, own_input.output.address),
           governance_value_unchanged(self, own_ref),
@@ -2789,4 +2808,93 @@ test reclaim_relayer_bond_succeeds_paying_a_real_base_address_not_just_enterpris
     }
 
   cto_governance.spend(Some(datum), ReclaimRelayerBond, own_ref, self)
+}
+
+
+// ----------------------------------------------------------------------------
+// EmergencyFreezeCommunityWallet
+//
+// This redeemer had NO tests. It is governor-only and writes the field that
+// decides where a post-CTO launch's fee streams go, so the four below cover
+// both what it may do and what it may no longer do.
+// ----------------------------------------------------------------------------
+
+fn frozen_datum() -> CtoGovernanceDatum {
+  CtoGovernanceDatum {
+    ..mock_datum(None),
+    cto_state: CTOTriggered,
+    community_wallet_hash: #"ee",
+  }
+}
+
+fn emergency_tx(
+  datum: CtoGovernanceDatum,
+  new_datum: CtoGovernanceDatum,
+  signer: VerificationKeyHash,
+) -> (OutputReference, Transaction) {
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_cto_nft_value(), assets.from_lovelace(2_000_000)),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: cto_out_value(2_000_000),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      extra_signatories: [signer],
+    }
+  (own_ref, self)
+}
+
+test emergency_freeze_clears_a_compromised_community_wallet() {
+  let datum = frozen_datum()
+  let new_datum = CtoGovernanceDatum { ..datum, community_wallet_hash: #"" }
+  let (own_ref, self) =
+    emergency_tx(datum, new_datum, datum.governor_credential_hash)
+  cto_governance.spend(Some(datum), EmergencyFreezeCommunityWallet, own_ref, self)
+}
+
+/// The point of the change. Stopping payouts is urgent and safe to hand to
+/// one key; choosing where they go instead is neither, because this wallet
+/// receives the creator fee stream and the LP trading fees once a CTO passes.
+/// The replacement is named by a passed ballot, not here.
+test emergency_freeze_cannot_redirect_to_a_wallet_of_the_governors_choosing() {
+  let datum = frozen_datum()
+  let new_datum = CtoGovernanceDatum { ..datum, community_wallet_hash: #"ba" }
+  let (own_ref, self) =
+    emergency_tx(datum, new_datum, datum.governor_credential_hash)
+  !cto_governance.spend(Some(datum), EmergencyFreezeCommunityWallet, own_ref, self)
+}
+
+test emergency_freeze_rejects_a_non_governor() {
+  let datum = frozen_datum()
+  let new_datum = CtoGovernanceDatum { ..datum, community_wallet_hash: #"" }
+  let (own_ref, self) = emergency_tx(datum, new_datum, #"ba")
+  !cto_governance.spend(Some(datum), EmergencyFreezeCommunityWallet, own_ref, self)
+}
+
+/// Nothing to freeze before a CTO has triggered, and nothing to freeze once
+/// the wallet is already clear — the second keeps this from being a way to
+/// churn the governance UTXO for free.
+test emergency_freeze_rejects_when_no_wallet_is_set() {
+  let datum = CtoGovernanceDatum { ..frozen_datum(), community_wallet_hash: #"" }
+  let new_datum = datum
+  let (own_ref, self) =
+    emergency_tx(datum, new_datum, datum.governor_credential_hash)
+  !cto_governance.spend(Some(datum), EmergencyFreezeCommunityWallet, own_ref, self)
 }

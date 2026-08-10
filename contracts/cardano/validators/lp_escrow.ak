@@ -462,7 +462,15 @@ fn fee_recipient_paid(
         assets.lovelace_of(output.value) >= harvested_amount,
       }
     },
-  )
+  ) && // ...and the recipient is genuinely better off by it.
+  //
+  // The check above asks whether an output at their credential holds the
+  // harvest, which their own CHANGE also does — and now that a harvest is
+  // signed by the recipient, the transaction CAN contain their utxos, which
+  // is precisely the precondition that makes change indistinguishable from
+  // payment. Adding the signature without this would have closed one gap by
+  // opening another. See noctis/settlement's net_lovelace_gain.
+  settlement.net_lovelace_gain(self, recipient_credential) >= harvested_amount
 }
 
 /// Verify the LP tokens land at the target DEX's payment credential, in the
@@ -765,6 +773,20 @@ validator lp_escrow {
           // every other non-SealLock/Migrate redeemer in this file.
           lp_value_unchanged(self, own_ref),
           lp_position_untouched(self, own_ref, datum),
+          // Signed by whoever the fees are for.
+          //
+          // This was permissionless on the reasoning that nobody can gain by
+          // calling it, since the LP position cannot move — true, and not the
+          // whole question. Nobody could gain, but anyone could CHURN: the
+          // continuing output is identical to the input, so this redeemer
+          // rebuilds the escrow UTXO at a new reference for the price of a
+          // fee. That invalidates whatever was being built against the old
+          // one, and this UTXO is read as a REFERENCE INPUT by the CTO
+          // anchor, which is the community's own rescue path.
+          //
+          // The recipient is the only party a harvest is for, so requiring
+          // their signature costs nobody anything and removes the churn.
+          list.has(self.extra_signatories, active_fee_recipient(datum)),
           fee_recipient_paid(self, own_ref, datum, harvested_amount),
           // HarvestFees is permissionless — the LP position's own
           // continuing output can't be padded with junk assets either.
@@ -2378,7 +2400,9 @@ test harvest_fees_succeeds_paying_the_creator_when_no_cto() {
       ..transaction.placeholder,
       inputs: [own_input],
       outputs: [continuing_output, harvest_payout],
-      // Permissionless — deliberately no extra_signatories.
+      // The recipient signs: a harvest is for them, and requiring it is what
+      // stops anyone else churning this UTXO for the price of a fee.
+      extra_signatories: [mock_datum(Locked, 0).fee_recipient_pub_key_hash],
     }
 
   lp_escrow.spend(Some(datum), HarvestFees { harvested_amount: 50_000 }, own_ref, self)
@@ -2478,6 +2502,9 @@ test harvest_fees_pays_the_community_wallet_once_cto_triggered() {
       ..transaction.placeholder,
       inputs: [own_input],
       outputs: [continuing_output, harvest_payout],
+      // Post-CTO the recipient IS the community wallet, so that is the
+      // signature a harvest now needs.
+      extra_signatories: [#"ee"],
     }
 
   lp_escrow.spend(Some(datum), HarvestFees { harvested_amount: 50_000 }, own_ref, self)
@@ -2989,7 +3016,134 @@ test harvest_fees_succeeds_paying_a_real_base_address_not_just_enterprise() {
       ..transaction.placeholder,
       inputs: [own_input],
       outputs: [continuing_output, harvest_payout],
+      extra_signatories: [datum.fee_recipient_pub_key_hash],
     }
 
   lp_escrow.spend(Some(datum), HarvestFees { harvested_amount: 50_000 }, own_ref, self)
+}
+
+
+/// Anyone could rebuild this UTXO at a new reference for the price of a fee.
+///
+/// The continuing output is identical to the input, so a harvest changes
+/// nothing except where the escrow lives — which is enough to invalidate
+/// anything being built against it, and this UTXO is read as a REFERENCE
+/// INPUT by the CTO anchor. A harvest is for the recipient alone, so their
+/// signature costs nobody anything and removes the churn.
+test harvest_fees_rejects_a_stranger_churning_the_escrow() {
+  let datum = mock_datum(Locked, 0)
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let recipient_address = from_verification_key(datum.fee_recipient_pub_key_hash)
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_thread_nft(), assets.merge(
+          assets.from_lovelace(2_000_000),
+          assets.from_asset(#"33", "lp", 1000),
+        )),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_thread_nft(), assets.merge(
+        assets.from_lovelace(2_000_000),
+        assets.from_asset(#"33", "lp", 1000),
+      )),
+      datum: InlineDatum(datum),
+      reference_script: None,
+    }
+  let harvest_payout =
+    Output {
+      address: recipient_address,
+      value: assets.from_lovelace(50_000),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output, harvest_payout],
+      // Somebody else entirely.
+      extra_signatories: [#"ba"],
+    }
+
+  !lp_escrow.spend(Some(datum), HarvestFees { harvested_amount: 50_000 }, own_ref, self)
+}
+
+/// The recipient signs a harvest now, which means the transaction can carry
+/// their own utxos — and an output at their credential holding the harvest is
+/// then equally consistent with their change coming back while the real fee
+/// goes elsewhere. Closing the churn without this would have opened that.
+test harvest_fees_rejects_paying_the_recipient_with_their_own_ada() {
+  let datum = mock_datum(Locked, 0)
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let recipient_address = from_verification_key(datum.fee_recipient_pub_key_hash)
+  let attacker_address = from_verification_key(#"ba")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_thread_nft(), assets.merge(
+          assets.from_lovelace(2_000_000),
+          assets.from_asset(#"33", "lp", 1000),
+        )),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  // The recipient's own ada, spent in this same transaction.
+  let recipient_input =
+    Input {
+      output_reference: OutputReference { transaction_id: #"77", output_index: 0 },
+      output: Output {
+        address: recipient_address,
+        value: assets.from_lovelace(2_000_000),
+        datum: transaction.NoDatum,
+        reference_script: None,
+      },
+    }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_thread_nft(), assets.merge(
+        assets.from_lovelace(2_000_000),
+        assets.from_asset(#"33", "lp", 1000),
+      )),
+      datum: InlineDatum(datum),
+      reference_script: None,
+    }
+  // Their own ada handed straight back, tagged as though it were the harvest.
+  let recipient_change =
+    Output {
+      address: recipient_address,
+      value: assets.from_lovelace(1_950_000),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  // The real harvested fee, going somewhere else.
+  let attacker_output =
+    Output {
+      address: attacker_address,
+      value: assets.from_lovelace(50_000),
+      datum: transaction.NoDatum,
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input, recipient_input],
+      outputs: [continuing_output, recipient_change, attacker_output],
+      extra_signatories: [datum.fee_recipient_pub_key_hash],
+    }
+
+  !lp_escrow.spend(Some(datum), HarvestFees { harvested_amount: 50_000 }, own_ref, self)
 }

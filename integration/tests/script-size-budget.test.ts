@@ -40,6 +40,12 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by the same mint-time authentication reaching the second
+ * challenge contract (cto_sybil_challenge +896), by a harvest needing its
+ * recipient's signature and their NET gain (lp_escrow +205), and by the
+ * emergency path being able to clear a community wallet but not choose one
+ * (cto_governance +16).
+ *
  * Last moved by authenticating the one datum field a challenge could not
  * otherwise have checked at creation: nhop_challenge +883, for a `mint`
  * handler in the same validator. Paying a script address runs nothing, so
@@ -103,11 +109,11 @@ for (const v of blueprint.validators) {
 const RECORDED: Record<string, number> = {
   bonding_curve: 11_129,
   bonding_curve_tier_b: 13_921,
-  cto_governance: 7_382,
-  cto_sybil_challenge: 1_305,
+  cto_governance: 7_398,
+  cto_sybil_challenge: 2_201,
   curve_order: 1_775,
   launch_token_policy: 419,
-  lp_escrow: 7_213,
+  lp_escrow: 7_418,
   nhop_challenge: 2_157,
   staking_pool: 4_069,
   token_metadata: 4_458,

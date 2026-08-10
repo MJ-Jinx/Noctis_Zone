@@ -72,13 +72,29 @@
 // this directory).
 // ============================================================================
 
+use aiken/collection/dict
 use aiken/collection/list
 use aiken/crypto.{VerificationKeyHash}
 use aiken/interval
-use cardano/address.{Address, from_verification_key, with_delegation_key}
-use cardano/assets
+use aiken/interval.{Interval, IntervalBoundType}
+use cardano/address.{Address, Script, from_script, from_verification_key,
+  with_delegation_key}
+use cardano/assets.{PolicyId}
 use cardano/transaction.{InlineDatum, Output, OutputReference, Transaction}
 use noctis/settlement
+
+/// The declared validity range's own width, bounded. See any curve validator
+/// for the full reasoning: `interval.contains` alone lets a caller widen the
+/// range and pick a timestamp far from the real time.
+fn validity_range_is_narrow(range: Interval, max_width: Int) -> Bool {
+  when (range.lower_bound.bound_type, range.upper_bound.bound_type) is {
+    (IntervalBoundType.Finite(lo), IntervalBoundType.Finite(hi)) ->
+      hi >= lo && hi - lo <= max_width
+    _ -> False
+  }
+}
+
+const max_validity_range_width = 600_000
 
 // ============================================================================
 // TYPES
@@ -100,8 +116,10 @@ pub type CtoSybilChallengeDatum {
   /// implicitly by Cardano's balance-conservation rules at resolution,
   /// same as nhop_challenge.ak.
   bond_amount: Int,
-  /// Posix seconds the challenge was submitted — the defense window
-  /// counts from here.
+  /// Posix MILLISECONDS the challenge was submitted — the defence window
+  /// counts from here, and `defence_ms` beside it is milliseconds too. This
+  /// comment said "seconds" while the arithmetic said otherwise; the same
+  /// mismatch was found and corrected on nhop_challenge.ak.
   submitted_at: Int,
   /// Audit-trail commitment to the off-chain evidence (e.g. a hash of the
   /// challenger's claimed stake-key-match or tx-graph proof). Not
@@ -116,6 +134,21 @@ pub type CtoSybilChallengeRedeemer {
   /// validity range (Cardano scripts can't read wall-clock time directly),
   /// same idiom as every other timestamp check in this codebase.
   ResolveChallenge { upheld: Bool, current_timestamp: Int }
+}
+
+/// What the `mint` handler below is asked to do.
+///
+/// See nhop_challenge.ak's own copy for the full reasoning. In short: opening
+/// a challenge is a payment to a script address and runs no validator, so the
+/// submission time was whatever the challenger wrote, while the defence window
+/// counts from it. Minting IS validated, and a validator's `mint` and `spend`
+/// handlers compile to one script, so requiring a token minted here costs no
+/// second script and no second address.
+pub type CtoSybilMintRedeemer {
+  /// Open a challenge, at a time the chain agrees with.
+  OpenChallenge { current_timestamp: Int }
+  /// Close one. `spend` runs alongside and decides whether it may end at all.
+  CloseChallenge
 }
 
 // ============================================================================
@@ -211,7 +244,47 @@ fn single_own_utxo(self: Transaction, own_address: Address) -> Bool {
 // VALIDATOR
 // ============================================================================
 
+/// One name for every challenge — what makes one unique is the UTXO it lives
+/// in, which `spend` already binds a resolution to.
+const challenge_asset_name: ByteArray = "sybil"
+
 validator cto_sybil_challenge {
+  /// Authenticates the submission time, which creation cannot otherwise check.
+  ///
+  /// Same mechanism as nhop_challenge.ak's `mint`, written out here rather
+  /// than shared: the two contracts carry different datums, and they have
+  /// diverged before.
+  mint(redeemer: CtoSybilMintRedeemer, policy_id: PolicyId, self: Transaction) {
+    let minted = assets.tokens(self.mint, policy_id) |> dict.to_pairs()
+    when redeemer is {
+      OpenChallenge { current_timestamp } -> {
+        expect [Pair(name, quantity)] = minted
+        let own_address = from_script(policy_id)
+        expect [challenge_output] =
+          list.filter(self.outputs, fn(output) { output.address == own_address })
+        expect InlineDatum(raw_datum) = challenge_output.datum
+        expect challenge: CtoSybilChallengeDatum = raw_datum
+        and {
+          name == challenge_asset_name,
+          quantity == 1,
+          assets.quantity_of(challenge_output.value, policy_id, name) == 1,
+          challenge.submitted_at == current_timestamp,
+          interval.contains(self.validity_range, current_timestamp),
+          validity_range_is_narrow(self.validity_range, max_validity_range_width),
+          assets.lovelace_of(challenge_output.value) == challenge.bond_amount,
+          challenge.bond_amount > 0,
+        }
+      }
+      CloseChallenge -> {
+        expect [Pair(name, quantity)] = minted
+        and {
+          name == challenge_asset_name,
+          quantity == -1,
+        }
+      }
+    }
+  }
+
   spend(
     datum_opt: Option<CtoSybilChallengeDatum>,
     redeemer: CtoSybilChallengeRedeemer,
@@ -222,10 +295,20 @@ validator cto_sybil_challenge {
     expect Some(own_input) =
       list.find(self.inputs, fn(input) { input.output_reference == own_ref })
     let ResolveChallenge { upheld, current_timestamp } = redeemer
+    // This script's own hash, which is also the policy id of the token a real
+    // challenge carries — `mint` and `spend` are handlers of one script.
+    expect Script(own_policy) = own_input.output.address.payment_credential
     let base_checks =
       and {
         list.has(self.extra_signatories, datum.governor_pub_key_hash),
         interval.contains(self.validity_range, current_timestamp),
+        // Without these two the mint handler decides nothing: anyone could pay
+        // this address directly and write whatever submission time suited
+        // them. Holding the token is what makes the datum one the chain agreed
+        // to, and burning it stops that token reaching a later forgery.
+        assets.quantity_of(own_input.output.value, own_policy, challenge_asset_name) == 1,
+        assets.quantity_of(self.mint, own_policy, challenge_asset_name) == -1,
+        validity_range_is_narrow(self.validity_range, max_validity_range_width),
         current_timestamp >= datum.submitted_at + defence_ms,
         single_own_utxo(self, own_input.output.address),
         // Fix: same real-value-conservation gap as
@@ -275,14 +358,27 @@ fn mock_datum() -> CtoSybilChallengeDatum {
   }
 }
 
+/// This validator's own hash, in the fixtures — the script a challenge lives
+/// at AND the policy its token is minted under, which one validator with both
+/// handlers makes the same 28 bytes.
+const mock_script_hash: ByteArray = #"cc"
+
+fn mock_challenge_token() -> assets.Value {
+  assets.from_asset(mock_script_hash, challenge_asset_name, 1)
+}
+
+fn mock_challenge_burn() -> assets.Value {
+  assets.from_asset(mock_script_hash, challenge_asset_name, -1)
+}
+
 fn mock_input(datum: CtoSybilChallengeDatum) -> (OutputReference, transaction.Input) {
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_input =
     transaction.Input {
       output_reference: own_ref,
       output: Output {
-        address: from_verification_key(#"cc"),
-        value: assets.from_lovelace(25_000_000),
+        address: from_script(mock_script_hash),
+        value: assets.merge(assets.from_lovelace(25_000_000), mock_challenge_token()),
         datum: transaction.InlineDatum(datum),
         reference_script: None,
       },
@@ -307,6 +403,7 @@ test resolve_upheld_succeeds_after_defence_window() {
       inputs: [own_input],
       outputs: [challenger_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(resolve_time - 10, resolve_time + 10),
     }
 
@@ -344,6 +441,7 @@ test resolve_rejected_splits_bond_treasury_ops() {
       inputs: [own_input],
       outputs: [treasury_payout, ops_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(resolve_time - 10, resolve_time + 10),
     }
 
@@ -400,6 +498,7 @@ test resolve_rejects_before_defence_window_elapses() {
       inputs: [own_input],
       outputs: [challenger_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(too_early - 10, too_early + 10),
     }
 
@@ -428,6 +527,7 @@ test resolve_upheld_rejects_underpaid_challenger() {
       inputs: [own_input],
       outputs: [short_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(resolve_time - 10, resolve_time + 10),
     }
 
@@ -457,6 +557,7 @@ test resolve_rejected_rejects_missing_ops_share() {
       // Missing the ops payout entirely.
       outputs: [treasury_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(resolve_time - 10, resolve_time + 10),
     }
 
@@ -475,7 +576,7 @@ test resolve_rejected_rejects_missing_ops_share() {
 test resolve_rejects_when_batched_with_a_second_challenge_input() {
   let datum_a = mock_datum()
   let datum_b = CtoSybilChallengeDatum { ..mock_datum(), launch_id: #"bb" }
-  let own_address = from_verification_key(#"cc")
+  let own_address = from_script(mock_script_hash)
   let own_ref_a = OutputReference { transaction_id: #"00", output_index: 0 }
   let own_ref_b = OutputReference { transaction_id: #"00", output_index: 1 }
   let input_a =
@@ -483,7 +584,7 @@ test resolve_rejects_when_batched_with_a_second_challenge_input() {
       output_reference: own_ref_a,
       output: Output {
         address: own_address,
-        value: assets.from_lovelace(25_000_000),
+        value: assets.merge(assets.from_lovelace(25_000_000), mock_challenge_token()),
         datum: transaction.InlineDatum(datum_a),
         reference_script: None,
       },
@@ -493,7 +594,7 @@ test resolve_rejects_when_batched_with_a_second_challenge_input() {
       output_reference: own_ref_b,
       output: Output {
         address: own_address,
-        value: assets.from_lovelace(25_000_000),
+        value: assets.merge(assets.from_lovelace(25_000_000), mock_challenge_token()),
         datum: transaction.InlineDatum(datum_b),
         reference_script: None,
       },
@@ -539,8 +640,8 @@ test resolve_rejects_when_real_value_exceeds_claimed_bond_amount() {
     transaction.Input {
       output_reference: own_ref,
       output: Output {
-        address: from_verification_key(#"cc"),
-        value: assets.from_lovelace(30_000_000),
+        address: from_script(mock_script_hash),
+        value: assets.merge(assets.from_lovelace(30_000_000), mock_challenge_token()),
         datum: transaction.InlineDatum(datum),
         reference_script: None,
       },
@@ -559,6 +660,7 @@ test resolve_rejects_when_real_value_exceeds_claimed_bond_amount() {
       inputs: [own_input],
       outputs: [challenger_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(resolve_time - 10, resolve_time + 10),
     }
 
@@ -591,6 +693,7 @@ test resolve_rejects_one_hour_after_submission() {
       inputs: [own_input],
       outputs: [challenger_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(resolve_time - 10, resolve_time + 10),
     }
 
@@ -626,10 +729,175 @@ test resolve_upheld_succeeds_paying_a_real_base_address_not_just_enterprise() {
       inputs: [own_input],
       outputs: [challenger_payout],
       extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
       validity_range: interval.between(resolve_time - 10, resolve_time + 10),
     }
 
   cto_sybil_challenge.spend(
+    Some(datum),
+    ResolveChallenge { upheld: True, current_timestamp: resolve_time },
+    own_ref,
+    self,
+  )
+}
+
+
+// ----------------------------------------------------------------------------
+// Opening a challenge — the mint handler
+// ----------------------------------------------------------------------------
+
+fn mock_open_output(datum: CtoSybilChallengeDatum) -> Output {
+  Output {
+    address: from_script(mock_script_hash),
+    value: assets.merge(
+      assets.from_lovelace(datum.bond_amount),
+      mock_challenge_token(),
+    ),
+    datum: transaction.InlineDatum(datum),
+    reference_script: None,
+  }
+}
+
+fn mock_open_tx(
+  datum: CtoSybilChallengeDatum,
+  at: Int,
+  half_width: Int,
+) -> Transaction {
+  Transaction {
+    ..transaction.placeholder,
+    outputs: [mock_open_output(datum)],
+    mint: mock_challenge_token(),
+    validity_range: interval.between(at - half_width, at + half_width),
+  }
+}
+
+test open_challenge_succeeds_when_the_chain_agrees_with_the_claimed_time() {
+  let datum = mock_datum()
+  let self = mock_open_tx(datum, datum.submitted_at, 10)
+  cto_sybil_challenge.mint(
+    OpenChallenge { current_timestamp: datum.submitted_at },
+    mock_script_hash,
+    self,
+  )
+}
+
+/// The reason this handler exists. A challenge opened with its submission
+/// time already a day in the past arrives with the accused voter's whole
+/// defence window spent.
+test open_challenge_rejects_a_backdated_submission() {
+  let real_now = 100_000_000
+  let datum =
+    CtoSybilChallengeDatum { ..mock_datum(), submitted_at: real_now - defence_ms }
+  let self = mock_open_tx(datum, real_now, 10)
+  !cto_sybil_challenge.mint(
+    OpenChallenge { current_timestamp: real_now },
+    mock_script_hash,
+    self,
+  )
+}
+
+/// A range wide enough to contain any convenient answer contains none.
+test open_challenge_rejects_a_wide_validity_range() {
+  let datum = mock_datum()
+  let self = mock_open_tx(datum, datum.submitted_at, max_validity_range_width)
+  !cto_sybil_challenge.mint(
+    OpenChallenge { current_timestamp: datum.submitted_at },
+    mock_script_hash,
+    self,
+  )
+}
+
+/// The bond has to be real when the clock starts, not merely claimed.
+test open_challenge_rejects_a_bond_smaller_than_the_datum_claims() {
+  let datum = mock_datum()
+  let self =
+    Transaction {
+      ..mock_open_tx(datum, datum.submitted_at, 10),
+      outputs: [
+        Output {
+          address: from_script(mock_script_hash),
+          value: assets.merge(
+            assets.from_lovelace(1_000_000),
+            mock_challenge_token(),
+          ),
+          datum: transaction.InlineDatum(datum),
+          reference_script: None,
+        },
+      ],
+    }
+  !cto_sybil_challenge.mint(
+    OpenChallenge { current_timestamp: datum.submitted_at },
+    mock_script_hash,
+    self,
+  )
+}
+
+/// Without this the mint handler decides nothing: anyone could pay the
+/// address directly and never mint at all. A burn IS declared here, so the
+/// burn check is satisfied and only the token-presence check can reject —
+/// otherwise this test would be answered by the wrong guard and prove
+/// nothing about the bypass it names.
+test resolve_rejects_a_challenge_that_was_never_minted() {
+  let datum = mock_datum()
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_input =
+    transaction.Input {
+      output_reference: own_ref,
+      output: Output {
+        address: from_script(mock_script_hash),
+        value: assets.from_lovelace(25_000_000),
+        datum: transaction.InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let resolve_time = datum.submitted_at + defence_ms
+  let challenger_payout =
+    Output {
+      address: from_verification_key(datum.challenger_key_hash),
+      value: assets.from_lovelace(datum.bond_amount),
+      datum: transaction.InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [challenger_payout],
+      extra_signatories: [datum.governor_pub_key_hash],
+      mint: mock_challenge_burn(),
+      validity_range: interval.between(resolve_time - 10, resolve_time + 10),
+    }
+
+  !cto_sybil_challenge.spend(
+    Some(datum),
+    ResolveChallenge { upheld: True, current_timestamp: resolve_time },
+    own_ref,
+    self,
+  )
+}
+
+/// A resolved challenge must not leave its token behind for a forgery.
+test resolve_rejects_leaving_the_token_unburned() {
+  let datum = mock_datum()
+  let (own_ref, own_input) = mock_input(datum)
+  let resolve_time = datum.submitted_at + defence_ms
+  let challenger_payout =
+    Output {
+      address: from_verification_key(datum.challenger_key_hash),
+      value: assets.from_lovelace(datum.bond_amount),
+      datum: transaction.InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [challenger_payout],
+      extra_signatories: [datum.governor_pub_key_hash],
+      validity_range: interval.between(resolve_time - 10, resolve_time + 10),
+    }
+
+  !cto_sybil_challenge.spend(
     Some(datum),
     ResolveChallenge { upheld: True, current_timestamp: resolve_time },
     own_ref,

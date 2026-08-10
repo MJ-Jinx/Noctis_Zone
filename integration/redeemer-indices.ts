@@ -69,7 +69,7 @@ export const CTO_GOVERNANCE_REDEEMER = {
   ExecuteProposal: 1,
   ExpireProposal: 2,
   ClearProposal: 3,
-  EmergencySetCommunityWallet: 4,
+  EmergencyFreezeCommunityWallet: 4,
   VoidPendingProposal: 5,
   ReclaimRelayerBond: 6,
   QueryState: 7,
@@ -129,6 +129,14 @@ export const ZK_ANCHOR_REDEEMER = {
 /** `contracts/cardano/validators/cto_sybil_challenge.ak`. */
 export const CTO_SYBIL_CHALLENGE_REDEEMER = { ResolveChallenge: 0 } as const;
 
+/**
+ * The MINTING side of the same validator — see NHOP_MINT_REDEEMER for the
+ * reasoning, which is identical. Both challenge contracts authenticate their
+ * submission time by requiring a token this same script minted against a
+ * narrow validity range, so the policy id is the validator's own hash.
+ */
+export const CTO_SYBIL_MINT_REDEEMER = { OpenChallenge: 0, CloseChallenge: 1 } as const;
+
 /** `contracts/cardano/validators/nhop_challenge.ak`. */
 export const NHOP_CHALLENGE_REDEEMER = { ResolveChallenge: 0 } as const;
 
@@ -165,6 +173,7 @@ export const REDEEMER_TABLES: ReadonlyArray<{
   { definition: 'vesting/VestingRedeemer', indices: VESTING_REDEEMER },
   { definition: 'zk_anchor/ZkAnchorRedeemer', indices: ZK_ANCHOR_REDEEMER },
   { definition: 'cto_sybil_challenge/CtoSybilChallengeRedeemer', indices: CTO_SYBIL_CHALLENGE_REDEEMER },
+  { definition: 'cto_sybil_challenge/CtoSybilMintRedeemer', indices: CTO_SYBIL_MINT_REDEEMER },
   { definition: 'nhop_challenge/NHopChallengeRedeemer', indices: NHOP_CHALLENGE_REDEEMER },
   { definition: 'nhop_challenge/NHopMintRedeemer', indices: NHOP_MINT_REDEEMER },
 ];
