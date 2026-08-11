@@ -1323,6 +1323,22 @@ export class NoctisLaunchManager {
     return cto.callTx.updateCreatorActivity(timestamp, hasClaimableBalance, currentTimestamp);
   }
 
+  /**
+   * The creator refreshing their own silence clock.
+   *
+   * Callable ONLY by the creator — the circuit derives the caller's identity
+   * and compares it to the launch's sealed `creatorKey`, so this client must
+   * be constructed with the creator's own secret.
+   *
+   * The point is that the silence timer has an author who is not the people
+   * attesting it: without this, the clock advanced toward "silent" whenever
+   * the attestors went quiet, whatever the creator was doing.
+   */
+  async recordCreatorHeartbeat(currentTimestamp: bigint) {
+    const cto = required(this.client.ctoGovernance, 'cto_governance');
+    return cto.callTx.recordCreatorHeartbeat(currentTimestamp);
+  }
+
   // --- CTO Governance: bonded break-glass fallback (2026-07-19) ---
   //
   // Community override for a governor withholding hasClaimableBalance —

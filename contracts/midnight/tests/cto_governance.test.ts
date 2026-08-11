@@ -2106,3 +2106,75 @@ describe('cto_governance.compact — threshold attestation on creator activity',
     expect(read(ctx).hasClaimableBalance).toBe(false);
   });
 });
+
+describe('cto_governance.compact — the creator can write their own silence clock', () => {
+  // The defect this closes: lastCreatorActivity only ever moved through
+  // updateCreatorActivity, so the silence timer advanced whenever the
+  // ATTESTORS went quiet — regardless of the creator. Threshold attestation
+  // made that easier to reach, not harder, since refreshing it now takes two
+  // of them.
+  const creatorContract = () => new Contract<PrivateState>(makeWitnesses(CREATOR_FILL));
+
+  it('lets the creator refresh the clock without any attestor', () => {
+    const d = deploy();
+    const at = 5_000n;
+    const r = creatorContract().circuits.recordCreatorHeartbeat(
+      nextContextAtTime(d.contractAddress, d.ctx, Number(at)),
+      at,
+    );
+    const ctx = nextContext(d.contractAddress, r.context);
+    expect(ledger(ctx.currentQueryContext.state).lastCreatorActivity).toBe(at);
+  });
+
+  it('refuses anyone who is not the creator', () => {
+    const d = deploy();
+    expect(() =>
+      d.contract.circuits.recordCreatorHeartbeat(nextContextAtTime(d.contractAddress, d.ctx, 5_000), 5_000n),
+    ).toThrow(/Only the creator/i);
+  });
+
+  it('refuses to move the clock backwards', () => {
+    const d = deploy();
+    const r = creatorContract().circuits.recordCreatorHeartbeat(
+      nextContextAtTime(d.contractAddress, d.ctx, 5_000),
+      5_000n,
+    );
+    const ctx = nextContext(d.contractAddress, r.context);
+    expect(() =>
+      creatorContract().circuits.recordCreatorHeartbeat(nextContextAtTime(d.contractAddress, ctx, 4_000), 4_000n),
+    ).toThrow(/backwards/i);
+  });
+
+  it('refuses a heartbeat dated in the future', () => {
+    const d = deploy();
+    expect(() =>
+      creatorContract().circuits.recordCreatorHeartbeat(nextContextAtTime(d.contractAddress, d.ctx, 1_000), 9_000_000n),
+    ).toThrow(/cannot be in the future/i);
+  });
+
+  // The point of the whole thing, end to end.
+  it('keeps a silence proposal shut while the creator is checking in', () => {
+    const d = deploy();
+    const { ctx: snapCtx } = publishBalanceSnapshot(d, [{ fill: VOTER_FILL, balance: 1n }]);
+    // No attestor touches creator activity from here on; the creator alone
+    // keeps the clock alive, right up to the moment silence would open.
+    const r = creatorContract().circuits.recordCreatorHeartbeat(
+      nextContextAtTime(d.contractAddress, snapCtx, Number(SILENCE_THRESHOLD)),
+      SILENCE_THRESHOLD,
+    );
+    const ctx = nextContext(d.contractAddress, r.context);
+    expect(() =>
+      d.contract.circuits.createProposal(
+        nextContextAtTime(d.contractAddress, ctx, Number(SILENCE_THRESHOLD)),
+        ProposalType.SilenceLockTrigger,
+        fakeBytes32(40),
+        SILENCE_THRESHOLD,
+        fakeBytes32(0),
+        0n,
+        fakeBytes32(0),
+        fakeBytes32(90),
+        BREAK_GLASS_BOND_MIN,
+      ),
+    ).toThrow('Creator not silent long enough');
+  });
+});

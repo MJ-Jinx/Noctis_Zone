@@ -896,6 +896,48 @@ export circuit updateCreatorActivity(timestamp: Uint<64>, hasClaimableBalance_: 
   }
 }
 
+// The creator says, in their own hand, that they are still here.
+//
+// WHY THIS EXISTS
+// `createProposal` opens a SilenceLockTrigger once
+// `currentTimestamp - lastCreatorActivity >= silenceThreshold`. That clock
+// only ever moved through `updateCreatorActivity`, which the creator cannot
+// call — so it advanced toward "silent" whenever the ATTESTORS stopped
+// writing, whatever the creator was doing. Silence had no author but the
+// people attesting it, and now takes two of them to refresh, which makes a
+// quiet stretch easier to reach rather than harder.
+//
+// So the creator gets a way to write the clock themselves. After this, the
+// timer running out means the creator did not check in — not that somebody
+// else stopped saying they had.
+//
+// THE TRADE, STATED PLAINLY
+// A creator who keeps calling this stays non-silent indefinitely, including
+// one who does nothing else. That is the intended reading: this contract can
+// only see what is written to it, and a party still operating the
+// infrastructure to call a circuit is not an abandoned launch. The silence
+// lock is for abandonment, and the other CTO proposal types do not depend on
+// this clock at all.
+//
+// It only ever moves the clock FORWARD, and only within the same one-hour
+// band as every other timestamp here, so it cannot be used to backdate
+// activity or to park the clock in the future.
+export circuit recordCreatorHeartbeat(currentTimestamp: Uint<64>): [] {
+  const sk = getUserSecret();
+  const caller = deriveUserPublicKey(sk, launchId);
+  assert(disclose(caller.bytes == creatorKey), "Only the creator can record a heartbeat");
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+  assert(
+    disclose(currentTimestamp >= lastCreatorActivity),
+    "Heartbeat cannot move creator activity backwards"
+  );
+  lastCreatorActivity = disclose(currentTimestamp);
+}
+
 // Check if creator has been silent for the silence threshold
 // Returns true if (currentTimestamp - lastCreatorActivity) >= silenceThreshold
 // Fix (2026-07-21): bound currentTimestamp to real chain time so a
