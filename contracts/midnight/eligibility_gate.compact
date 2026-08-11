@@ -627,31 +627,6 @@ pure circuit computeCertHash(
   });
 }
 
-// Verify a claimed fee slice is the FLOOR of grossAmount * bps / 10000 —
-// same pattern and safe-range bounds as bonding_curve.compact's copy.
-// Needed here for claimRatioBondRefund's forfeited-remainder split.
-// Phase 5 hygiene fix (2026-07-12): marked pure — depends only on its own
-// parameters, no ledger or witness access.
-pure circuit verifyFeeSlice(
-  grossAmount: Uint<128>,
-  bps: Uint<16>,
-  claimedFee: Uint<128>
-): Boolean {
-  assert(disclose(grossAmount <= 19342813113834066795298815), "grossAmount exceeds safe range"); // 2^84 - 1
-  assert(disclose(claimedFee <= 19342813113834066795298815), "claimedFee exceeds safe range"); // 2^84 - 1
-
-  const grossN = grossAmount as Uint<84>;
-  const claimedFeeN = claimedFee as Uint<84>;
-
-  const product = ((grossN as Uint<100>) * (bps as Uint<100>)) as Uint<100>;
-  const claimedTimesDenom = ((claimedFeeN as Uint<98>) * (10000 as Uint<98>)) as Uint<98>;
-  const nextClaimedTimesDenom = ((claimedTimesDenom as Uint<100>) + (10000 as Uint<100>)) as Uint<100>;
-
-  return disclose(
-    (claimedTimesDenom as Uint<100>) <= product && product < nextClaimedTimesDenom
-  );
-}
-
 // Verify a claimed ratio-based NIGHT bond refund is the FLOOR of
 // `bonded * purchased / allocated` — same formula and floor-rounding
 // double-inequality pattern as bonding_curve.compact's Tier C copy.

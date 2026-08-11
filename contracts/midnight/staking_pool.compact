@@ -249,29 +249,6 @@ pure circuit isKeyZero(key: UserPublicKey): Boolean {
   return key == default<UserPublicKey>;
 }
 
-// Verify a claimed fee slice is the FLOOR of grossAmount * bps / 10000 —
-// same cross-multiplication pattern as eligibility_gate.compact/
-// bonding_curve.compact's copies. No in-circuit division.
-pure circuit verifyFeeSlice(
-  grossAmount: Uint<128>,
-  bps: Uint<16>,
-  claimedFee: Uint<128>
-): Boolean {
-  assert(disclose(grossAmount <= 19342813113834066795298815), "grossAmount exceeds safe range"); // 2^84 - 1
-  assert(disclose(claimedFee <= 19342813113834066795298815), "claimedFee exceeds safe range"); // 2^84 - 1
-
-  const grossN = grossAmount as Uint<84>;
-  const claimedFeeN = claimedFee as Uint<84>;
-
-  const product = ((grossN as Uint<100>) * (bps as Uint<100>)) as Uint<100>;
-  const claimedTimesDenom = ((claimedFeeN as Uint<98>) * (10000 as Uint<98>)) as Uint<98>;
-  const nextClaimedTimesDenom = ((claimedTimesDenom as Uint<100>) + (10000 as Uint<100>)) as Uint<100>;
-
-  return disclose(
-    (claimedTimesDenom as Uint<100>) <= product && product < nextClaimedTimesDenom
-  );
-}
-
 // Verify a fixed-depth Merkle proof of (stakerKey, stakedAmount) membership
 // against stakeSnapshotRoot. Returns the proven staked amount. Not gated
 // behind claimRewards (see claimRewards' comment for why) — exposed

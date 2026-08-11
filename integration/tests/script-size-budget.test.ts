@@ -40,6 +40,13 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by a positivity guard on the fee-claim amounts: bonding_curve
+ * +21, bonding_curve_tier_b +22, for `amount > 0` on two claim arms each.
+ * Twenty bytes for a check nobody should have to reason about is a good
+ * trade, but note what it costs beyond the bytes — both HASHES moved, so
+ * both script addresses moved, and any published reference script for either
+ * curve has to be re-derived rather than reused.
+ *
  * Last moved by SIX validators at once, for one datum field. cto_governance
  * gained `last_ballot_end_timestamp`, which is +141 there — and +10 to +12
  * each on bonding_curve, bonding_curve_tier_b, lp_escrow, token_metadata and
@@ -129,8 +136,8 @@ for (const v of blueprint.validators) {
  * decision rather than a surprise.
  */
 const RECORDED: Record<string, number> = {
-  bonding_curve: 11_139,
-  bonding_curve_tier_b: 13_933,
+  bonding_curve: 11_160,
+  bonding_curve_tier_b: 13_955,
   cto_governance: 8_060,
   cto_sybil_challenge: 2_201,
   curve_order: 1_775,

@@ -1408,6 +1408,12 @@ validator bonding_curve {
           // CTO fee-redirect fix: was hardcoded to creator_pub_key_hash —
           // now respects cto_triggered via active_fee_recipient.
           list.has(self.extra_signatories, active_fee_recipient(datum)),
+          // A claim is for a positive amount. Without this, a negative one
+          // passes the bound above and SUBTRACTS from the accrued figure —
+          // increasing it — while the value checks stay satisfied because
+          // lovelace moves the other way too. Nothing is stolen by that on
+          // its own, and no reader should have to work that out.
+          amount > 0,
           amount <= datum.creator_fees_accrued,
           platform_claim_fee >= min_platform_claim_fee_lovelace,
           curve_balance_net_ok,
@@ -1425,6 +1431,12 @@ validator bonding_curve {
         let new_datum = own_continuing_datum(self, own_ref)
         and {
           list.has(self.extra_signatories, datum.governor_pub_key_hash),
+          // A claim is for a positive amount. Without this, a negative one
+          // passes the bound above and SUBTRACTS from the accrued figure —
+          // increasing it — while the value checks stay satisfied because
+          // lovelace moves the other way too. Nothing is stolen by that on
+          // its own, and no reader should have to work that out.
+          amount > 0,
           amount <= datum.platform_fees_accrued,
           new_datum == BondingCurveDatum {
             ..datum,
@@ -4225,6 +4237,55 @@ test claim_platform_fees_succeeds_with_real_payout() {
     }
 
   bonding_curve.spend(Some(datum), ClaimPlatformFees { amount: 200 }, own_ref, self)
+}
+
+/// The test above with ONE thing changed: the amount is negative, and every
+/// value in the transaction follows it consistently. Without the positivity
+/// guard this passes — the bound `amount <= platform_fees_accrued` holds for
+/// a negative, subtracting it INCREASES the accrued figure, and the balance
+/// checks are satisfied because the lovelace moves the other way too.
+///
+/// Built as the passing fixture plus one delta rather than by hand, so it
+/// cannot pass for some reason other than the one it names.
+test claim_platform_fees_rejects_a_negative_amount() {
+  let datum = BondingCurveDatum { ..mock_datum(Active, 0), platform_fees_accrued: 500 }
+  let new_datum = BondingCurveDatum { ..datum, platform_fees_accrued: 700 }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_curve_nft(), assets.from_lovelace(1_000_000)),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  // The curve GAINS the lovelace, which is what a negative share means.
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_curve_nft(), assets.from_lovelace(1_000_200)),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let governor_payout =
+    Output {
+      address: from_verification_key(#"22"),
+      value: assets.from_lovelace(200),
+      datum: InlineDatum(own_ref),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output, governor_payout],
+      extra_signatories: [#"22"],
+    }
+
+  !bonding_curve.spend(Some(datum), ClaimPlatformFees { amount: -200 }, own_ref, self)
 }
 
 /// Fix (2026-07-22) regression: proves the real fix for

@@ -1732,6 +1732,12 @@ validator bonding_curve_tier_b {
           // CTO fee-redirect fix: was hardcoded to creator_pub_key_hash —
           // now respects cto_triggered via active_fee_recipient.
           list.has(self.extra_signatories, active_fee_recipient(datum)),
+          // A claim is for a positive amount. Without this, a negative one
+          // passes the bound above and SUBTRACTS from the accrued figure —
+          // increasing it — while the value checks stay satisfied because
+          // lovelace moves the other way too. Nothing is stolen by that on
+          // its own, and no reader should have to work that out.
+          amount > 0,
           amount <= datum.creator_fees_accrued,
           platform_claim_fee >= min_platform_claim_fee_lovelace,
           curve_balance_net_ok,
@@ -1749,6 +1755,12 @@ validator bonding_curve_tier_b {
         let new_datum = own_continuing_datum(self, own_ref)
         and {
           list.has(self.extra_signatories, datum.governor_pub_key_hash),
+          // A claim is for a positive amount. Without this, a negative one
+          // passes the bound above and SUBTRACTS from the accrued figure —
+          // increasing it — while the value checks stay satisfied because
+          // lovelace moves the other way too. Nothing is stolen by that on
+          // its own, and no reader should have to work that out.
+          amount > 0,
           amount <= datum.platform_fees_accrued,
           new_datum == BondingCurveTierBDatum {
             ..datum,

@@ -2231,6 +2231,11 @@ export circuit claimCurveRefund(recipientAddr: Bytes<32>): [] {
 
   const sk = getUserSecret();
   const caller = deriveUserPublicKey(sk, launchId);
+  // Every other circuit that derives a caller refuses a zero key; this one
+  // was the exception, for no reason anyone recorded. A witness returning a
+  // zero secret is a broken client rather than an attack, but a refund path
+  // is the wrong place to find that out by looking up a zero key in a map.
+  assert(disclose(!isKeyZero(caller)), "Invalid user key");
   // Phase 5 hygiene fix: same empty-recipient guard as claimBondRefund.
   assert(disclose(recipientAddr != pad(32, "")), "Recipient address cannot be empty");
 

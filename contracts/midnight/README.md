@@ -35,7 +35,7 @@ npm run compile
 # real TS simulator, not by reasoning about the compiler's own claims in
 # isolation; see "Simulation-first development" below)
 npx vitest run
-# Expect: 8 test files, 256 passing (may drift up over time — check the
+# Expect: 11 test files, 471 passing (may drift up over time — check the
 # most recent resolved-item test counts if this number looks stale)
 
 # 5. (Optional, slow) Full ZK compile for one contract — only needed when
@@ -88,8 +88,9 @@ macOS shell, where this collision doesn't exist.
 | `treasury.compact` | Platform fee accumulation, ADA/NIGHT balance split with real floor/warning checks | ✅ compiles clean (full ZK) |
 | `lp_escrow.compact` | 365-day LP lock, no withdraw, DEX migration | ✅ compiles clean (full ZK) |
 | `cto_governance.compact` | Community takeover governance, weighted voting via a governor-published balance-snapshot Merkle tree (also 20-level), `hasClaimableBalance` zero-volume gate | ✅ compiles clean (full ZK) |
+| `staking_pool.compact` | Optional per-launch staking rewards, governor-attested stake snapshot, rewards minted via `mintUnshieldedToken` | ✅ compiles clean (full ZK) |
 
-All 7 PSMs compile with full ZK proving-key generation (`compact compile`, not just `--skip-zk`) as of 2026-07-09 — real prover/verifier key artifacts confirmed, not just a type-check pass. (Was 8 before the Phase 2, 2026-07-11 merge retired the standalone `darkveil.compact` into `eligibility_gate.compact`/`bonding_curve.compact`.)
+All 8 PSMs compile with full ZK proving-key generation (`compact compile`, not just `--skip-zk`) as of 2026-07-09 — real prover/verifier key artifacts confirmed, not just a type-check pass. (Was 7 between the Phase 2 merge of 2026-07-11, which retired the standalone `darkveil.compact` into `eligibility_gate.compact`/`bonding_curve.compact`, and `staking_pool.compact` arriving on 2026-07-14.)
 
 **`creator_escrow.compact` and `vesting.compact` used to be one file.** The original merged contract applied a day-based vesting *curve* directly to the fee-escrow balance, which was simultaneously being grown by `depositFees` — a real bug (not just confusing labeling), since the vesting formula assumed a fixed total. CLAUDE.md is explicit that Creator Fee Escrow and creator token vesting are two distinct income streams that must never be conflated; the contracts now match that.
 
