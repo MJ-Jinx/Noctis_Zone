@@ -1893,11 +1893,26 @@ describe('eligibility_gate.compact — permissionless DarkVeil expiry', () => {
     const r = d.contract.circuits.expireDarkVeil(late);
     const after = nextContext(d.contractAddress, r.context);
 
-    // Assert the phase itself, not merely that a later call throws: the
-    // DarkVeil sub-state alone would refuse that call anyway, so a bare throw
-    // would pass with this write removed entirely.
+    // Three assertions, because they cover three different things and only
+    // the first two depend on the `phase` write.
     expect(ledger(after.currentQueryContext.state).phase).toBe(LaunchPhase.Cancelled);
-    expect(() => d.contract.circuits.startBuying(after, REGISTRANT_TREE.root)).toThrow();
+
+    // The one that makes "cannot carry on" a behavioural claim rather than a
+    // field comparison. `advancePhase(Public)` is gated on `phase ==
+    // DarkVeil`, so it is the call a woken governor would actually reach for,
+    // and it succeeds if the write is missing. Probed: remove the write and
+    // this line fails on its own.
+    expect(() => d.contract.circuits.advancePhase(after, LaunchPhase.Public)).toThrow(
+      /Must be in DarkVeil to start Public/,
+    );
+
+    // `startBuying` is refused by the DarkVeil SUB-STATE, not by `phase` —
+    // note the message names dvState despite reading "phase". So this asserts
+    // a real and separate property, but it is NOT a guard on the write above
+    // and never was: it passes with that write removed. Pinning the message
+    // stops it also passing on an unrelated refusal, such as the governor
+    // check, which is all a bare assertion here ever established.
+    expect(() => d.contract.circuits.startBuying(after, REGISTRANT_TREE.root)).toThrow(/Must be in registration phase/);
   });
 
   it('refuses to deploy without a registration close time to measure from', () => {

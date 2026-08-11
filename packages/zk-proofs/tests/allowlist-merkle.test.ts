@@ -112,7 +112,7 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
     const tampered = proof.map((entry, i) => (i === 0 ? { ...entry, sibling: fakeBytes32(99) } : entry));
 
     const { contract, ctx } = deployWithRoot(tree.root, witnessesFor(fakeBytes32(fills[0]), tampered));
-    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow(/Invalid allowlist proof/);
   });
 
   it('rejects a proof with a flipped direction bit at a real level', () => {
@@ -122,7 +122,7 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
     const tampered = proof.map((entry, i) => (i === 0 ? { ...entry, goesLeft: !entry.goesLeft } : entry));
 
     const { contract, ctx } = deployWithRoot(tree.root, witnessesFor(fakeBytes32(fills[0]), tampered));
-    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow(/Invalid allowlist proof/);
   });
 
   it('rejects a proof with a tampered sibling in the padding levels', () => {
@@ -136,7 +136,7 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
     const tampered = proof.map((entry, i) => (i === topLevel ? { ...entry, sibling: fakeBytes32(99) } : entry));
 
     const { contract, ctx } = deployWithRoot(tree.root, witnessesFor(fakeBytes32(1), tampered));
-    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow(/Invalid allowlist proof/);
   });
 
   it('rejects a registrant presenting a real proof built for a DIFFERENT registrant (the exact the design requirement impersonation gap)', () => {
@@ -150,7 +150,7 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
     // caller's own identity (fill 2), which won't match a proof built for
     // registrant 0's leaf at this tree position.
     const { contract, ctx } = deployWithRoot(tree.root, witnessesFor(fakeBytes32(fills[1]), proofForRegistrant0));
-    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow(/Invalid allowlist proof/);
   });
 
   it('rejects a well-formed proof against the wrong root (registrant not on this allowlist)', () => {
@@ -159,7 +159,7 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
 
     // Valid proof for treeA's registrant 0, but the contract was deployed with treeB's root
     const { contract, ctx } = deployWithRoot(treeB.root, witnessesFor(fakeBytes32(1), treeA.getProof(0)));
-    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow(/Invalid allowlist proof/);
   });
 
   it('rejects an all-zero garbage proof (the old placeholder would have accepted any non-zero leaf)', () => {
@@ -171,7 +171,7 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
       goesLeft: true,
     }));
     const { contract, ctx } = deployWithRoot(tree.root, witnessesFor(fakeBytes32(1), garbageProof));
-    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow(/Invalid allowlist proof/);
   });
 
   it('rejects a caller whose secret is not on the allowlist at all, even with a structurally-valid-looking proof for someone else', () => {
@@ -181,6 +181,6 @@ describe('eligibility_gate.compact — allowlist Merkle verification (the design
     // secret that was never included in the tree at all.
     const tree = buildAllowlistTree([leafForFill(1), leafForFill(2)]);
     const { contract, ctx } = deployWithRoot(tree.root, witnessesFor(fakeBytes32(999), tree.getProof(0)));
-    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow();
+    expect(() => contract.circuits.registerForDarkVeil(ctx)).toThrow(/Invalid allowlist proof/);
   });
 });

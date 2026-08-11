@@ -350,7 +350,7 @@ describe('LucidTierBCurveSubmitter.activateCurve', () => {
     const submitter = makeSubmitter(builder, [{ datum: darkveilDatum({ curve_state: 'Inactive' }), assets: {} }]);
     await expect(
       submitter.activateCurve(REAL_EXTENDED_KEY_HEX, addrFor(fakeKeyHash(0x22)), AFTER_BOTH_WINDOWS),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/activates out of the claim window, not from Inactive/);
   });
 
   it('sets curve_state to Active and stamps phase_started_at', async () => {

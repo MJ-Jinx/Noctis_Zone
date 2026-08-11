@@ -100,7 +100,11 @@ describe('a submitter that is constructed but never used', () => {
       threadNftPolicyId: THREAD_POLICY,
     });
 
-    await expect(submitter.readPoolDatum()).rejects.toThrow();
+    // Matched loosely across Node versions but tightly enough to exclude a
+    // validation error thrown before the connection is ever attempted — which
+    // is the way this assertion could otherwise pass while the property it
+    // names had stopped holding.
+    await expect(submitter.readPoolDatum()).rejects.toThrow(/fetch failed|ECONNREFUSED|connect/i);
   });
 });
 

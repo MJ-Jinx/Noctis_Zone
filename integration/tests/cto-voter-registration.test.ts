@@ -109,7 +109,7 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
         cip8KeyHex: signedMessage.key,
         launchIdHex: LAUNCH_ID_HEX,
       }),
-    ).toThrow();
+    ).toThrow(/Invalid CIP-8 signature for the claimed address/);
   });
 
   it('rejects a tampered signature (bit-flipped)', () => {
@@ -126,7 +126,7 @@ describe('cto-voter-registration.ts — verifyAndDeriveCtoVoterIdentity (real cr
         cip8KeyHex: signedMessage.key,
         launchIdHex: LAUNCH_ID_HEX,
       }),
-    ).toThrow();
+    ).toThrow(/Invalid CIP-8 signature for the claimed address/);
   });
 
   it('two different real wallets derive two different CTO voter identities', () => {

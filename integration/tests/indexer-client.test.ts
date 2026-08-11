@@ -125,9 +125,9 @@ describe('indexer-client.ts — consumeUnshieldedTransactions', () => {
       Stream.fromIterable<UnshieldedTransactionEvent>([tx(1, [{ tokenType: NIGHT_TOKEN, value: 100 }])]),
       Stream.fail(boom),
     );
-    await expect(
-      Effect.runPromise(Effect.scoped(consumeUnshieldedTransactions(stream, NIGHT_TOKEN))),
-    ).rejects.toThrow();
+    await expect(Effect.runPromise(Effect.scoped(consumeUnshieldedTransactions(stream, NIGHT_TOKEN)))).rejects.toThrow(
+      /indexer connection dropped/,
+    );
   });
 
   it('handles multiple registrants/transactions with mixed created and spent UTXOs across the full backlog', async () => {

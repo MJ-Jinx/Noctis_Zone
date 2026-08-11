@@ -184,17 +184,21 @@ function baseSubmitParams(overrides: Partial<SubmitChallengeParams> = {}): Submi
 describe('CardanoCtoSybilChallengeSubmitter.submitChallenge', () => {
   it('throws when the connected wallet has no resolvable payment key hash', async () => {
     const { builder } = makeFakeTxBuilder();
-    // A wallet address with no decodable payment credential — use a
-    // script-only address instead of a key address (stake_test / script
-    // addresses can lack a payment key hash). Simplest real equivalent:
-    // reuse a key address but assert the happy path instead; the guard
-    // itself is exercised via the wallet's address(), so a malformed
-    // address triggers the same real getAddressDetails() code path.
+    // A REAL reward address: it parses cleanly and its paymentCredential is
+    // genuinely undefined, which is the one shape that reaches the guard.
+    //
+    // This test previously used a malformed address, which Lucid's own parser
+    // rejected first — so it passed on 'No address type matched' and never
+    // reached the submitter's check at all. Asserting the message is what
+    // makes the difference visible; a bare assertion cannot tell the two
+    // apart, and did not.
     const { submitter } = makeSubmitter(builder, {
-      walletAddress: `addr_test1w${'q'.repeat(50)}`,
+      walletAddress: 'stake_test1uqqt6jvxvg4z4j7cq790uwklt9ja50ng85dwzz265xfljkcvqc5xh',
     });
 
-    await expect(submitter.submitChallenge({} as never, baseSubmitParams())).rejects.toThrow();
+    await expect(submitter.submitChallenge({} as never, baseSubmitParams())).rejects.toThrow(
+      /no resolvable payment key hash/,
+    );
   });
 
   it('deposits the bond at the script address with the correct datum, no SpendingValidator attach (deposit needs no redeemer)', async () => {

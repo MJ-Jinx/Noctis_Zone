@@ -111,7 +111,7 @@ describe('cto-private-state-store.ts — optional secondary backup flow (export/
   it('rejects a backup password that fails the real SDK strength policy', async () => {
     const { store } = makeStore('wallet-addr-1', WALLET_A_SIGNATURE);
     await store.getOrCreateIdentity();
-    await expect(store.exportBackup('short')).rejects.toThrow();
+    await expect(store.exportBackup('short')).rejects.toThrow(/Password is shorter than 16 characters/);
   });
 
   it('importing with the WRONG password fails rather than silently returning garbage', async () => {
@@ -120,7 +120,7 @@ describe('cto-private-state-store.ts — optional secondary backup flow (export/
     const backup = await storeA.exportBackup(OTHER_REAL_PASSWORD);
 
     const { store: storeB } = makeStore('wallet-addr-1', WALLET_B_SIGNATURE);
-    await expect(storeB.importBackup(backup, 'Wr0ngPassw0rd!!Nope')).rejects.toThrow();
+    await expect(storeB.importBackup(backup, 'Wr0ngPassw0rd!!Nope')).rejects.toThrow(/Failed to decrypt export data/);
   });
 
   it('exportBackup fails cleanly when no identity has been created yet', async () => {

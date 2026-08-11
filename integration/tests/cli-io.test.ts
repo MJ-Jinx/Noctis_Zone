@@ -97,8 +97,8 @@ describe('requireFieldsFalsy (rejects ANY falsy value, including 0)', () => {
   });
 
   it('rejects empty string and false too', () => {
-    expect(() => requireFieldsFalsy({ a: '' }, ['a'])).toThrow();
-    expect(() => requireFieldsFalsy({ a: false }, ['a'])).toThrow();
+    expect(() => requireFieldsFalsy({ a: '' }, ['a'])).toThrow('Missing required field: a');
+    expect(() => requireFieldsFalsy({ a: false }, ['a'])).toThrow('Missing required field: a');
   });
 
   it('accepts any truthy value', () => {

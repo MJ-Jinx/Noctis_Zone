@@ -74,12 +74,12 @@ describe('buildDvAllocationTree', () => {
   });
 
   it('rejects an empty entry list', () => {
-    expect(() => buildDvAllocationTree([])).toThrow();
+    expect(() => buildDvAllocationTree([])).toThrow(/at least one entry is required/);
   });
 
   it('rejects an out-of-range proof index', () => {
     const tree = buildDvAllocationTree([entry(0xaa, 1n, 0x01)]);
-    expect(() => tree.getProof(1)).toThrow();
-    expect(() => tree.getProof(-1)).toThrow();
+    expect(() => tree.getProof(1)).toThrow(/index 1 out of range \(0\.\.0\)/);
+    expect(() => tree.getProof(-1)).toThrow(/index -1 out of range \(0\.\.0\)/);
   });
 });

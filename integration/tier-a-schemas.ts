@@ -676,6 +676,30 @@ export const OutputReferenceSchema = OutputReferenceShape as unknown as OutputRe
  * settling two obligations must build two outputs, one tagged for each.
  */
 export function settlementDatum(utxo: { txHash: string; outputIndex: number }): string {
+  // Checked rather than coerced, because the coercions here are silent and
+  // each produces a tag that names a REAL but WRONG input. `BigInt` turns
+  // `false`, `''` and `[]` into 0 — the first output of the transaction,
+  // somebody else's obligation — and passes a negative through untouched.
+  // `Data.Bytes()` rejects non-hex but accepts the empty string, giving a tag
+  // that names no transaction at all. Only `undefined` and `null` throw on
+  // their own, so a fixture missing the field was the one bad shape that
+  // announced itself.
+  //
+  // A wrong tag is not a build-time failure: it settles against whatever
+  // input it happens to name, and the mismatch surfaces against a real node
+  // or, worse, discharges the wrong obligation.
+  if (!/^[0-9a-fA-F]{64}$/.test(utxo?.txHash as string)) {
+    throw new Error(
+      `settlementDatum: txHash must be 64 hex characters, got ${JSON.stringify(utxo?.txHash)}. ` +
+        'A settlement tag names the input it discharges; one naming no real transaction settles nothing.',
+    );
+  }
+  if (!Number.isInteger(utxo.outputIndex) || utxo.outputIndex < 0) {
+    throw new Error(
+      `settlementDatum: outputIndex must be a non-negative integer, got ${JSON.stringify(utxo.outputIndex)}. ` +
+        'Guessing an index here tags the payout against a different input than the one it settles.',
+    );
+  }
   return Data.to<OutputReferenceData>(
     { transaction_id: utxo.txHash, output_index: BigInt(utxo.outputIndex) },
     OutputReferenceSchema,
