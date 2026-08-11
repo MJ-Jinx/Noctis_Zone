@@ -138,6 +138,16 @@ export async function checkWalletAge(
  * no stake credential is the opposite case — there's no stake key for
  * them to have reused, so it correctly can never collide with anything.
  */
+/**
+ * One value for "this address has no readable stake credential", whether that
+ * arrived as null, as an absent field, or as an empty string. Two addresses
+ * that both lack one must never compare equal to each other by accident, and
+ * an unreadable one must never compare unequal to a real one.
+ */
+function normaliseStakeAddress(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
 export async function checkStakeKeyMatch(
   client: BlockfrostClient,
   registrantAddress: string,
@@ -147,8 +157,14 @@ export async function checkStakeKeyMatch(
     client.getAddress(registrantAddress),
     client.getAddress(creatorAddress),
   ]);
-  const registrantStakeAddress = registrantInfo.stake_address;
-  const creatorStakeAddress = creatorInfo.stake_address;
+  // Normalised before comparison. The field is TYPED `string | null`, which
+  // is what Blockfrost documents, but a dropped field or a changed response
+  // shape produces undefined — and undefined is not null, so a `=== null`
+  // test falls through to the inequality below and compares a missing value
+  // against a real stake address. That comparison is true, which would admit
+  // a registrant on the strength of a field nobody could read.
+  const registrantStakeAddress = normaliseStakeAddress(registrantInfo.stake_address);
+  const creatorStakeAddress = normaliseStakeAddress(creatorInfo.stake_address);
 
   if (registrantStakeAddress === null) {
     return {

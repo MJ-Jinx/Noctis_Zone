@@ -33,6 +33,23 @@ import type {
   RouterBlockInfo,
 } from './chain-provider-router.js';
 
+/**
+ * Oldest first, which `RouterAddressTransaction` documents as part of its
+ * shape. Applied by BOTH backends rather than trusted from either.
+ *
+ * Blockfrost asks for `order=asc` and Koios sorts nothing, so without this the
+ * router's promise that "a caller cannot tell which one answered" holds for
+ * every field except the one a caller reads positionally. An address's age is
+ * the block time at index 0; served unsorted, that becomes the age of whatever
+ * transaction the provider happened to list first.
+ *
+ * Sorted on block time with block height as the tie-break, and the sort is
+ * stable, so two transactions in one block keep the order the provider gave.
+ */
+function sortOldestFirst<T extends { blockTime: number; blockHeight: number }>(rows: T[]): T[] {
+  return rows.sort((a, b) => a.blockTime - b.blockTime || a.blockHeight - b.blockHeight);
+}
+
 // ============================================================================
 // BLOCKFROST
 // ============================================================================
@@ -69,11 +86,13 @@ export class BlockfrostBackend implements ChainBackend {
 
   async getAddressTransactionsAll(address: string): Promise<RouterAddressTransaction[]> {
     const txs = await this.client.getAddressTransactionsAll(address);
-    return txs.map((t) => ({
-      txHash: t.tx_hash,
-      blockHeight: t.block_height,
-      blockTime: t.block_time,
-    }));
+    return sortOldestFirst(
+      txs.map((t) => ({
+        txHash: t.tx_hash,
+        blockHeight: t.block_height,
+        blockTime: t.block_time,
+      })),
+    );
   }
 }
 
@@ -242,6 +261,6 @@ export class KoiosBackend implements ChainBackend {
       if (rows.length < KOIOS_PAGE_SIZE) break;
       offset += KOIOS_PAGE_SIZE;
     }
-    return out;
+    return sortOldestFirst(out);
   }
 }

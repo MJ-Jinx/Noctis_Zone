@@ -97,6 +97,16 @@ export interface RouterAddressUtxo {
   amount: Array<{ unit: string; quantity: string }>;
 }
 
+/**
+ * ORDER IS PART OF THIS SHAPE: oldest first, by block time.
+ *
+ * Callers read index 0 as "the address's earliest transaction" — that is how
+ * wallet age is derived. Blockfrost asks for `order=asc` in its query string
+ * and Koios does not sort at all, so leaving order to whichever backend
+ * answered would make the same address a different age depending on which
+ * provider was up. Both backends sort before returning; see the note on
+ * `sortOldestFirst` in chain-backends.ts.
+ */
 export interface RouterAddressTransaction {
   txHash: string;
   blockHeight: number;
