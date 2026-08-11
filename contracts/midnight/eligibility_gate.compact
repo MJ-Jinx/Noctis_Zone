@@ -243,6 +243,37 @@ sealed ledger launchId: Bytes<32>;
 // Merkle root of the allowlist (governor-updatable for late additions)
 export ledger allowlistRoot: Bytes<32>;
 
+// ---------------------------------------------------------------------------
+// THRESHOLD ATTESTATION — the allowlist takes two signers, not one
+// ---------------------------------------------------------------------------
+// allowlistRoot decides who may take part in DarkVeil at all, and no circuit
+// here can check it: eligibility is computed off-chain against Cardano history
+// that no Midnight circuit can read. So it is attested, and it takes two of
+// three attestors in SEPARATE calls.
+//
+// Same reasoning as cto_governance's balance snapshot: a threshold checked
+// inside one circuit is one party holding every secret, because every witness
+// for a call is produced by whoever builds that call. Approvals are keyed by
+// signer, and rounds are numbered rather than cleared so an approval from an
+// abandoned round can never be counted toward the current one.
+sealed ledger allowlistAttestor1: Bytes<32>;
+
+sealed ledger allowlistAttestor2: Bytes<32>;
+
+sealed ledger allowlistAttestor3: Bytes<32>;
+
+sealed ledger allowlistThreshold: Uint<8>;
+
+sealed ledger allowlistExpirySeconds: Uint<64>;
+
+export ledger pendingAllowlistRoot: Bytes<32>;
+
+export ledger pendingAllowlistOpenedAt: Uint<64>;
+
+export ledger allowlistRound: Counter;
+
+export ledger allowlistApprovals: Map<Bytes<32>, Uint<64>>;
+
 // Fix (2026-07-30): Merkle root of the REGISTRANT tree — every
 // wallet that successfully registered for DarkVeil, published once by the
 // governor at startBuying() (the registration freeze, where the
@@ -689,10 +720,31 @@ constructor(
   registrationCloseTime_: Uint<64>,
   minDvParticipants_: Uint<64>,
   creatorPubKey_: Bytes<32>,
-  platformAddr_: Bytes<32>
+  platformAddr_: Bytes<32>,
+  // The three keys that may attest the allowlist, and how many it takes.
+  allowlistAttestor1_: Bytes<32>,
+  allowlistAttestor2_: Bytes<32>,
+  allowlistAttestor3_: Bytes<32>,
+  allowlistThreshold_: Uint<8>
 ) {
   launchId = disclose(launchId_);
   allowlistRoot = disclose(allowlistRoot_);
+  // Three distinct, non-empty keys or the threshold is decorative: two equal
+  // keys let one holder supply both halves of a 2-of-3.
+  assert(disclose(allowlistAttestor1_ != pad(32, "")), "allowlistAttestor1 cannot be empty");
+  assert(disclose(allowlistAttestor2_ != pad(32, "")), "allowlistAttestor2 cannot be empty");
+  assert(disclose(allowlistAttestor3_ != pad(32, "")), "allowlistAttestor3 cannot be empty");
+  assert(disclose(allowlistAttestor1_ != allowlistAttestor2_), "allowlist attestor keys must be distinct");
+  assert(disclose(allowlistAttestor1_ != allowlistAttestor3_), "allowlist attestor keys must be distinct");
+  assert(disclose(allowlistAttestor2_ != allowlistAttestor3_), "allowlist attestor keys must be distinct");
+  assert(disclose(allowlistThreshold_ >= 2 && allowlistThreshold_ <= 3), "allowlistThreshold must be 2 or 3");
+  allowlistAttestor1 = disclose(allowlistAttestor1_);
+  allowlistAttestor2 = disclose(allowlistAttestor2_);
+  allowlistAttestor3 = disclose(allowlistAttestor3_);
+  allowlistThreshold = disclose(allowlistThreshold_);
+  allowlistExpirySeconds = disclose(86400); // 24 hours
+  pendingAllowlistRoot = disclose(pad(32, ""));
+  pendingAllowlistOpenedAt = disclose(0);
   registrantRoot = disclose(pad(32, "")); // meaningless until startBuying sets it
   totalSupply = disclose(totalSupply_);
   maxWalletPercent = disclose(maxWalletPercent_);
@@ -1604,16 +1656,62 @@ export circuit getDvPrice(): Uint<128> {
 // The same guarantee stated from the registrant's side: the tree you proved
 // membership in to register is the tree that was in force for the whole
 // registration window, and nothing can replace it afterwards.
-export circuit updateAllowlistRoot(newRoot: Bytes<32>): [] {
-  const govSecret = getGovernorSecret();
-  const govKey = deriveGovernorKey(govSecret);
-  assert(disclose(govKey.bytes == governorKey), "Only governor can update allowlist");
+// Threshold attestation (2026-08-11): one call carries one attestor. The root
+// is written once `allowlistThreshold` DISTINCT attestors have called for the
+// same root inside one live round.
+//
+// `currentTimestamp` is new and exists for the expiry: partial approvals
+// persist between calls, and the registration window is longer than the expiry
+// they are bounded by, so a phase gate alone would leave a half-approval live
+// for the whole window. Bound to real chain time the same way every other
+// timestamp-taking circuit here is.
+export circuit updateAllowlistRoot(newRoot: Bytes<32>, currentTimestamp: Uint<64>): [] {
+  const attestorSecret = getGovernorSecret();
+  const attestorKey = deriveGovernorKey(attestorSecret);
+  const isAllowlistAttestor1 = disclose(attestorKey.bytes == allowlistAttestor1);
+  const isAllowlistAttestor2 = disclose(attestorKey.bytes == allowlistAttestor2);
+  const isAllowlistAttestor3 = disclose(attestorKey.bytes == allowlistAttestor3);
+  assert(
+    isAllowlistAttestor1 || isAllowlistAttestor2 || isAllowlistAttestor3,
+    "Only a registered attestor can update allowlist"
+  );
   assert(disclose(phase == LaunchPhase.DarkVeil), "Allowlist is fixed outside the DarkVeil phase");
   assert(
     disclose(dvState == DarkVeilState.Registration),
     "Allowlist is fixed once registration freezes"
   );
-  allowlistRoot = disclose(newRoot);
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  const allowlistExpired =
+    currentTimestamp > (pendingAllowlistOpenedAt + allowlistExpirySeconds) as Uint<64>;
+  const sameAllowlistPending = disclose(pendingAllowlistRoot == newRoot);
+  if (disclose(!sameAllowlistPending || allowlistExpired)) {
+    allowlistRound.increment(1);
+    pendingAllowlistRoot = disclose(newRoot);
+    pendingAllowlistOpenedAt = disclose(currentTimestamp);
+  }
+
+  const allowlistRoundNow = allowlistRound.read();
+  allowlistApprovals.insert(disclose(attestorKey.bytes), disclose(allowlistRoundNow));
+
+  const c1 =
+    allowlistApprovals.member(allowlistAttestor1) &&
+    allowlistApprovals.lookup(allowlistAttestor1) == allowlistRoundNow;
+  const c2 =
+    allowlistApprovals.member(allowlistAttestor2) &&
+    allowlistApprovals.lookup(allowlistAttestor2) == allowlistRoundNow;
+  const c3 =
+    allowlistApprovals.member(allowlistAttestor3) &&
+    allowlistApprovals.lookup(allowlistAttestor3) == allowlistRoundNow;
+  const allowlistApprovalCount = ((c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0)) as Uint<8>;
+
+  if (disclose(allowlistApprovalCount >= allowlistThreshold)) {
+    allowlistRoot = disclose(newRoot);
+  }
 }
 
 // Record that DarkVeil failed (<50% participation).

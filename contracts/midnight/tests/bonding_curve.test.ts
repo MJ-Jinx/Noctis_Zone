@@ -17,7 +17,22 @@ import {
   ledger,
   type Witnesses,
 } from '../compiled/bonding_curve/contract/index.js';
+import { DOMAINS, deriveRoleKey } from '../witnesses.js';
 import { deployForTest, fakeBytes32, type LedgerSink, nextContext, nextContextAtTime, trackLedger } from './helpers.js';
+
+// The three keys allowed to attest the allowlist root (threshold attestation,
+// 2026-08-11). Fill 2 is the governor secret this suite already uses, so the
+// governor stays one of the three rather than becoming a separate role.
+const ALLOWLIST_ATTESTOR_1_FILL = 2;
+const ALLOWLIST_ATTESTOR_2_FILL = 32;
+const ALLOWLIST_ATTESTOR_3_FILL = 33;
+const ALLOWLIST_THRESHOLD = 2n;
+const ALLOWLIST_EXPIRY_SECONDS = 86_400n;
+const allowlistAttestorKey = (fill: number) =>
+  deriveRoleKey({ bytes: fakeBytes32(fill) }, DOMAINS.CURVE_GOVERNOR).bytes;
+const ALLOWLIST_ATTESTOR_1_KEY = allowlistAttestorKey(ALLOWLIST_ATTESTOR_1_FILL);
+const ALLOWLIST_ATTESTOR_2_KEY = allowlistAttestorKey(ALLOWLIST_ATTESTOR_2_FILL);
+const ALLOWLIST_ATTESTOR_3_KEY = allowlistAttestorKey(ALLOWLIST_ATTESTOR_3_FILL);
 
 type PrivateState = undefined;
 
@@ -55,6 +70,16 @@ const ALLOWLIST_TREE = buildAllowlistTree([ALLOWLIST_LEAF]);
 // would name them. Published by startBuying once registration has closed.
 const REGISTRANT_TREE = buildRegistrantTree([hashRegistrantLeaf(BUYER_KEY)]);
 const BUY_NONCE = fakeBytes32(8);
+
+/** Attests the allowlist root with a SECOND attestor, completing the 2-of-3. */
+function attestAllowlistAgain(contractAddress: string, ctx: never, root: Uint8Array, at = 0n) {
+  const second = new Contract<PrivateState>({
+    ...witnesses,
+    getGovernorSecret: (_c) => [undefined, { bytes: fakeBytes32(ALLOWLIST_ATTESTOR_2_FILL) }],
+  });
+  const r = second.circuits.updateAllowlistRoot(nextContextAtTime(contractAddress, ctx, Number(at)), root, at);
+  return r;
+}
 
 const witnesses: Witnesses<PrivateState> = {
   getUserSecret: (_ctx) => [undefined, { bytes: fakeBytes32(3) }],
@@ -131,6 +156,10 @@ function deploy() {
     PLATFORM_ADDR,
     CREATOR_ADDR,
     LP_ESCROW_ADDR,
+    ALLOWLIST_ATTESTOR_1_KEY,
+    ALLOWLIST_ATTESTOR_2_KEY,
+    ALLOWLIST_ATTESTOR_3_KEY,
+    ALLOWLIST_THRESHOLD,
   );
   return { contract, init, contractAddress, ctx };
 }
@@ -159,6 +188,10 @@ function deployWithPrices(basePrice: bigint, maxPrice: bigint, curveSupply: bigi
     PLATFORM_ADDR,
     CREATOR_ADDR,
     LP_ESCROW_ADDR,
+    ALLOWLIST_ATTESTOR_1_KEY,
+    ALLOWLIST_ATTESTOR_2_KEY,
+    ALLOWLIST_ATTESTOR_3_KEY,
+    ALLOWLIST_THRESHOLD,
   );
 }
 
@@ -186,6 +219,10 @@ function deployWithRegistrationCloseTime(closeTime: bigint) {
     PLATFORM_ADDR,
     CREATOR_ADDR,
     LP_ESCROW_ADDR,
+    ALLOWLIST_ATTESTOR_1_KEY,
+    ALLOWLIST_ATTESTOR_2_KEY,
+    ALLOWLIST_ATTESTOR_3_KEY,
+    ALLOWLIST_THRESHOLD,
   );
 }
 
@@ -699,6 +736,10 @@ describe('bonding_curve.compact — quadratic pricing', () => {
       PLATFORM_ADDR,
       CREATOR_ADDR,
       LP_ESCROW_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const r1 = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctx1 = nextContext(contractAddress, r1.context);
@@ -789,6 +830,10 @@ describe('bonding_curve.compact — merged eligibility gate', () => {
       PLATFORM_ADDR,
       CREATOR_ADDR,
       LP_ESCROW_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const r0 = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctx0 = nextContext(contractAddress, r0.context);
@@ -929,6 +974,10 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
       PLATFORM_ADDR,
       CREATOR_ADDR,
       LP_ESCROW_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const r0 = governorContract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctx0 = nextContext(contractAddress, r0.context);
@@ -1027,6 +1076,10 @@ describe('bonding_curve.compact — minimum DarkVeil participant floor', () => {
         PLATFORM_ADDR,
         CREATOR_ADDR,
         LP_ESCROW_ADDR,
+        ALLOWLIST_ATTESTOR_1_KEY,
+        ALLOWLIST_ATTESTOR_2_KEY,
+        ALLOWLIST_ATTESTOR_3_KEY,
+        ALLOWLIST_THRESHOLD,
       ),
     ).toThrow('minDvParticipants must be positive');
   });
@@ -1180,6 +1233,10 @@ describe('bonding_curve.compact — merged DarkVeil private buy (follow-up)', ()
       PLATFORM_ADDR,
       CREATOR_ADDR,
       LP_ESCROW_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     // Phase 4 fix: submitBuyCommit now requires proof of prior registration.
     const r0 = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
@@ -1841,8 +1898,18 @@ describe('bonding_curve.compact — buyer verification is separate from buying',
     // root it was proven against means the change invalidates it by itself.
     const { contract, contractAddress, ctx } = deployAndActivate();
 
-    const rUpdate = contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123));
-    const ctxU = nextContext(contractAddress, rUpdate.context);
+    // Two attestors: the root only changes once the threshold is met.
+    const rUpdate = contract.circuits.updateAllowlistRoot(
+      nextContextAtTime(contractAddress, ctx, 0),
+      fakeBytes32(123),
+      0n,
+    );
+    const rUpdate2 = attestAllowlistAgain(
+      contractAddress,
+      nextContext(contractAddress, rUpdate.context) as never,
+      fakeBytes32(123),
+    );
+    const ctxU = nextContext(contractAddress, rUpdate2.context);
 
     const gross = expectedGross(0n, 10n);
     const { creator, platform } = fees(gross);
@@ -2327,8 +2394,13 @@ describe('bonding_curve.compact — the allowlist is fixed once the launch is de
     // Wider than Tier B on purpose: this contract gates public buying behind
     // the allowlist too, so an eligible buyer must be able to join a curve
     // that is already running.
-    const { contract, ctx } = deployAndActivate();
-    const r = contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123));
+    const { contract, contractAddress, ctx } = deployAndActivate();
+    const r1 = contract.circuits.updateAllowlistRoot(nextContextAtTime(contractAddress, ctx, 0), fakeBytes32(123), 0n);
+    const r = attestAllowlistAgain(
+      contractAddress,
+      nextContext(contractAddress, r1.context) as never,
+      fakeBytes32(123),
+    );
     expect(ledger(r.context.currentQueryContext.state).allowlistRoot).toEqual(fakeBytes32(123));
   });
 
@@ -2336,7 +2408,7 @@ describe('bonding_curve.compact — the allowlist is fixed once the launch is de
     const d = deployAndActivate();
     const rg = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.Graduated);
     const ctxG = nextContext(d.contractAddress, rg.context);
-    expect(() => d.contract.circuits.updateAllowlistRoot(ctxG, fakeBytes32(123))).toThrow(
+    expect(() => d.contract.circuits.updateAllowlistRoot(ctxG, fakeBytes32(123), 0n)).toThrow(
       'Allowlist is fixed once the launch has graduated or been cancelled',
     );
   });
@@ -2345,7 +2417,7 @@ describe('bonding_curve.compact — the allowlist is fixed once the launch is de
     const d = deployAndActivate();
     const rc = d.contract.circuits.advancePhase(d.ctx, LaunchPhase.Cancelled);
     const ctxC = nextContext(d.contractAddress, rc.context);
-    expect(() => d.contract.circuits.updateAllowlistRoot(ctxC, fakeBytes32(123))).toThrow(
+    expect(() => d.contract.circuits.updateAllowlistRoot(ctxC, fakeBytes32(123), 0n)).toThrow(
       'Allowlist is fixed once the launch has graduated or been cancelled',
     );
   });
@@ -2376,5 +2448,77 @@ describe('bonding_curve.compact — the curve parameters a launch may deploy wit
   it('still refuses a maximum at or below the base', () => {
     expect(() => deployWithPrices(500n, 500n)).toThrow('maxPrice must exceed basePrice');
     expect(() => deployWithPrices(500n, 499n)).toThrow('maxPrice must exceed basePrice');
+  });
+});
+
+describe('bonding_curve.compact — threshold attestation on the allowlist root', () => {
+  // The negative cases are the point: without them this suite would pass
+  // identically if the threshold were deleted, because every other test now
+  // publishes through two attestors anyway.
+  const ROOT = fakeBytes32(151);
+  const OTHER = fakeBytes32(152);
+
+  function attest(
+    d: { contract: unknown; contractAddress: string },
+    ctx: never,
+    fill: number,
+    root: Uint8Array,
+    at = 0n,
+  ) {
+    const c =
+      fill === ALLOWLIST_ATTESTOR_1_FILL
+        ? (d.contract as InstanceType<typeof Contract<PrivateState>>)
+        : new Contract<PrivateState>({
+            ...witnesses,
+            getGovernorSecret: (_c) => [undefined, { bytes: fakeBytes32(fill) }],
+          });
+    const r = c.circuits.updateAllowlistRoot(nextContextAtTime(d.contractAddress, ctx, Number(at)), root, at);
+    return nextContext(d.contractAddress, r.context);
+  }
+
+  const rootOf = (ctx: unknown) =>
+    ledger((ctx as { currentQueryContext: { state: unknown } }).currentQueryContext.state as never).allowlistRoot;
+
+  it('does not change the root on one attestation', () => {
+    const d = deployAndActivate();
+    const before = rootOf(d.ctx);
+    const ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('changes it on the second, from a different attestor', () => {
+    const d = deployAndActivate();
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_2_FILL, ROOT);
+    expect(rootOf(ctx)).toEqual(ROOT);
+  });
+
+  it('refuses to count one attestor twice as two', () => {
+    const d = deployAndActivate();
+    const before = rootOf(d.ctx);
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('does not carry an approval across to a different root', () => {
+    const d = deployAndActivate();
+    const before = rootOf(d.ctx);
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_2_FILL, OTHER);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('lets a partial approval expire rather than completing it a day later', () => {
+    const d = deployAndActivate();
+    const before = rootOf(d.ctx);
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT, 100n);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_2_FILL, ROOT, 100n + ALLOWLIST_EXPIRY_SECONDS + 1n);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('refuses a caller who is not an attestor', () => {
+    const d = deployAndActivate();
+    expect(() => attest(d, d.ctx as never, 77, ROOT)).toThrow(/registered attestor/i);
   });
 });

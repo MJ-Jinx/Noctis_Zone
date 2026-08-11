@@ -20,6 +20,7 @@ import {
   type Witnesses,
 } from '../../../contracts/midnight/compiled/eligibility_gate/contract/index.js';
 import { deployForTest, fakeBytes32, nextContext } from '../../../contracts/midnight/tests/helpers.js';
+import { DOMAINS, deriveRoleKey } from '../../../contracts/midnight/witnesses.js';
 import {
   buildAllowlistTree,
   deriveUserPublicKey,
@@ -79,6 +80,13 @@ function deployWithRoot(root: Uint8Array, witnesses: Witnesses<PrivateState>) {
     1n, // minDvParticipants — permissive, this file's tests don't exercise the floor
     fakeBytes32(88), // creatorPubKey — distinct from any registrant fill used below
     fakeBytes32(60), // platformAddr — one wallet, no treasury/ops split
+    // Three distinct allowlist attestors and a 2-of-3 threshold. This suite
+    // does not exercise attestation; it needs a deployment the constructor's
+    // distinctness check accepts.
+    deriveRoleKey({ bytes: fakeBytes32(2) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+    deriveRoleKey({ bytes: fakeBytes32(32) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+    deriveRoleKey({ bytes: fakeBytes32(33) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+    2n,
   );
   const rPhase = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
   const ctx0 = nextContext(contractAddress, rPhase.context);

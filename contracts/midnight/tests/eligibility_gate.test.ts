@@ -14,7 +14,22 @@ import {
   ledger,
   type Witnesses,
 } from '../compiled/eligibility_gate/contract/index.js';
+import { DOMAINS, deriveRoleKey } from '../witnesses.js';
 import { deployForTest, fakeBytes32, nextContext, nextContextAtTime } from './helpers.js';
+
+// The three keys allowed to attest the allowlist root (threshold attestation,
+// 2026-08-11). Fill 2 is the governor secret this suite already uses, so the
+// governor stays one of the three rather than becoming a separate role.
+const ALLOWLIST_ATTESTOR_1_FILL = 2;
+const ALLOWLIST_ATTESTOR_2_FILL = 32;
+const ALLOWLIST_ATTESTOR_3_FILL = 33;
+const ALLOWLIST_THRESHOLD = 2n;
+const ALLOWLIST_EXPIRY_SECONDS = 86_400n;
+const allowlistAttestorKey = (fill: number) =>
+  deriveRoleKey({ bytes: fakeBytes32(fill) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes;
+const ALLOWLIST_ATTESTOR_1_KEY = allowlistAttestorKey(ALLOWLIST_ATTESTOR_1_FILL);
+const ALLOWLIST_ATTESTOR_2_KEY = allowlistAttestorKey(ALLOWLIST_ATTESTOR_2_FILL);
+const ALLOWLIST_ATTESTOR_3_KEY = allowlistAttestorKey(ALLOWLIST_ATTESTOR_3_FILL);
 
 type PrivateState = undefined;
 
@@ -49,6 +64,15 @@ const REGISTRANT_TREE = buildRegistrantTree([hashRegistrantLeaf(REGISTRANT_KEY)]
 // Phase 2 security-audit fix (2026-07-11): darkveil.compact merged into
 // this file (mirrors the Tier C merge) — getBuyNonce is now part of this
 // contract's own witness set.
+/** Attests the allowlist root with a SECOND attestor, completing the 2-of-3. */
+function attestAllowlistAgain(contractAddress: string, ctx: never, root: Uint8Array, at = 0n) {
+  const second = new Contract<PrivateState>({
+    ...witnesses,
+    getGovernorSecret: (_c) => [undefined, { bytes: fakeBytes32(ALLOWLIST_ATTESTOR_2_FILL) }],
+  });
+  return second.circuits.updateAllowlistRoot(nextContextAtTime(contractAddress, ctx, Number(at)), root, at);
+}
+
 const witnesses: Witnesses<PrivateState> = {
   getUserSecret: (_ctx) => [undefined, { bytes: fakeBytes32(3) }],
   getMerkleProof: (_ctx) => [undefined, ALLOWLIST_TREE.getProof(0)],
@@ -104,6 +128,10 @@ function deploy(walletCap: bigint = CORRECT_WALLET_CAP) {
     MIN_DV_PARTICIPANTS_TEST,
     CREATOR_KEY,
     PLATFORM_ADDR,
+    ALLOWLIST_ATTESTOR_1_KEY,
+    ALLOWLIST_ATTESTOR_2_KEY,
+    ALLOWLIST_ATTESTOR_3_KEY,
+    ALLOWLIST_THRESHOLD,
   );
   return { contract, init, contractAddress, ctx };
 }
@@ -127,6 +155,10 @@ function deployWithRegistrationCloseTime(closeTime: bigint) {
     MIN_DV_PARTICIPANTS_TEST,
     CREATOR_KEY,
     PLATFORM_ADDR,
+    ALLOWLIST_ATTESTOR_1_KEY,
+    ALLOWLIST_ATTESTOR_2_KEY,
+    ALLOWLIST_ATTESTOR_3_KEY,
+    ALLOWLIST_THRESHOLD,
   );
 }
 
@@ -241,6 +273,10 @@ describe('eligibility_gate.compact — wallet cap enforcement via revealBuyCommi
       MIN_DV_PARTICIPANTS_TEST,
       CREATOR_KEY,
       PLATFORM_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const r0 = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctx0 = nextContext(contractAddress, r0.context);
@@ -408,6 +444,10 @@ describe('eligibility_gate.compact — registration nullifier (disclose() placem
       MIN_DV_PARTICIPANTS_TEST,
       CREATOR_KEY,
       PLATFORM_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const r1 = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctx1 = nextContext(contractAddress, r1.context);
@@ -599,6 +639,10 @@ describe('eligibility_gate.compact — minimum DarkVeil participant floor', () =
       minDvParticipants,
       CREATOR_KEY,
       PLATFORM_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const r0 = governorContract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctx0 = nextContext(contractAddress, r0.context);
@@ -699,6 +743,10 @@ describe('eligibility_gate.compact — minimum DarkVeil participant floor', () =
         0n, // minDvParticipants — invalid
         CREATOR_KEY,
         PLATFORM_ADDR,
+        ALLOWLIST_ATTESTOR_1_KEY,
+        ALLOWLIST_ATTESTOR_2_KEY,
+        ALLOWLIST_ATTESTOR_3_KEY,
+        ALLOWLIST_THRESHOLD,
       ),
     ).toThrow('minDvParticipants must be positive');
   });
@@ -725,6 +773,10 @@ describe('eligibility_gate.compact — minimum DarkVeil participant floor', () =
         MIN_DV_PARTICIPANTS_TEST,
         CREATOR_KEY,
         PLATFORM_ADDR,
+        ALLOWLIST_ATTESTOR_1_KEY,
+        ALLOWLIST_ATTESTOR_2_KEY,
+        ALLOWLIST_ATTESTOR_3_KEY,
+        ALLOWLIST_THRESHOLD,
       ),
     ).toThrow(/verifyRatioRefund's safe range/i);
   });
@@ -1050,6 +1102,10 @@ describe('eligibility_gate.compact — merged DarkVeil private buy (Phase 2)', (
       MIN_DV_PARTICIPANTS_TEST,
       CREATOR_KEY,
       PLATFORM_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const rPhase = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctxPhase = nextContext(contractAddress, rPhase.context);
@@ -1505,6 +1561,10 @@ describe('eligibility_gate.compact — registrant exclusion dispute', () => {
       1n, // minDvParticipants
       CREATOR_KEY,
       PLATFORM_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
 
     const r0 = governor.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
@@ -1783,6 +1843,10 @@ describe('eligibility_gate.compact — registrant exclusion dispute', () => {
       1n,
       CREATOR_KEY,
       PLATFORM_ADDR,
+      ALLOWLIST_ATTESTOR_1_KEY,
+      ALLOWLIST_ATTESTOR_2_KEY,
+      ALLOWLIST_ATTESTOR_3_KEY,
+      ALLOWLIST_THRESHOLD,
     );
     const r0 = governor.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const c0 = nextContext(contractAddress, r0.context);
@@ -1943,14 +2007,20 @@ describe('eligibility_gate.compact — permissionless DarkVeil expiry', () => {
 
 describe('eligibility_gate.compact — the allowlist is fixed outside the registration window', () => {
   it('accepts a late addition while registration is open, which is what the circuit is for', () => {
-    const { contract, ctx } = deployAndStartDarkVeil();
-    const r = contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123));
+    const { contract, contractAddress, ctx } = deployAndStartDarkVeil();
+    // Two attestors: the root only changes once the threshold is met.
+    const r1 = contract.circuits.updateAllowlistRoot(nextContextAtTime(contractAddress, ctx, 0), fakeBytes32(123), 0n);
+    const r = attestAllowlistAgain(
+      contractAddress,
+      nextContext(contractAddress, r1.context) as never,
+      fakeBytes32(123),
+    );
     expect(ledger(r.context.currentQueryContext.state).allowlistRoot).toEqual(fakeBytes32(123));
   });
 
   it('rejects an update before registration has opened', () => {
     const { contract, ctx } = deploy();
-    expect(() => contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123))).toThrow(
+    expect(() => contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123), 0n)).toThrow(
       'Allowlist is fixed outside the DarkVeil phase',
     );
   });
@@ -1959,8 +2029,80 @@ describe('eligibility_gate.compact — the allowlist is fixed outside the regist
     // The registrant set is fixed at the freeze and startBuying publishes
     // registrantRoot over it, so the allowlist decides nothing from here on.
     const { contract, ctx } = deployAndStartDvBuying();
-    expect(() => contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123))).toThrow(
+    expect(() => contract.circuits.updateAllowlistRoot(ctx, fakeBytes32(123), 0n)).toThrow(
       'Allowlist is fixed once registration freezes',
     );
+  });
+});
+
+describe('eligibility_gate.compact — threshold attestation on the allowlist root', () => {
+  // The negative cases are the point: without them this suite would pass
+  // identically if the threshold were deleted, because every other test now
+  // publishes through two attestors anyway.
+  const ROOT = fakeBytes32(151);
+  const OTHER = fakeBytes32(152);
+
+  function attest(
+    d: { contract: unknown; contractAddress: string },
+    ctx: never,
+    fill: number,
+    root: Uint8Array,
+    at = 0n,
+  ) {
+    const c =
+      fill === ALLOWLIST_ATTESTOR_1_FILL
+        ? (d.contract as InstanceType<typeof Contract<PrivateState>>)
+        : new Contract<PrivateState>({
+            ...witnesses,
+            getGovernorSecret: (_c) => [undefined, { bytes: fakeBytes32(fill) }],
+          });
+    const r = c.circuits.updateAllowlistRoot(nextContextAtTime(d.contractAddress, ctx, Number(at)), root, at);
+    return nextContext(d.contractAddress, r.context);
+  }
+
+  const rootOf = (ctx: unknown) =>
+    ledger((ctx as { currentQueryContext: { state: unknown } }).currentQueryContext.state as never).allowlistRoot;
+
+  it('does not change the root on one attestation', () => {
+    const d = deployAndStartDarkVeil();
+    const before = rootOf(d.ctx);
+    const ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('changes it on the second, from a different attestor', () => {
+    const d = deployAndStartDarkVeil();
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_2_FILL, ROOT);
+    expect(rootOf(ctx)).toEqual(ROOT);
+  });
+
+  it('refuses to count one attestor twice as two', () => {
+    const d = deployAndStartDarkVeil();
+    const before = rootOf(d.ctx);
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('does not carry an approval across to a different root', () => {
+    const d = deployAndStartDarkVeil();
+    const before = rootOf(d.ctx);
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_2_FILL, OTHER);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('lets a partial approval expire rather than completing it a day later', () => {
+    const d = deployAndStartDarkVeil();
+    const before = rootOf(d.ctx);
+    let ctx = attest(d, d.ctx as never, ALLOWLIST_ATTESTOR_1_FILL, ROOT, 100n);
+    ctx = attest(d, ctx as never, ALLOWLIST_ATTESTOR_2_FILL, ROOT, 100n + ALLOWLIST_EXPIRY_SECONDS + 1n);
+    expect(rootOf(ctx)).toEqual(before);
+  });
+
+  it('refuses a caller who is not an attestor', () => {
+    const d = deployAndStartDarkVeil();
+    expect(() => attest(d, d.ctx as never, 77, ROOT)).toThrow(/registered attestor/i);
   });
 });

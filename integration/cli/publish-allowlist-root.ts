@@ -154,7 +154,11 @@ async function main() {
     await client.connectEligibilityGate(providers, input.contractAddress, [], new Uint8Array(32), new Uint8Array(32));
 
     const manager = new NoctisLaunchManager(client);
-    const result = await manager.updateAllowlistRoot(newRoot);
+    // ONE attestor's call. The root moves only once the threshold is met by
+    // distinct attestors inside the expiry window, so a single run of this CLI
+    // is expected NOT to change it — run it again as the second attestor.
+    const currentTimestampSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const result = await manager.updateAllowlistRoot(newRoot, currentTimestampSeconds);
 
     process.stdout.write(
       JSON.stringify({

@@ -265,6 +265,17 @@ export class NoctisMidnightClient {
       /** One platform wallet: the treasury/ops split is gone here, so a
        *  forfeited bond has a single destination. */
       platformAddr: Uint8Array;
+      /**
+       * The three keys that may attest this contract's allowlist root, and how
+       * many it takes. Each contract carries its own set — nothing here can
+       * read another contract's ledger, so a shared one is not possible.
+       *
+       * Three DISTINCT holders, or the threshold is decorative: the contract
+       * rejects duplicate keys but cannot tell one person holding two of them
+       * from two people.
+       */
+      allowlistAttestorKeys: [Uint8Array, Uint8Array, Uint8Array];
+      allowlistThreshold: bigint;
     },
     merkleProof: MerkleProofEntry[],
     buyNonce: Uint8Array,
@@ -296,6 +307,10 @@ export class NoctisMidnightClient {
         args.minDvParticipants,
         args.creatorPubKey,
         args.platformAddr,
+        args.allowlistAttestorKeys[0],
+        args.allowlistAttestorKeys[1],
+        args.allowlistAttestorKeys[2],
+        args.allowlistThreshold,
       ],
     });
     this.eligibilityGate = deployed;
@@ -379,6 +394,17 @@ export class NoctisMidnightClient {
       // mismatch against the real compiled contract.
       creatorAddr: Uint8Array;
       lpEscrowAddr: Uint8Array;
+      /**
+       * The three keys that may attest this contract's allowlist root, and how
+       * many it takes. Each contract carries its own set — nothing here can
+       * read another contract's ledger, so a shared one is not possible.
+       *
+       * Three DISTINCT holders, or the threshold is decorative: the contract
+       * rejects duplicate keys but cannot tell one person holding two of them
+       * from two people.
+       */
+      allowlistAttestorKeys: [Uint8Array, Uint8Array, Uint8Array];
+      allowlistThreshold: bigint;
     },
     merkleProof: MerkleProofEntry[],
     buyNonce: Uint8Array,
@@ -415,6 +441,10 @@ export class NoctisMidnightClient {
         args.platformAddr,
         args.creatorAddr,
         args.lpEscrowAddr,
+        args.allowlistAttestorKeys[0],
+        args.allowlistAttestorKeys[1],
+        args.allowlistAttestorKeys[2],
+        args.allowlistThreshold,
       ],
     });
     this.bondingCurve = deployed;
@@ -897,10 +927,18 @@ export class NoctisLaunchManager {
    * providers this manager was connected with must carry the real governor
    * witness secret, see integration/cli/publish-allowlist-root.ts.
    */
-  async updateAllowlistRoot(newRoot: Uint8Array) {
+  /**
+   * One attestor's call. The root changes only once the threshold has been
+   * met by DISTINCT attestors within the expiry window, so a caller expecting
+   * this to publish on its own will not see the root move — that is the point.
+   *
+   * `currentTimestampSeconds` is bound to real chain time by the circuit and
+   * dates the attestation round.
+   */
+  async updateAllowlistRoot(newRoot: Uint8Array, currentTimestampSeconds: bigint) {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.updateAllowlistRoot(newRoot);
+    return handle.callTx.updateAllowlistRoot(newRoot, currentTimestampSeconds);
   }
 
   /**

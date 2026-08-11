@@ -76,6 +76,12 @@ describe('eligibility-gate.ts — parity with the compiled circuit', () => {
       1n, // minDvParticipants — permissive, this test doesn't exercise the floor
       fakeBytes32(88), // creatorPubKey — distinct from myKey so this registrant isn't rejected as the creator
       fakeBytes32(60), // platformAddr — one wallet, no treasury/ops split
+      // Three distinct allowlist attestors, 2-of-3. Not exercised here; the
+      // constructor's distinctness check has to be satisfiable.
+      deriveRoleKey({ bytes: fakeBytes32(2) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+      deriveRoleKey({ bytes: fakeBytes32(32) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+      deriveRoleKey({ bytes: fakeBytes32(33) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+      2n,
     );
     const rPhase = contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil);
     const ctx1 = nextContext(contractAddress, rPhase.context);

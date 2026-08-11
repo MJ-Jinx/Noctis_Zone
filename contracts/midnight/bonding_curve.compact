@@ -301,6 +301,35 @@ sealed ledger launchId: Bytes<32>;
 // Merkle root of the allowlist (governor-updatable for late additions)
 export ledger allowlistRoot: Bytes<32>;
 
+// ---------------------------------------------------------------------------
+// THRESHOLD ATTESTATION — the allowlist takes two signers, not one
+// ---------------------------------------------------------------------------
+// Same reasoning and same shape as eligibility_gate.compact's, and as
+// cto_governance.compact's balance snapshot: eligibility is computed off-chain
+// against Cardano history no Midnight circuit can read, so the root is
+// attested and takes two of three attestors in SEPARATE calls. A threshold
+// checked inside one circuit is one party holding every secret.
+//
+// Each contract carries its own attestor set. Nothing here can read another
+// contract's ledger, so a shared one is not available even in principle.
+sealed ledger allowlistAttestor1: Bytes<32>;
+
+sealed ledger allowlistAttestor2: Bytes<32>;
+
+sealed ledger allowlistAttestor3: Bytes<32>;
+
+sealed ledger allowlistThreshold: Uint<8>;
+
+sealed ledger allowlistExpirySeconds: Uint<64>;
+
+export ledger pendingAllowlistRoot: Bytes<32>;
+
+export ledger pendingAllowlistOpenedAt: Uint<64>;
+
+export ledger allowlistRound: Counter;
+
+export ledger allowlistApprovals: Map<Bytes<32>, Uint<64>>;
+
 // Buyers who have proven allowlist membership, and the root they proved it
 // against.
 //
@@ -926,7 +955,11 @@ constructor(
   creatorPubKey_: Bytes<32>,
   platformAddr_: Bytes<32>,
   creatorAddr_: Bytes<32>,
-  lpEscrowAddr_: Bytes<32>
+  lpEscrowAddr_: Bytes<32>,
+  allowlistAttestor1_: Bytes<32>,
+  allowlistAttestor2_: Bytes<32>,
+  allowlistAttestor3_: Bytes<32>,
+  allowlistThreshold_: Uint<8>
 ) {
   // These two bounds are what keep every multiplication in curveCostRange
   // under Compact's 124-bit product ceiling — see that circuit's WIDTHS
@@ -943,6 +976,20 @@ constructor(
 
   launchId = disclose(launchId_);
   allowlistRoot = disclose(allowlistRoot_);
+  assert(disclose(allowlistAttestor1_ != pad(32, "")), "allowlistAttestor1 cannot be empty");
+  assert(disclose(allowlistAttestor2_ != pad(32, "")), "allowlistAttestor2 cannot be empty");
+  assert(disclose(allowlistAttestor3_ != pad(32, "")), "allowlistAttestor3 cannot be empty");
+  assert(disclose(allowlistAttestor1_ != allowlistAttestor2_), "allowlist attestor keys must be distinct");
+  assert(disclose(allowlistAttestor1_ != allowlistAttestor3_), "allowlist attestor keys must be distinct");
+  assert(disclose(allowlistAttestor2_ != allowlistAttestor3_), "allowlist attestor keys must be distinct");
+  assert(disclose(allowlistThreshold_ >= 2 && allowlistThreshold_ <= 3), "allowlistThreshold must be 2 or 3");
+  allowlistAttestor1 = disclose(allowlistAttestor1_);
+  allowlistAttestor2 = disclose(allowlistAttestor2_);
+  allowlistAttestor3 = disclose(allowlistAttestor3_);
+  allowlistThreshold = disclose(allowlistThreshold_);
+  allowlistExpirySeconds = disclose(86400); // 24 hours
+  pendingAllowlistRoot = disclose(pad(32, ""));
+  pendingAllowlistOpenedAt = disclose(0);
   totalSupply = disclose(totalSupply_);
   maxWalletPercent = disclose(maxWalletPercent_);
   bondAmount = disclose(bondAmount_);
@@ -2108,15 +2155,55 @@ export circuit getFees(): FeeConfig {
 // A buyer's own verification is unaffected by any of this — verifiedBuyers
 // records the root each buyer proved against, so a genuine change invalidates
 // earlier verifications on its own rather than leaving them silently stale.
-export circuit updateAllowlistRoot(newRoot: Bytes<32>): [] {
-  const govSecret = getGovernorSecret();
-  const govKey = deriveGovernorKey(govSecret);
-  assert(disclose(govKey == governorKey), "Only governor can update allowlist");
+// Threshold attestation (2026-08-11) — see the ledger block above. Takes
+// `currentTimestamp` for the expiry on partial approvals, bound to real chain
+// time like every other timestamp-taking circuit here.
+export circuit updateAllowlistRoot(newRoot: Bytes<32>, currentTimestamp: Uint<64>): [] {
+  const attestorSecret = getGovernorSecret();
+  const attestorKey = deriveGovernorKey(attestorSecret);
+  const isAllowlistAttestor1 = disclose(attestorKey == allowlistAttestor1);
+  const isAllowlistAttestor2 = disclose(attestorKey == allowlistAttestor2);
+  const isAllowlistAttestor3 = disclose(attestorKey == allowlistAttestor3);
+  assert(
+    isAllowlistAttestor1 || isAllowlistAttestor2 || isAllowlistAttestor3,
+    "Only a registered attestor can update allowlist"
+  );
   assert(
     disclose(phase != LaunchPhase.Graduated && phase != LaunchPhase.Cancelled),
     "Allowlist is fixed once the launch has graduated or been cancelled"
   );
-  allowlistRoot = disclose(newRoot);
+  assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
+  assert(
+    blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
+    "currentTimestamp too far in the past"
+  );
+
+  const allowlistExpired =
+    currentTimestamp > (pendingAllowlistOpenedAt + allowlistExpirySeconds) as Uint<64>;
+  const sameAllowlistPending = disclose(pendingAllowlistRoot == newRoot);
+  if (disclose(!sameAllowlistPending || allowlistExpired)) {
+    allowlistRound.increment(1);
+    pendingAllowlistRoot = disclose(newRoot);
+    pendingAllowlistOpenedAt = disclose(currentTimestamp);
+  }
+
+  const allowlistRoundNow = allowlistRound.read();
+  allowlistApprovals.insert(disclose(attestorKey), disclose(allowlistRoundNow));
+
+  const c1 =
+    allowlistApprovals.member(allowlistAttestor1) &&
+    allowlistApprovals.lookup(allowlistAttestor1) == allowlistRoundNow;
+  const c2 =
+    allowlistApprovals.member(allowlistAttestor2) &&
+    allowlistApprovals.lookup(allowlistAttestor2) == allowlistRoundNow;
+  const c3 =
+    allowlistApprovals.member(allowlistAttestor3) &&
+    allowlistApprovals.lookup(allowlistAttestor3) == allowlistRoundNow;
+  const allowlistApprovalCount = ((c1 ? 1 : 0) + (c2 ? 1 : 0) + (c3 ? 1 : 0)) as Uint<8>;
+
+  if (disclose(allowlistApprovalCount >= allowlistThreshold)) {
+    allowlistRoot = disclose(newRoot);
+  }
 }
 
 // Record that DarkVeil failed (<50% participation).

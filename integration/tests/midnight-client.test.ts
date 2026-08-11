@@ -277,9 +277,11 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
     minDvParticipants: 15n,
     creatorPubKey: fakeBytes32(12),
     platformAddr: fakeBytes32(13),
+    allowlistAttestorKeys: [fakeBytes32(91), fakeBytes32(92), fakeBytes32(93)] as [Uint8Array, Uint8Array, Uint8Array],
+    allowlistThreshold: 2n,
   };
 
-  it('passes the exact 13-item positional args array in constructor order', async () => {
+  it('passes the exact 17-item positional args array in constructor order', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     const record = await client.deployEligibilityGate(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE, REG_NONCE);
 
@@ -302,6 +304,10 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
       args.creatorPubKey,
       // One platform wallet, not a treasury/ops pair.
       args.platformAddr,
+      args.allowlistAttestorKeys[0],
+      args.allowlistAttestorKeys[1],
+      args.allowlistAttestorKeys[2],
+      args.allowlistThreshold,
     ]);
     expect(client.eligibilityGate).not.toBeNull();
     expect(record).toEqual({
@@ -361,9 +367,11 @@ describe('NoctisMidnightClient.deployBondingCurve / connectBondingCurve', () => 
     platformAddr: fakeBytes32(33),
     creatorAddr: fakeBytes32(35),
     lpEscrowAddr: fakeBytes32(36),
+    allowlistAttestorKeys: [fakeBytes32(91), fakeBytes32(92), fakeBytes32(93)] as [Uint8Array, Uint8Array, Uint8Array],
+    allowlistThreshold: 2n,
   };
 
-  it('passes the exact 18-item positional args array in constructor order', async () => {
+  it('passes the exact 22-item positional args array in constructor order', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployBondingCurve(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE, REG_NONCE);
 
@@ -388,6 +396,10 @@ describe('NoctisMidnightClient.deployBondingCurve / connectBondingCurve', () => 
       args.platformAddr,
       args.creatorAddr,
       args.lpEscrowAddr,
+      args.allowlistAttestorKeys[0],
+      args.allowlistAttestorKeys[1],
+      args.allowlistAttestorKeys[2],
+      args.allowlistThreshold,
     ]);
     expect(client.bondingCurve).not.toBeNull();
   });
@@ -555,9 +567,11 @@ describe('NoctisMidnightClient.deployCtoGovernance / connectCtoGovernance', () =
     platformAddr: fakeBytes32(82),
     attestorKeys: [fakeBytes32(83), fakeBytes32(84), fakeBytes32(85)] as [Uint8Array, Uint8Array, Uint8Array],
     attestThreshold: 2n,
+    allowlistAttestorKeys: [fakeBytes32(91), fakeBytes32(92), fakeBytes32(93)] as [Uint8Array, Uint8Array, Uint8Array],
+    allowlistThreshold: 2n,
   };
 
-  it('passes the exact 13-item positional args array in constructor order', async () => {
+  it('passes the exact 17-item positional args array in constructor order', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployCtoGovernance(FAKE_PROVIDERS, args);
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
@@ -679,7 +693,8 @@ const FALLBACK_METHODS: Array<{
   {
     method: 'updateAllowlistRoot',
     circuit: 'updateAllowlistRoot',
-    args: [fakeBytes32(101)],
+    // One attestor's call, dated for the attestation round.
+    args: [fakeBytes32(101), 1_700_000_000n],
   },
   {
     method: 'submitDarkVeilBuyCommit',
