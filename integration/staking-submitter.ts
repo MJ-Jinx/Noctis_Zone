@@ -110,6 +110,70 @@ export interface StakingPosition {
   datum: StakingPositionDatumData;
 }
 
+/** Names one of a staker's positions. Both halves, because an index alone is meaningless and a hash alone is not unique. */
+export interface PositionRef {
+  txHash: string;
+  outputIndex: number;
+}
+
+/**
+ * Which of a staker's positions an unstake should close.
+ *
+ * Unstaking closes one position and returns its stake. Positions differ in
+ * `stake_timestamp`, and the bonding period is measured from it, so closing
+ * the wrong one is not interchangeable with closing the right one — it can
+ * discard seasoning the staker has already served.
+ *
+ * So the two ambiguous readings are refused rather than resolved:
+ *
+ *   - a reference naming a transaction but not an output, which would
+ *     otherwise fall back to output 0 and match a position the caller never
+ *     named;
+ *   - no reference at all while the staker holds more than one position,
+ *     which would otherwise close whichever the chain query happened to
+ *     return first — an order nothing promises and two of our own chain
+ *     backends have already disagreed about.
+ *
+ * The unambiguous convenience is kept: no reference and exactly one position
+ * closes that one.
+ */
+export function selectPositionToUnstake(
+  positions: readonly StakingPosition[],
+  ref?: Partial<PositionRef>,
+): StakingPosition {
+  if (positions.length === 0) {
+    throw new Error('No staking positions found for this wallet.');
+  }
+
+  const named = (p: StakingPosition) => `${p.utxo.txHash}#${p.utxo.outputIndex}`;
+
+  if (ref?.txHash === undefined && ref?.outputIndex === undefined) {
+    if (positions.length > 1) {
+      throw new Error(
+        `This wallet holds ${positions.length} staking positions, so which one to unstake has to be named: ` +
+          `${positions.map(named).join(', ')}. Pass positionTxHash and positionOutputIndex.`,
+      );
+    }
+    return positions[0] as StakingPosition;
+  }
+
+  if (ref.txHash === undefined || ref.outputIndex === undefined) {
+    throw new Error(
+      'A position is named by BOTH positionTxHash and positionOutputIndex. ' +
+        'One transaction can carry more than one output, so half a reference names no particular position.',
+    );
+  }
+
+  const found = positions.find((p) => p.utxo.txHash === ref.txHash && p.utxo.outputIndex === ref.outputIndex);
+  if (!found) {
+    throw new Error(
+      `No staking position at ${ref.txHash}#${ref.outputIndex} for this wallet. ` +
+        `It holds: ${positions.map(named).join(', ')}.`,
+    );
+  }
+  return found;
+}
+
 export class StakingSubmitter {
   private lucidPromise: Promise<LucidEvolution>;
   private validator: SpendingValidator;

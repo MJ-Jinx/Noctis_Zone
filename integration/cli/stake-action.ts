@@ -10,7 +10,7 @@
 
 import { validatorToAddress } from '@lucid-evolution/lucid';
 import { buildStakingRewardSnapshot, getRewardProof } from '../staking-reward-tree-builder.js';
-import { StakingSubmitter } from '../staking-submitter.js';
+import { StakingSubmitter, selectPositionToUnstake } from '../staking-submitter.js';
 import {
   CARDANO_NETWORK_MAP,
   jsonSafe,
@@ -154,14 +154,10 @@ async function main() {
       lucidForAddr.selectWallet.fromSeed(mnemonic);
       const stakerAddress = await lucidForAddr.wallet().address();
       const positions = await submitter().findPositions(stakerAddress);
-      if (positions.length === 0) throw new Error('No staking positions found for this wallet.');
-      const position =
-        input.positionTxHash !== undefined
-          ? positions.find(
-              (p) => p.utxo.txHash === input.positionTxHash && p.utxo.outputIndex === (input.positionOutputIndex ?? 0),
-            )
-          : positions[0];
-      if (!position) throw new Error('Specified position not found.');
+      const position = selectPositionToUnstake(positions, {
+        txHash: input.positionTxHash,
+        outputIndex: input.positionOutputIndex,
+      });
       result = await submitter().unstake(mnemonic, position);
       break;
     }
