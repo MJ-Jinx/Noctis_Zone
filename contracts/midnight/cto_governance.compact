@@ -370,6 +370,55 @@ export ledger balanceSnapshotRoot: Bytes<32>;
 // creation time and are unaffected once created).
 export ledger lastSnapshotTimestamp: Uint<64>;
 
+// ---------------------------------------------------------------------------
+// THRESHOLD ATTESTATION — the balance snapshot needs two signers, not one
+// ---------------------------------------------------------------------------
+// balanceSnapshotRoot decides every voter's weight, and nothing on this chain
+// can check it: Compact cannot read the ledger holding real balances, and no
+// bridge lets a circuit read Cardano state. So it is attested, and the only
+// question is how many keys it takes to attest it.
+//
+// It takes two of three, and they must arrive in SEPARATE CALLS. That is not
+// a stylistic choice. Every witness for a call is produced by whoever builds
+// that call, so a threshold checked inside one circuit is one party holding
+// every secret — which is worse than a single key, because it makes gathering
+// keys into one place a requirement. A probe compiled and executed against
+// the real toolchain confirmed both halves: one caller supplying three
+// secrets satisfies an in-circuit check, and a genuine co-signer holding only
+// their own cannot contribute to someone else's in-flight proof at all.
+//
+// Approvals are therefore accumulated on chain, keyed BY SIGNER. A count
+// cannot tell one signer calling twice from two signers calling once.
+sealed ledger attestorKey1: Bytes<32>;
+
+sealed ledger attestorKey2: Bytes<32>;
+
+sealed ledger attestorKey3: Bytes<32>;
+
+// How many of the three must attest. Set at deploy so the M/N split is a
+// deployment decision, the same way lp_escrow's multisig threshold is.
+sealed ledger attestThreshold: Uint<8>;
+
+// How long a partial approval stays live. Approvals persist between calls by
+// construction, so without this one signature sits on chain indefinitely and
+// a second, months later, completes a root whose context nobody remembers.
+sealed ledger attestExpirySeconds: Uint<64>;
+
+// The root under consideration, and when its round opened.
+export ledger pendingSnapshotRoot: Bytes<32>;
+
+export ledger pendingSnapshotTimestamp: Uint<64>;
+
+export ledger pendingSnapshotOpenedAt: Uint<64>;
+
+// Rounds are numbered rather than cleared: an approval records WHICH round it
+// was given for, so a stale approval from an abandoned round can never be
+// counted toward the current one, and nothing has to be deleted to start over.
+export ledger snapshotRound: Counter;
+
+// signer key -> the round they last approved.
+export ledger snapshotApprovals: Map<Bytes<32>, Uint<64>>;
+
 // Fixed platform policy constant — hardcoded in the constructor body, same
 // convention as ballotDuration/silenceThreshold. 30 days (2592000s),
 // matching minPostGradDelay's own value: tight enough that a genuinely
@@ -589,7 +638,14 @@ constructor(
   creatorPubKey_: Bytes<32>,
   hasClaimableBalance_: Boolean,
   breakGlassBondMin_: Uint<128>,
-  platformAddr_: Bytes<32>
+  platformAddr_: Bytes<32>,
+  // The three keys that may attest the balance snapshot, and how many of them
+  // it takes. Deploy-time, so the M/N split is an operational choice rather
+  // than a property of the contract — same as lp_escrow's multisig.
+  attestorKey1_: Bytes<32>,
+  attestorKey2_: Bytes<32>,
+  attestorKey3_: Bytes<32>,
+  attestThreshold_: Uint<8>
 ) {
   launchId = disclose(launchId_);
   totalSupply = disclose(totalSupply_);
@@ -614,6 +670,26 @@ constructor(
   maxSnapshotAge = disclose(2592000);     // 30 days
   staleSnapshotGraceWindow = disclose(7776000); // 90 days — see ledger comment
   minHoldingPeriod = disclose(2592000);   // 30 days (anti-whale-takeover safeguard #3)
+
+  // Three DISTINCT, non-empty keys, or the threshold is not what it says.
+  // Two equal keys would let one holder supply both halves of a 2-of-3.
+  assert(disclose(attestorKey1_ != pad(32, "")), "attestorKey1 cannot be empty");
+  assert(disclose(attestorKey2_ != pad(32, "")), "attestorKey2 cannot be empty");
+  assert(disclose(attestorKey3_ != pad(32, "")), "attestorKey3 cannot be empty");
+  assert(disclose(attestorKey1_ != attestorKey2_), "attestor keys must be distinct");
+  assert(disclose(attestorKey1_ != attestorKey3_), "attestor keys must be distinct");
+  assert(disclose(attestorKey2_ != attestorKey3_), "attestor keys must be distinct");
+  // A threshold of 1 is a single key wearing three names; above 3 can never
+  // be met and would freeze the snapshot permanently.
+  assert(disclose(attestThreshold_ >= 2 && attestThreshold_ <= 3), "attestThreshold must be 2 or 3");
+  attestorKey1 = disclose(attestorKey1_);
+  attestorKey2 = disclose(attestorKey2_);
+  attestorKey3 = disclose(attestorKey3_);
+  attestThreshold = disclose(attestThreshold_);
+  attestExpirySeconds = disclose(86400); // 24 hours
+  pendingSnapshotRoot = disclose(pad(32, ""));
+  pendingSnapshotTimestamp = disclose(0);
+  pendingSnapshotOpenedAt = disclose(0);
 
   const govSecret = getGovernorSecret();
   governorKey = disclose(deriveGovernorKey(govSecret));
@@ -658,18 +734,69 @@ constructor(
 // blockTimeGte/blockTimeLte idiom lp_escrow.compact's sealLock already uses
 // (see that circuit's own comment for the "why a window, not exact
 // equality" reasoning: block-time granularity + tx propagation lag).
+// Threshold attestation (2026-08-11): one call from one attestor. The root is
+// only written once `attestThreshold` DISTINCT attestors have called for the
+// same root inside one live round — see the ledger block above for why the
+// signatures cannot be gathered into a single call.
+//
+// Calling with a root different from the one pending, or after the pending
+// round has expired, opens a fresh round. That means an attestor who disagrees
+// does not need a "reject" circuit: attesting to a different root replaces the
+// proposal, and the earlier approvals stop counting because they were recorded
+// against a round number that is no longer current.
 export circuit updateBalanceSnapshot(newRoot: Bytes<32>, currentTimestamp: Uint<64>): [] {
-  const govSecret = getGovernorSecret();
-  const govKey = deriveGovernorKey(govSecret);
-  assert(disclose(govKey == governorKey), "Only governor can update balance snapshot");
+  // Each attestor calls with their OWN secret; the witness returns whatever
+  // the caller holds, so this derives that caller's key and no other.
+  const attestorSecret = getGovernorSecret();
+  const attestorKey = deriveGovernorKey(attestorSecret);
+  // Disclosed one comparison at a time: each is a single bit about the
+  // caller's own key against a public one, which is exactly what "is this
+  // caller an attestor" has to reveal and no more.
+  const isAttestor1 = disclose(attestorKey == attestorKey1);
+  const isAttestor2 = disclose(attestorKey == attestorKey2);
+  const isAttestor3 = disclose(attestorKey == attestorKey3);
+  assert(
+    isAttestor1 || isAttestor2 || isAttestor3,
+    "Only a registered attestor can update balance snapshot"
+  );
   assert(blockTimeGte(disclose(currentTimestamp)), "currentTimestamp cannot be in the future");
   assert(
     blockTimeLte(disclose((currentTimestamp + 3600) as Uint<64>)),
     "currentTimestamp too far in the past"
   );
   assert(disclose(currentTimestamp >= lastSnapshotTimestamp), "currentTimestamp cannot go backwards");
-  balanceSnapshotRoot = disclose(newRoot);
-  lastSnapshotTimestamp = disclose(currentTimestamp);
+
+  // A round is live only while it is unexpired AND still about this root.
+  const roundExpired =
+    currentTimestamp > (pendingSnapshotOpenedAt + attestExpirySeconds) as Uint<64>;
+  if (disclose(pendingSnapshotRoot != newRoot || roundExpired)) {
+    snapshotRound.increment(1);
+    pendingSnapshotRoot = disclose(newRoot);
+    pendingSnapshotOpenedAt = disclose(currentTimestamp);
+  }
+  // Recorded on every call, so the committed timestamp is the one from the
+  // attestation that reached the threshold rather than the one that opened it.
+  pendingSnapshotTimestamp = disclose(currentTimestamp);
+
+  const round = snapshotRound.read();
+  snapshotApprovals.insert(disclose(attestorKey), disclose(round));
+
+  // Counted per KEY against the current round. Three explicit reads rather
+  // than a loop: the attestor set is fixed at three, and this way one signer
+  // calling twice cannot register as two.
+  const a1 =
+    snapshotApprovals.member(attestorKey1) && snapshotApprovals.lookup(attestorKey1) == round;
+  const a2 =
+    snapshotApprovals.member(attestorKey2) && snapshotApprovals.lookup(attestorKey2) == round;
+  const a3 =
+    snapshotApprovals.member(attestorKey3) && snapshotApprovals.lookup(attestorKey3) == round;
+  const approvals =
+    ((a1 ? 1 : 0) + (a2 ? 1 : 0) + (a3 ? 1 : 0)) as Uint<8>;
+
+  if (disclose(approvals >= attestThreshold)) {
+    balanceSnapshotRoot = disclose(newRoot);
+    lastSnapshotTimestamp = disclose(currentTimestamp);
+  }
 }
 
 // ============================================================================

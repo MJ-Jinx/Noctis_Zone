@@ -553,9 +553,11 @@ describe('NoctisMidnightClient.deployCtoGovernance / connectCtoGovernance', () =
     hasClaimableBalance: true,
     breakGlassBondMin: 500n,
     platformAddr: fakeBytes32(82),
+    attestorKeys: [fakeBytes32(83), fakeBytes32(84), fakeBytes32(85)] as [Uint8Array, Uint8Array, Uint8Array],
+    attestThreshold: 2n,
   };
 
-  it('passes the exact 9-item positional args array in constructor order', async () => {
+  it('passes the exact 13-item positional args array in constructor order', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployCtoGovernance(FAKE_PROVIDERS, args);
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
@@ -570,6 +572,10 @@ describe('NoctisMidnightClient.deployCtoGovernance / connectCtoGovernance', () =
       args.hasClaimableBalance,
       args.breakGlassBondMin,
       args.platformAddr,
+      args.attestorKeys[0],
+      args.attestorKeys[1],
+      args.attestorKeys[2],
+      args.attestThreshold,
     ]);
   });
 

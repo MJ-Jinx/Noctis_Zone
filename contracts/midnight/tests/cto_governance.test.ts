@@ -14,6 +14,7 @@ import {
   ProposalType,
   type Witnesses,
 } from '../compiled/cto_governance/contract/index.js';
+import { DOMAINS, deriveRoleKey } from '../witnesses.js';
 import { deployForTest, fakeBytes32, nextContext, nextContextAtTime } from './helpers.js';
 
 // Fix (2026-07-21): every circuit here that takes a currentTimestamp
@@ -35,15 +36,32 @@ function makeWitnesses(
   balanceLeafAmount = 0n,
   balanceProof: MerkleProofEntry[] = EMPTY_PROOF,
   balanceLeafHeldSince = 0n,
+  // Which attestor is speaking. The balance snapshot needs two of three, and
+  // each call carries only its own signer's secret — so a second attestor is
+  // a second set of witnesses, not a second argument to one call.
+  governorFill = ATTESTOR_1_FILL,
 ): Witnesses<PrivateState> {
   return {
     getUserSecret: (_ctx) => [undefined, { bytes: fakeBytes32(userFill) }],
-    getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
+    getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(governorFill) }],
     getBalanceLeafAmount: (_ctx) => [undefined, balanceLeafAmount],
     getBalanceLeafHeldSince: (_ctx) => [undefined, balanceLeafHeldSince],
     getBalanceProof: (_ctx) => [undefined, balanceProof],
   };
 }
+
+// The three keys allowed to attest the balance snapshot. Fill 2 is the
+// original governor secret every other circuit in this file already uses, so
+// the governor remains one of the attestors rather than a separate role.
+const ATTESTOR_1_FILL = 2;
+const ATTESTOR_2_FILL = 22;
+const ATTESTOR_3_FILL = 23;
+const ATTEST_THRESHOLD = 2n;
+const ATTEST_EXPIRY_SECONDS = 86_400n;
+const attestorKey = (fill: number) => deriveRoleKey({ bytes: fakeBytes32(fill) }, DOMAINS.CTO_GOVERNOR).bytes;
+const ATTESTOR_1_KEY = attestorKey(ATTESTOR_1_FILL);
+const ATTESTOR_2_KEY = attestorKey(ATTESTOR_2_FILL);
+const ATTESTOR_3_KEY = attestorKey(ATTESTOR_3_FILL);
 
 const TOTAL_SUPPLY = 1_000_000_000n;
 const GRADUATION_TIMESTAMP = 0n;
@@ -107,6 +125,10 @@ function deploy(
     hasClaimableBalance,
     BREAK_GLASS_BOND_MIN,
     PLATFORM_ADDR,
+    ATTESTOR_1_KEY,
+    ATTESTOR_2_KEY,
+    ATTESTOR_3_KEY,
+    ATTEST_THRESHOLD,
   );
   return { contract, init, contractAddress, ctx };
 }
@@ -139,9 +161,20 @@ function publishBalanceSnapshot(
     keyed.map(({ voterKey, balance, heldSinceTimestamp }) => ({ voterKey, balance, heldSinceTimestamp })),
   );
 
+  // Two attestors, two separate calls — the root is not written until the
+  // second one lands. The first uses this deployment's own contract (attestor
+  // 1); the second needs its own witnesses, because a call can only ever
+  // carry the secret of whoever built it.
   const pinnedCtx = nextContextAtTime(d.contractAddress, d.ctx, Number(snapshotTimestamp));
-  const r = d.contract.circuits.updateBalanceSnapshot(pinnedCtx, tree.root, snapshotTimestamp);
-  const ctx = nextContext(d.contractAddress, r.context);
+  const r1 = d.contract.circuits.updateBalanceSnapshot(pinnedCtx, tree.root, snapshotTimestamp);
+  const ctxAfterFirst = nextContextAtTime(
+    d.contractAddress,
+    nextContext(d.contractAddress, r1.context),
+    Number(snapshotTimestamp),
+  );
+  const second = new Contract<PrivateState>(makeWitnesses(VOTER_FILL, 0n, EMPTY_PROOF, 0n, ATTESTOR_2_FILL));
+  const r2 = second.circuits.updateBalanceSnapshot(ctxAfterFirst, tree.root, snapshotTimestamp);
+  const ctx = nextContext(d.contractAddress, r2.context);
 
   function witnessesFor(fill: number): Witnesses<PrivateState> {
     const idx = keyed.findIndex((e) => e.fill === fill);
@@ -1205,6 +1238,10 @@ describe('cto_governance.compact — anti-whale-takeover safeguard #2: minimum d
       true,
       BREAK_GLASS_BOND_MIN,
       PLATFORM_ADDR,
+      ATTESTOR_1_KEY,
+      ATTESTOR_2_KEY,
+      ATTESTOR_3_KEY,
+      ATTEST_THRESHOLD,
     );
     const d = { contract, init, contractAddress, ctx: deployCtx };
     const { ctx: snapCtx, witnessesFor } = publishBalanceSnapshot(
@@ -1264,6 +1301,10 @@ describe('cto_governance.compact — anti-whale-takeover safeguard #2: minimum d
       true,
       BREAK_GLASS_BOND_MIN,
       PLATFORM_ADDR,
+      ATTESTOR_1_KEY,
+      ATTESTOR_2_KEY,
+      ATTESTOR_3_KEY,
+      ATTEST_THRESHOLD,
     );
     const d = { contract, init, contractAddress, ctx: deployCtx };
     const { ctx: snapCtx, witnessesFor } = publishBalanceSnapshot(
@@ -1852,12 +1893,19 @@ describe('cto_governance.compact — abandoned balance snapshot', () => {
   it('goes back to requiring a fresh root as soon as the governor publishes one', () => {
     // The route is a consequence of inaction, not a state anyone latches.
     const d = deployWithAbandonedSnapshot();
+    // Two attestors, because one no longer writes a root.
     const rRepub = d.contract.circuits.updateBalanceSnapshot(
       nextContextAtTime(d.contractAddress, d.ctx, Number(PROPOSE_AT)),
       fakeBytes32(55),
       PROPOSE_AT,
     );
-    const ctx = nextContext(d.contractAddress, rRepub.context);
+    const second = new Contract<PrivateState>(makeWitnesses(VOTER_FILL, 0n, EMPTY_PROOF, 0n, ATTESTOR_2_FILL));
+    const rRepub2 = second.circuits.updateBalanceSnapshot(
+      nextContextAtTime(d.contractAddress, nextContext(d.contractAddress, rRepub.context), Number(PROPOSE_AT)),
+      fakeBytes32(55),
+      PROPOSE_AT,
+    );
+    const ctx = nextContext(d.contractAddress, rRepub2.context);
 
     // Fresh again, so DissolveCTO is refused on its own precondition rather
     // than on snapshot age — the age gate is no longer what stops it.
@@ -1874,5 +1922,99 @@ describe('cto_governance.compact — abandoned balance snapshot', () => {
         BREAK_GLASS_BOND_MIN,
       ),
     ).toThrow('CTO not triggered');
+  });
+});
+
+// ============================================================================
+// THRESHOLD ATTESTATION — the balance snapshot takes two of three
+// ============================================================================
+// The point of these is the negative one. A suite that only ever publishes
+// through the two-attestor helper would pass identically if the threshold were
+// removed tomorrow, because the helper would simply be doing twice the work
+// for no reason. Each test below fails if one signature is enough.
+describe('cto_governance.compact — threshold attestation on the balance snapshot', () => {
+  const ROOT = fakeBytes32(77);
+  const OTHER_ROOT = fakeBytes32(78);
+  const AT = SILENCE_THRESHOLD;
+
+  /** A contract speaking for one attestor, sharing the deployment's state. */
+  function attestor(fill: number) {
+    return new Contract<PrivateState>(makeWitnesses(VOTER_FILL, 0n, EMPTY_PROOF, 0n, fill));
+  }
+
+  function attest(d: ReturnType<typeof deploy>, ctx: unknown, fill: number, root: Uint8Array, at = AT) {
+    const c = fill === ATTESTOR_1_FILL ? d.contract : attestor(fill);
+    const r = c.circuits.updateBalanceSnapshot(
+      nextContextAtTime(d.contractAddress, ctx as never, Number(at)),
+      root,
+      at,
+    );
+    return nextContext(d.contractAddress, r.context);
+  }
+
+  const rootOf = (d: ReturnType<typeof deploy>, ctx: unknown) =>
+    ledger((ctx as { currentQueryContext: { state: unknown } }).currentQueryContext.state as never).balanceSnapshotRoot;
+
+  it('does not write the root on one attestation', () => {
+    const d = deploy();
+    const ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
+    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+  });
+
+  it('writes it on the second, from a DIFFERENT attestor', () => {
+    const d = deploy();
+    let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx, ATTESTOR_2_FILL, ROOT);
+    expect(rootOf(d, ctx)).toEqual(ROOT);
+  });
+
+  it('refuses to count one attestor twice as two', () => {
+    // The reason approvals are keyed by signer rather than counted: a counter
+    // cannot tell these two calls apart from two different people.
+    const d = deploy();
+    let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx, ATTESTOR_1_FILL, ROOT);
+    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+  });
+
+  it('accepts any two of the three, not one privileged pair', () => {
+    const d = deploy();
+    let ctx = attest(d, d.ctx, ATTESTOR_2_FILL, ROOT);
+    ctx = attest(d, ctx, ATTESTOR_3_FILL, ROOT);
+    expect(rootOf(d, ctx)).toEqual(ROOT);
+  });
+
+  it('refuses a caller who is not an attestor at all', () => {
+    const d = deploy();
+    expect(() => attest(d, d.ctx, 91, ROOT)).toThrow(/registered attestor/i);
+  });
+
+  it('does not carry an approval across to a different root', () => {
+    // Attesting to a different root replaces the proposal rather than adding
+    // to it — which is also how an attestor disagrees, without needing a
+    // reject circuit.
+    const d = deploy();
+    let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
+    ctx = attest(d, ctx, ATTESTOR_2_FILL, OTHER_ROOT);
+    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+  });
+
+  it('lets a stale approval expire rather than completing a root a day later', () => {
+    const d = deploy();
+    let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT, AT);
+    // One second past the 24h window: the first approval is no longer live,
+    // so this call opens a fresh round instead of completing the old one.
+    const late = AT + ATTEST_EXPIRY_SECONDS + 1n;
+    ctx = attest(d, ctx, ATTESTOR_2_FILL, ROOT, late);
+    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+  });
+
+  it('still completes inside the window', () => {
+    // The control for the expiry test above: same two calls, one second
+    // before the deadline rather than one second after.
+    const d = deploy();
+    let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT, AT);
+    ctx = attest(d, ctx, ATTESTOR_2_FILL, ROOT, AT + ATTEST_EXPIRY_SECONDS - 1n);
+    expect(rootOf(d, ctx)).toEqual(ROOT);
   });
 });

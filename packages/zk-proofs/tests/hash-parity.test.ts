@@ -25,6 +25,7 @@ import {
   nextContext,
   nextContextAtTime,
 } from '../../../contracts/midnight/tests/helpers.js';
+import { DOMAINS, deriveRoleKey } from '../../../contracts/midnight/witnesses.js';
 import * as ctoGovernance from '../src/cto-governance.js';
 import * as eligibilityGate from '../src/eligibility-gate.js';
 
@@ -155,6 +156,15 @@ describe('cto-governance.ts — parity with the compiled circuit', () => {
       true, // hasClaimableBalance
       1_000_000n, // breakGlassBondMin
       fakeBytes32(200), // platformAddr — one wallet, no treasury/ops split
+      // Three distinct attestor keys and a 2-of-3 threshold. This test does not
+      // exercise attestation; it needs a deployment that satisfies the
+      // constructor's distinctness check.
+      // DERIVED keys, not raw bytes — the circuit compares against
+      // deriveGovernorKey(secret), so a raw fill would match no caller.
+      deriveRoleKey({ bytes: fakeBytes32(2) }, DOMAINS.CTO_GOVERNOR).bytes,
+      deriveRoleKey({ bytes: fakeBytes32(22) }, DOMAINS.CTO_GOVERNOR).bytes,
+      deriveRoleKey({ bytes: fakeBytes32(23) }, DOMAINS.CTO_GOVERNOR).bytes,
+      2n,
     );
 
     const SILENCE_THRESHOLD = 7_776_000n;
@@ -165,9 +175,21 @@ describe('cto-governance.ts — parity with the compiled circuit', () => {
     // Published right before proposal creation — stale-snapshot fix
     // (2026-07-19) rejects a snapshot published long before the proposal
     // that relies on it (max 30 days old).
+    // Two attestors in two calls (threshold attestation, 2026-08-11): the root
+    // is not written until the second lands, and the second must be a
+    // different signer, so it needs its own witnesses.
     const pinnedSnapshotCtx = nextContextAtTime(contractAddress, ctx, Number(SILENCE_THRESHOLD));
     const rSnapshot = contract.circuits.updateBalanceSnapshot(pinnedSnapshotCtx, tree.root, SILENCE_THRESHOLD);
-    const ctxSnapshot = nextContext(contractAddress, rSnapshot.context);
+    const second = new CtoGovernanceContract<PrivateState>({
+      ...witnesses,
+      getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(22) }],
+    });
+    const rSnapshot2 = second.circuits.updateBalanceSnapshot(
+      nextContextAtTime(contractAddress, nextContext(contractAddress, rSnapshot.context), Number(SILENCE_THRESHOLD)),
+      tree.root,
+      SILENCE_THRESHOLD,
+    );
+    const ctxSnapshot = nextContext(contractAddress, rSnapshot2.context);
     const pinnedCreateCtx = nextContextAtTime(contractAddress, ctxSnapshot, Number(SILENCE_THRESHOLD));
     const rCreate = contract.circuits.createProposal(
       pinnedCreateCtx,

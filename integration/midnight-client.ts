@@ -657,6 +657,17 @@ export class NoctisMidnightClient {
       /** Fixed payout address for a forfeited (rebutted) break-glass bond. One
        *  platform wallet, so the whole bond goes here. */
       platformAddr: Uint8Array;
+      /**
+       * The three keys that may attest the balance snapshot, and how many of
+       * them a root needs. Two of three by default.
+       *
+       * They must be three DISTINCT keys held by three different people: the
+       * contract rejects duplicates, but it cannot tell one person holding
+       * two of them from two people, and a threshold met by one holder is a
+       * threshold in name only.
+       */
+      attestorKeys: [Uint8Array, Uint8Array, Uint8Array];
+      attestThreshold: bigint;
     },
     balanceLeafAmount = 0n,
     balanceProof: MerkleProofEntry[] = [],
@@ -682,6 +693,10 @@ export class NoctisMidnightClient {
         args.hasClaimableBalance,
         args.breakGlassBondMin,
         args.platformAddr,
+        args.attestorKeys[0],
+        args.attestorKeys[1],
+        args.attestorKeys[2],
+        args.attestThreshold,
       ],
     });
     this.ctoGovernance = deployed;
