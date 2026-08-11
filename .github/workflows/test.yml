@@ -42,8 +42,13 @@ jobs:
         run: |
           export PATH="$HOME/.compact/bin:$PATH"
           npm run test --workspace=@noctis/midnight-contracts
-      - name: Run integration tests (imports contracts/midnight's now-compiled output)
-        run: npm run test --workspace=@noctis/integration
+      # With coverage, because integration/vitest.config.ts declares thresholds
+      # and they are only a floor if something checks them. Run without
+      # --coverage, vitest reports the tests and says nothing about the
+      # thresholds at all — which is how coverage was measured here for months
+      # and could only ever drift downward.
+      - name: Run integration tests, with the coverage floor enforced
+        run: npm run test:coverage --workspace=@noctis/integration
       - name: Build integration CLI bundles (esbuild) — catches real bundling breakage tests alone don't
         working-directory: integration
         run: node build.mjs
