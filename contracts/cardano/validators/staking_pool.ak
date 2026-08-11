@@ -581,6 +581,29 @@ fn mock_position_datum() -> StakingPositionDatum {
   }
 }
 
+/// Literal bytes, so this file and the off-chain tree builder cannot drift
+/// apart quietly. Every other test here is relational — deterministic, differs
+/// by amount — and a matching pair of changes on both sides would satisfy all
+/// of them while producing a root no staker's proof verifies against.
+///
+/// Three-way agreement, matching the convention
+/// `hash_dv_leaf_matches_the_offchain_tree_builder` already follows in
+/// bonding_curve_tier_b.ak: computed independently in Python, asserted by
+/// integration/tests/staking-reward-tree.test.ts, and asserted here. A drift
+/// in any one of the three fails a test rather than silently invalidating
+/// every reward proof this pool will ever issue.
+test hash_reward_leaf_matches_the_offchain_tree_builder() {
+  let leaf0 = hash_reward_leaf(#"aa", 100, 0)
+  let leaf1 = hash_reward_leaf(#"bb", 200, 1)
+  let node = hash_reward_node(leaf0, leaf1)
+
+  and {
+    leaf0 == #"0e2108eec355989f4bb37bd237adc7ec31faab5b37a76c1640dead2bcce4e2ae",
+    leaf1 == #"c4dcc65a272337d9ed0a01b1f15d7843dce695ea201ca284e77fe066e4ba80c8",
+    node == #"ad4b68bdf104d08a3822fb303336c6c7239bf3eeb6a19c3c42dacba0fda34a47",
+  }
+}
+
 test hash_reward_leaf_is_deterministic() {
   hash_reward_leaf(#"dd", 100, 0) == hash_reward_leaf(#"dd", 100, 0)
 }
