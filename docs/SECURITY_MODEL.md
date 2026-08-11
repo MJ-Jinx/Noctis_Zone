@@ -59,7 +59,7 @@
 | Front-running bot | Sees pending transactions | Steal MEV |
 | Whale | Large capital, multiple wallets | Exceed 5% cap |
 | Malicious creator | Controls launch config | Rug-pull, self-buy, wash-trade |
-| Compromised governor | Admin key access | Steal fees, cancel launches, forge balance snapshots |
+| Compromised governor | One attesting key | Cancel launches; a single key no longer writes the electorate (see 3.4) |
 | Network observer | Sees all on-chain data | De-anonymize participants |
 | Sybil attacker | Creates many identities | Spam DarkVeil registration, dilute `base_slot` (see 3.8) |
 
@@ -108,9 +108,15 @@
 - All governor actions are on-chain and publicly auditable
 - Fee withdrawal is limited to accumulated amounts (cannot steal user funds)
 - Cancellation triggers bond/principal refunds (participants protected)
-- **CTO vote weight cannot be fabricated by the governor** — `castVote` requires a real Merkle proof against a governor-published `balanceSnapshotRoot`; a compromised governor could publish a *skewed* snapshot (see residual risk), but cannot let any single voter fabricate a `voteWeight` out of nothing
+- **CTO vote weight cannot be fabricated by the governor** — `castVote` requires a real Merkle proof against a published `balanceSnapshotRoot`, so no single voter can fabricate a `voteWeight` out of nothing
+- **The attested facts take two keys, not one.** `balanceSnapshotRoot`, `lastCreatorActivity`/`hasClaimableBalance`, and each tier's `allowlistRoot` are written only after **two of three registered attestors** have called for the same value, in separate transactions, within 24 hours of each other. Approvals are recorded per signer, so one attestor calling twice is one approval; rounds are numbered, so an approval given for a superseded value cannot be counted toward the current one.
+- The signatures cannot be gathered into one call, and that is deliberate. Every witness for a call is produced by whoever builds it, so a threshold checked inside a single circuit would be one party holding every secret — which is why the accumulation is on-chain.
 
-**Residual risk:** A compromised or malicious governor could still publish a biased `balanceSnapshotRoot` favoring a particular vote outcome, or forge `lastCreatorActivity`/`hasClaimableBalance` to manufacture or suppress a silence-lock trigger. Both are real, accepted centralization points — they require an honest governor, same as the original design's admin-key model, just with the specific "vote weight" forgery vector closed. Governor could also cancel a legitimate launch; recovery is re-deploying with a new governor key.
+**Residual risk:** Attestation establishes agreement, not truth. Two attestors who agree on a wrong value write a wrong value, so the facts above still rest on honest off-chain computation — what changed is that no single key decides them. The inputs are public, so a wrong root is provable by anyone after the fact, and the CTO safeguards (1% per-voter cap, 15 distinct voters, 30-day holding period) mean a skewed snapshot has to be broad rather than surgical to matter.
+
+The staking pool's `rewardRoot` is attested by the governor alone, and is published on an automated daily schedule. Its effect is bounded by the contract rather than by the number of signers: cumulative claims can never exceed the pool's real balance, so a wrong root changes how a funded pool is divided and cannot create tokens or reach any other launch. Reporting liveness is likewise a single call — `lastGovernorUpdateTimestamp` records that the governor answered, which is what the break-glass challenge asks, and is deliberately not something a second party can withhold.
+
+A governor can also cancel a legitimate launch; recovery is re-deploying with a new governor key.
 
 ### 3.5 De-Anonymization
 
@@ -153,7 +159,7 @@
 
 **Attack:** A creator's own associates register as ghost DarkVeil participants, increasing `registered_count` and shrinking `base_slot = dv_supply / registered_count` for every legitimate buyer — diluting real participants' allocations without the creator ever touching their own wallet.
 
-**Mitigation:** `contracts/cardano/validators/nhop_challenge.ak` (Tier B only — Tier C is fully build-blocked independent of this feature). Anyone can post a 25 ADA bond and challenge a DarkVeil claimant as a Sybil (within 5 hops of the creator's wallet, 180-day lookback). Deliberately triggers **after** the claimant's `ClaimDarkVeilTokens` call, not at registration — a registrant's real wallet is never publicly linked to DarkVeil until they claim, so triggering earlier would require deanonymizing every registrant just to make them challengeable (see 3.5). Resolution is **governor-adjudicated** — the actual N-hop transaction-graph evidence and the timing of the challenge are both facts a Compact/Aiken script has no way to verify independently (same category as `hasClaimableBalance`/`lastCreatorActivity`, see 5). The contract's on-chain job stays narrow: hold the bond, enforce a mandatory 24-hour defence window against real chain time, and pay out correctly — the challenger's bond back in full if upheld, or split 60/40 treasury/ops if rejected. The window counts from a submission time the chain agreed to: opening a challenge mints a token under the validator's own policy, and that mint is where the recorded time is checked against the transaction's validity range. A challenge that never minted cannot be resolved at all, so the defence window a registrant gets is a real 24 hours rather than whatever the challenger wrote down.
+**Mitigation:** `contracts/cardano/validators/nhop_challenge.ak` (Tier B only — Tier C is fully build-blocked independent of this feature). Anyone can post a 25 ADA bond and challenge a DarkVeil claimant as a Sybil (within 5 hops of the creator's wallet, 180-day lookback). Deliberately triggers **after** the claimant's `ClaimDarkVeilTokens` call, not at registration — a registrant's real wallet is never publicly linked to DarkVeil until they claim, so triggering earlier would require deanonymizing every registrant just to make them challengeable (see 3.5). Resolution is **governor-adjudicated** — the actual N-hop transaction-graph evidence and the timing of the challenge are both facts a Compact/Aiken script has no way to verify independently (same category as `hasClaimableBalance`/`lastCreatorActivity`, see 5). The contract's on-chain job stays narrow: hold the bond, enforce a mandatory 24-hour defence window against real chain time, and pay out correctly — the challenger's bond back in full if upheld, or forfeited to the platform wallet if rejected. The window counts from a submission time the chain agreed to: opening a challenge mints a token under the validator's own policy, and that mint is where the recorded time is checked against the transaction's validity range. A challenge that never minted cannot be resolved at all, so the defence window a registrant gets is a real 24 hours rather than whatever the challenger wrote down.
 
 **Residual risk:** Because the challenge can only fire post-claim, it cannot prevent the dilution itself — the tokens are already delivered and cannot be clawed back on Cardano once claimed. This is accepted by design: the mechanism provides post-fact accountability and a bounty, not real-time prevention. A different griefing vector — an outsider registering enough of a launch's DarkVeil participants to force a failed phase — is bounded economically rather than by this mechanism: every registration locks a NIGHT bond worth $50, and a registrant who then buys nothing forfeits all of it, so the attack is paid for per identity and refunds nothing. The eligibility checks in 3.5 set the floor on what an identity costs to produce in the first place.
 
@@ -284,7 +290,7 @@ This is the same trust model already used for `cto_governance.compact`'s balance
 - **Amount:** 25 ADA, held in a dedicated `nhop_challenge.ak` UTXO per challenge
 - **Purpose:** Anti-spam for Sybil-registration challenges (see 3.8)
 - **Upheld:** bond returned to the challenger in full (a NIGHT bounty is paid separately, off-chain-orchestrated, since a Cardano script cannot send NIGHT directly)
-- **Rejected:** bond forfeited, split 60/40 treasury/ops (same ratio as the NIGHT bond forfeiture, for consistency — not specified by CLAUDE.md for this specific mechanism)
+- **Rejected:** bond forfeited to the platform wallet (the same destination as a forfeited NIGHT bond)
 
 ### Fee Structure
 
@@ -362,7 +368,7 @@ Please report suspected vulnerabilities **privately** rather than opening a publ
 1. Anyone can submit a challenge against a claimed DarkVeil allocation within the 72-hour post-claim window, posting a 25 ADA bond
 2. Governor must wait a mandatory 24-hour defense window (enforced via real chain time) before resolving
 3. Governor adjudicates the underlying N-hop evidence off-chain against real Blockfrost data, then calls `ResolveChallenge{upheld, current_timestamp}`
-4. Upheld: challenger's bond returned in full, NIGHT bounty paid separately off-chain. Rejected: bond forfeited, split 60/40 treasury/ops.
+4. Upheld: challenger's bond returned in full, NIGHT bounty paid separately off-chain. Rejected: bond forfeited to the platform wallet.
 
 ---
 
