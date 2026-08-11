@@ -419,6 +419,20 @@ export ledger snapshotRound: Counter;
 // signer key -> the round they last approved.
 export ledger snapshotApprovals: Map<Bytes<32>, Uint<64>>;
 
+// The creator-activity attestation, same shape and the same attestor set.
+// The PAIR is attested together: two attestors have to agree the creator was
+// last active at time T and does or does not hold a claimable balance, since
+// approving one half of that is not approving the fact.
+export ledger pendingActivityTimestamp: Uint<64>;
+
+export ledger pendingActivityClaimable: Boolean;
+
+export ledger pendingActivityOpenedAt: Uint<64>;
+
+export ledger activityRound: Counter;
+
+export ledger activityApprovals: Map<Bytes<32>, Uint<64>>;
+
 // Fixed platform policy constant — hardcoded in the constructor body, same
 // convention as ballotDuration/silenceThreshold. 30 days (2592000s),
 // matching minPostGradDelay's own value: tight enough that a genuinely
@@ -690,6 +704,9 @@ constructor(
   pendingSnapshotRoot = disclose(pad(32, ""));
   pendingSnapshotTimestamp = disclose(0);
   pendingSnapshotOpenedAt = disclose(0);
+  pendingActivityTimestamp = disclose(0);
+  pendingActivityClaimable = disclose(false);
+  pendingActivityOpenedAt = disclose(0);
 
   const govSecret = getGovernorSecret();
   governorKey = disclose(deriveGovernorKey(govSecret));
@@ -817,9 +834,15 @@ export circuit updateBalanceSnapshot(newRoot: Bytes<32>, currentTimestamp: Uint<
 // (this value never advances) from one who keeps checking in and honestly
 // reporting no change.
 export circuit updateCreatorActivity(timestamp: Uint<64>, hasClaimableBalance_: Boolean, currentTimestamp: Uint<64>): [] {
-  const govSecret = getGovernorSecret();
-  const govKey = deriveGovernorKey(govSecret);
-  assert(disclose(govKey == governorKey), "Only governor can update creator activity");
+  const attestorSecret = getGovernorSecret();
+  const attestorKey = deriveGovernorKey(attestorSecret);
+  const isActivityAttestor1 = disclose(attestorKey == attestorKey1);
+  const isActivityAttestor2 = disclose(attestorKey == attestorKey2);
+  const isActivityAttestor3 = disclose(attestorKey == attestorKey3);
+  assert(
+    isActivityAttestor1 || isActivityAttestor2 || isActivityAttestor3,
+    "Only a registered attestor can update creator activity"
+  );
   // Fix (2026-07-21): currentTimestamp is this call's real wall-clock
   // time and resolveBreakGlassChallenge's "governorResponded" check depends
   // on it being genuine — bind it the same way as every other entry point.
@@ -831,9 +854,46 @@ export circuit updateCreatorActivity(timestamp: Uint<64>, hasClaimableBalance_: 
   assert(disclose(timestamp <= currentTimestamp), "Activity timestamp cannot be in the future");
   assert(disclose(timestamp >= lastCreatorActivity), "Activity timestamp cannot go backwards");
   assert(disclose(currentTimestamp >= lastGovernorUpdateTimestamp), "currentTimestamp cannot go backwards");
-  lastCreatorActivity = disclose(timestamp);
-  hasClaimableBalance = disclose(hasClaimableBalance_);
+
+  // LIVENESS IS NOT AN ATTESTED FACT, and this line must not move below the
+  // threshold check. resolveBreakGlassChallenge reads this field to ask
+  // whether the governor is answering at all, not whether anyone agreed with
+  // them. Gating it on the threshold would let a break-glass challenge
+  // succeed against a governor who did respond, merely because a second
+  // attestor had not yet co-signed — a fresh way to lose the launch,
+  // introduced by the fix meant to protect it.
   lastGovernorUpdateTimestamp = disclose(currentTimestamp);
+
+  // The attested pair, on the same round-and-expiry rules as the snapshot.
+  const activityExpired =
+    currentTimestamp > (pendingActivityOpenedAt + attestExpirySeconds) as Uint<64>;
+  // Disclosed per comparison, same rule the attestor check above follows.
+  const sameTimestamp = disclose(pendingActivityTimestamp == timestamp);
+  const sameClaimable = disclose(pendingActivityClaimable == hasClaimableBalance_);
+  const samePending = sameTimestamp && sameClaimable;
+  if (disclose(!samePending || activityExpired)) {
+    activityRound.increment(1);
+    pendingActivityTimestamp = disclose(timestamp);
+    pendingActivityClaimable = disclose(hasClaimableBalance_);
+    pendingActivityOpenedAt = disclose(currentTimestamp);
+  }
+
+  const activityRoundNow = activityRound.read();
+  activityApprovals.insert(disclose(attestorKey), disclose(activityRoundNow));
+
+  const b1 =
+    activityApprovals.member(attestorKey1) && activityApprovals.lookup(attestorKey1) == activityRoundNow;
+  const b2 =
+    activityApprovals.member(attestorKey2) && activityApprovals.lookup(attestorKey2) == activityRoundNow;
+  const b3 =
+    activityApprovals.member(attestorKey3) && activityApprovals.lookup(attestorKey3) == activityRoundNow;
+  const activityApprovalCount =
+    ((b1 ? 1 : 0) + (b2 ? 1 : 0) + (b3 ? 1 : 0)) as Uint<8>;
+
+  if (disclose(activityApprovalCount >= attestThreshold)) {
+    lastCreatorActivity = disclose(timestamp);
+    hasClaimableBalance = disclose(hasClaimableBalance_);
+  }
 }
 
 // Check if creator has been silent for the silence threshold

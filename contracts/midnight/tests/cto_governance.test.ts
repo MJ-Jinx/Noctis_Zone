@@ -420,9 +420,18 @@ describe('cto_governance.compact — proposal lifecycle gating', () => {
     const { ctx: snapshotCtx } = publishBalanceSnapshot(d, [{ fill: VOTER_FILL, balance: 1n }]);
     // Governor later confirms fees did accrue after all — same call that
     // refreshes lastCreatorActivity also flips hasClaimableBalance.
+    // Two attestors, because the pair (activity time, claimable) is attested
+    // and one signature no longer commits it.
     const pinnedActivityCtx = nextContextAtTime(d.contractAddress, snapshotCtx, 0);
     const rActivity = d.contract.circuits.updateCreatorActivity(pinnedActivityCtx, 0n, true, 0n);
-    const ctx = nextContext(d.contractAddress, rActivity.context);
+    const secondActivity = new Contract<PrivateState>(makeWitnesses(VOTER_FILL, 0n, EMPTY_PROOF, 0n, ATTESTOR_2_FILL));
+    const rActivity2 = secondActivity.circuits.updateCreatorActivity(
+      nextContextAtTime(d.contractAddress, nextContext(d.contractAddress, rActivity.context), 0),
+      0n,
+      true,
+      0n,
+    );
+    const ctx = nextContext(d.contractAddress, rActivity2.context);
     const pinnedCtx = nextContextAtTime(d.contractAddress, ctx, Number(SILENCE_THRESHOLD));
     const r = d.contract.circuits.createProposal(
       pinnedCtx,
@@ -2016,5 +2025,84 @@ describe('cto_governance.compact — threshold attestation on the balance snapsh
     let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT, AT);
     ctx = attest(d, ctx, ATTESTOR_2_FILL, ROOT, AT + ATTEST_EXPIRY_SECONDS - 1n);
     expect(rootOf(d, ctx)).toEqual(ROOT);
+  });
+});
+
+describe('cto_governance.compact — threshold attestation on creator activity', () => {
+  const AT = 0n;
+
+  function attestor(fill: number) {
+    return new Contract<PrivateState>(makeWitnesses(VOTER_FILL, 0n, EMPTY_PROOF, 0n, fill));
+  }
+
+  function attestActivity(
+    d: ReturnType<typeof deploy>,
+    ctx: unknown,
+    fill: number,
+    activityAt: bigint,
+    claimable: boolean,
+    at = AT,
+  ) {
+    const c = fill === ATTESTOR_1_FILL ? d.contract : attestor(fill);
+    const r = c.circuits.updateCreatorActivity(
+      nextContextAtTime(d.contractAddress, ctx as never, Number(at)),
+      activityAt,
+      claimable,
+      at,
+    );
+    return nextContext(d.contractAddress, r.context);
+  }
+
+  const read = (ctx: unknown) =>
+    ledger((ctx as { currentQueryContext: { state: unknown } }).currentQueryContext.state as never);
+
+  it('does not accept the attested pair on one signature', () => {
+    const d = deploy(CREATOR_VOTE_CAP, DEFAULT_MIN_VOTER_COUNT, false);
+    const ctx = attestActivity(d, d.ctx, ATTESTOR_1_FILL, 0n, true);
+    expect(read(ctx).hasClaimableBalance).toBe(false);
+  });
+
+  it('accepts it on the second, from a different attestor', () => {
+    const d = deploy(CREATOR_VOTE_CAP, DEFAULT_MIN_VOTER_COUNT, false);
+    let ctx = attestActivity(d, d.ctx, ATTESTOR_1_FILL, 0n, true);
+    ctx = attestActivity(d, ctx, ATTESTOR_2_FILL, 0n, true);
+    expect(read(ctx).hasClaimableBalance).toBe(true);
+  });
+
+  it('treats the timestamp and the claimable flag as ONE fact', () => {
+    // Two attestors who agree on the time but not on whether a balance
+    // exists have not agreed. The second call opens a new round rather than
+    // completing the first.
+    const d = deploy(CREATOR_VOTE_CAP, DEFAULT_MIN_VOTER_COUNT, false);
+    let ctx = attestActivity(d, d.ctx, ATTESTOR_1_FILL, 0n, true);
+    ctx = attestActivity(d, ctx, ATTESTOR_2_FILL, 0n, false);
+    expect(read(ctx).hasClaimableBalance).toBe(false);
+  });
+
+  // The one that stops this fix creating a worse problem than it solves.
+  it('records the governor as responsive on ONE call, before any threshold', () => {
+    // resolveBreakGlassChallenge asks whether the governor is answering at
+    // all — not whether anyone co-signed them. If this waited for the
+    // threshold, a governor who replied on time would still read as silent
+    // and could lose the launch to a break-glass challenge.
+    const d = deploy(CREATOR_VOTE_CAP, DEFAULT_MIN_VOTER_COUNT, false);
+    const before = read(d.ctx).lastGovernorUpdateTimestamp;
+    const ctx = attestActivity(d, d.ctx, ATTESTOR_1_FILL, 0n, true, 500n);
+    expect(read(ctx).lastGovernorUpdateTimestamp).toBe(500n);
+    expect(read(ctx).lastGovernorUpdateTimestamp).not.toBe(before);
+    // ...and the attested pair still has NOT been accepted.
+    expect(read(ctx).hasClaimableBalance).toBe(false);
+  });
+
+  it('refuses a caller who is not an attestor', () => {
+    const d = deploy(CREATOR_VOTE_CAP, DEFAULT_MIN_VOTER_COUNT, false);
+    expect(() => attestActivity(d, d.ctx, 91, 0n, true)).toThrow(/registered attestor/i);
+  });
+
+  it('lets a partial approval expire', () => {
+    const d = deploy(CREATOR_VOTE_CAP, DEFAULT_MIN_VOTER_COUNT, false);
+    let ctx = attestActivity(d, d.ctx, ATTESTOR_1_FILL, 0n, true, 100n);
+    ctx = attestActivity(d, ctx, ATTESTOR_2_FILL, 0n, true, 100n + ATTEST_EXPIRY_SECONDS + 1n);
+    expect(read(ctx).hasClaimableBalance).toBe(false);
   });
 });
