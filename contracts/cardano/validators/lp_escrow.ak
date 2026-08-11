@@ -139,7 +139,19 @@ pub type LpEscrowRedeemer {
   CancelPendingDexChange
   /// Migrate LP to a whitelisted DEX after lock expiry. Either governor or
   /// community wallet (if CTO triggered) can call this.
-  Migrate { target_dex_credential: Credential, current_timestamp: Int }
+  ///
+  /// The replacement position is DECLARED here rather than derived. A new
+  /// pool's LP token identity is minted by that DEX and cannot be known when
+  /// this datum is authored, so the transaction states what it is returning
+  /// and the validator holds it to that statement — the escrow's continuing
+  /// output must really carry it, and the continuing datum must name it.
+  Migrate {
+    target_dex_credential: Credential,
+    current_timestamp: Int,
+    new_lp_policy_id: PolicyId,
+    new_lp_name: AssetName,
+    new_lp_amount: Int,
+  }
   /// Trigger CTO — redirect control to community wallet
   TriggerCTO { community_wallet_hash: VerificationKeyHash }
   /// Dissolve CTO — return control to governor
@@ -386,6 +398,35 @@ fn single_own_utxo(self: Transaction, own_address: Address) -> Bool {
 /// none of which are meant to move the locked position at all (only
 /// `SealLock`/`Migrate`/`HarvestFees` legitimately touch real value, and
 /// each already has its own dedicated, real value-movement check).
+/// The escrow's own continuing output really holds the replacement position
+/// the migration declared.
+///
+/// A migration moves the LP out; this is what requires something to come
+/// back. Without it the escrow keeps only its thread NFT and a datum still
+/// naming the position it just sent away — a record of a holding it does not
+/// have, which is the difference between moving a position and releasing one.
+///
+/// The identity is taken from the redeemer because a new pool's LP token is
+/// minted by the DEX and cannot be known in advance. That makes this a check
+/// on the escrow's real value against a declaration, not proof of where the
+/// token came from; the datum's honesty is what it buys.
+fn replacement_position_returned(
+  self: Transaction,
+  own_ref: OutputReference,
+  new_lp_policy_id: PolicyId,
+  new_lp_name: AssetName,
+  new_lp_amount: Int,
+) -> Bool {
+  expect Some(own_input) =
+    list.find(self.inputs, fn(input) { input.output_reference == own_ref })
+  let own_address = own_input.output.address
+  when list.find(self.outputs, fn(output) { output.address == own_address }) is {
+    None -> False
+    Some(own_output) ->
+      assets.quantity_of(own_output.value, new_lp_policy_id, new_lp_name) == new_lp_amount
+  }
+}
+
 fn lp_value_unchanged(self: Transaction, own_ref: OutputReference) -> Bool {
   expect Some(own_input) =
     list.find(self.inputs, fn(input) { input.output_reference == own_ref })
@@ -646,7 +687,13 @@ validator lp_escrow {
         }
       }
 
-      Migrate { target_dex_credential, current_timestamp } -> {
+      Migrate {
+        target_dex_credential,
+        current_timestamp,
+        new_lp_policy_id,
+        new_lp_name,
+        new_lp_amount,
+      } -> {
         // The position moves to a new DEX and stays escrowed: the LP tokens
         // and the escrow's lovelace go to the target, while this script keeps
         // a continuing output carrying the thread NFT and a datum recording
@@ -682,13 +729,29 @@ validator lp_escrow {
             target_dex_credential,
             assets.lovelace_of(own_input.output.value),
           ),
+          // A position must come back. The escrow's continuing output has to
+          // really hold the replacement the redeemer declared, and a zero
+          // amount is not a position — without that bound, declaring zero
+          // would satisfy the check while nothing returned.
+          new_lp_amount > 0,
+          replacement_position_returned(
+            self,
+            own_ref,
+            new_lp_policy_id,
+            new_lp_name,
+            new_lp_amount,
+          ),
           // Everything about the position is carried forward except the
-          // record of when it moved. Without this the continuing datum is
-          // unconstrained: it could keep a stale migration timestamp and
-          // migrate again immediately, or rewrite the whitelist, the fee
-          // recipient or the governor on the way past.
+          // record of when it moved and the identity of what is now held.
+          // Without this the continuing datum is unconstrained: it could keep
+          // a stale migration timestamp and migrate again immediately, or
+          // rewrite the whitelist, the fee recipient or the governor on the
+          // way past — and it would go on naming the position just sent away.
           new_datum == LpEscrowDatum {
             ..datum,
+            lp_token_policy_id: new_lp_policy_id,
+            lp_token_name: new_lp_name,
+            lp_token_amount: new_lp_amount,
             last_migration_timestamp: current_timestamp,
           },
         }
@@ -813,6 +876,26 @@ validator lp_escrow {
 /// must now carry, matching mock_datum's launch_id (#"01") and
 /// thread_nft_policy (#"c0ffee"). Derived through thread_asset_name rather
 /// than hard-coded so a scheme change cannot leave these silently passing.
+/// The replacement position a migration declares it is returning. Arbitrary
+/// values: the validator checks the escrow really holds what was declared,
+/// not where the token came from.
+const mock_new_lp_policy: ByteArray = #"44"
+
+const mock_new_lp_name: ByteArray = "lp-v2"
+
+const mock_new_lp_amount: Int = 500
+
+/// A continuing output's value for a migration: the thread NFT plus the
+/// declared replacement position. Every migration fixture uses this, so a
+/// rejection test still fails for its own single reason rather than also
+/// failing to return a position.
+fn mock_thread_nft_with_new_lp() -> assets.Value {
+  assets.merge(
+    mock_thread_nft(),
+    assets.from_asset(mock_new_lp_policy, mock_new_lp_name, mock_new_lp_amount),
+  )
+}
+
 fn mock_thread_nft() -> assets.Value {
   assets.from_asset(
     #"c0ffee",
@@ -1239,11 +1322,16 @@ test migrate_succeeds_after_expiry_to_whitelisted_dex() {
   // The escrow keeps a continuing output, and its datum has to record when
   // the position moved — that record is what the cooldown is measured from.
   let migrated_datum =
-    LpEscrowDatum { ..datum, last_migration_timestamp: 1000 + min_lock_duration }
+    LpEscrowDatum {
+      ..datum,
+      lp_token_policy_id: mock_new_lp_policy,
+      lp_token_name: mock_new_lp_name,
+      lp_token_amount: mock_new_lp_amount,
+      last_migration_timestamp: 1000 + min_lock_duration }
   let thread_continuing_output =
     Output {
       address: own_address,
-      value: mock_thread_nft(),
+      value: mock_thread_nft_with_new_lp(),
       datum: InlineDatum(migrated_datum),
       reference_script: None,
     }
@@ -1257,11 +1345,145 @@ test migrate_succeeds_after_expiry_to_whitelisted_dex() {
     }
   let redeemer =
     Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
       target_dex_credential: target_dex.payment_credential,
       current_timestamp: 1000 + min_lock_duration,
     }
 
   lp_escrow.spend(Some(datum), redeemer, own_ref, self)
+}
+
+/// The passing migration with ONE thing changed each time: nothing comes
+/// back, a zero position is declared, the escrow holds less than declared,
+/// or the datum goes on naming the position that was sent away. Each is the
+/// accepted transaction plus a single delta, so a failure names one cause.
+fn migrate_fixture(
+  continuing_value: assets.Value,
+  continuing_datum: LpEscrowDatum,
+  declared_amount: Int,
+) -> Bool {
+  let target_dex = from_script(#"aa")
+  let datum =
+    LpEscrowDatum {
+      ..mock_datum(Locked, 1000),
+      dex_whitelist: [target_dex.payment_credential],
+    }
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_thread_nft(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let migration_output =
+    Output {
+      address: target_dex,
+      value: assets.from_asset(#"33", "lp", 1000),
+      datum: transaction.NoDatum,
+      reference_script: None,
+    }
+  let thread_continuing_output =
+    Output {
+      address: own_address,
+      value: continuing_value,
+      datum: InlineDatum(continuing_datum),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [migration_output, thread_continuing_output],
+      extra_signatories: [#"22"],
+      validity_range: interval.between(1000 + min_lock_duration, 1000 + min_lock_duration + 100),
+    }
+  let redeemer =
+    Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: declared_amount,
+      target_dex_credential: target_dex.payment_credential,
+      current_timestamp: 1000 + min_lock_duration,
+    }
+
+  lp_escrow.spend(Some(datum), redeemer, own_ref, self)
+}
+
+/// The datum a correct migration leaves behind: it names the position now
+/// held, not the one just sent away.
+fn migrated_datum_naming(policy: ByteArray, name: ByteArray, amount: Int) -> LpEscrowDatum {
+  let target_dex = from_script(#"aa")
+  LpEscrowDatum {
+    ..mock_datum(Locked, 1000),
+    dex_whitelist: [target_dex.payment_credential],
+    lp_token_policy_id: policy,
+    lp_token_name: name,
+    lp_token_amount: amount,
+    last_migration_timestamp: 1000 + min_lock_duration,
+  }
+}
+
+test migrate_fixture_is_accepted_as_written() {
+  // The positive control. Without it the three rejections below could all be
+  // failing for some unrelated reason in the fixture itself.
+  migrate_fixture(
+    mock_thread_nft_with_new_lp(),
+    migrated_datum_naming(mock_new_lp_policy, mock_new_lp_name, mock_new_lp_amount),
+    mock_new_lp_amount,
+  )
+}
+
+test migrate_rejects_when_no_position_comes_back() {
+  // The escrow keeps its thread NFT and nothing else — the shape a migration
+  // that sends the position out and returns nothing would produce.
+  !migrate_fixture(
+    mock_thread_nft(),
+    migrated_datum_naming(mock_new_lp_policy, mock_new_lp_name, mock_new_lp_amount),
+    mock_new_lp_amount,
+  )
+}
+
+test migrate_rejects_a_declared_position_of_zero() {
+  // Declaring nothing would otherwise satisfy a possession check trivially:
+  // the escrow does hold zero of any token it does not have.
+  !migrate_fixture(
+    mock_thread_nft(),
+    migrated_datum_naming(mock_new_lp_policy, mock_new_lp_name, 0),
+    0,
+  )
+}
+
+test migrate_rejects_holding_less_than_was_declared() {
+  !migrate_fixture(
+    assets.merge(
+      mock_thread_nft(),
+      assets.from_asset(mock_new_lp_policy, mock_new_lp_name, mock_new_lp_amount - 1),
+    ),
+    migrated_datum_naming(mock_new_lp_policy, mock_new_lp_name, mock_new_lp_amount),
+    mock_new_lp_amount,
+  )
+}
+
+test migrate_rejects_a_datum_still_naming_the_old_position() {
+  // The position really came back; the record did not follow it. An escrow
+  // whose datum names a holding it does not have is the state this closes.
+  !migrate_fixture(
+    mock_thread_nft_with_new_lp(),
+    LpEscrowDatum {
+      ..migrated_datum_naming(mock_new_lp_policy, mock_new_lp_name, mock_new_lp_amount),
+      lp_token_policy_id: #"33",
+      lp_token_name: "lp",
+      lp_token_amount: 1000,
+    },
+    mock_new_lp_amount,
+  )
 }
 
 test migrate_rejects_current_timestamp_outside_validity_range() {
@@ -1302,6 +1524,9 @@ test migrate_rejects_current_timestamp_outside_validity_range() {
     }
   let redeemer =
     Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
       target_dex_credential: target_dex.payment_credential,
       current_timestamp: min_lock_duration,
     }
@@ -1344,6 +1569,9 @@ test migrate_fails_before_lock_expiry() {
     }
   let redeemer =
     Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
       target_dex_credential: target_dex.payment_credential,
       current_timestamp: min_lock_duration - 1,
     }
@@ -1383,6 +1611,9 @@ test migrate_fails_to_non_whitelisted_dex() {
     }
   let redeemer =
     Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
       target_dex_credential: target_dex.payment_credential,
       current_timestamp: min_lock_duration,
     }
@@ -1669,11 +1900,16 @@ test migrate_succeeds_via_community_wallet_after_cto() {
   // The escrow keeps a continuing output, and its datum has to record when
   // the position moved — that record is what the cooldown is measured from.
   let migrated_datum =
-    LpEscrowDatum { ..datum, last_migration_timestamp: 1000 + min_lock_duration }
+    LpEscrowDatum {
+      ..datum,
+      lp_token_policy_id: mock_new_lp_policy,
+      lp_token_name: mock_new_lp_name,
+      lp_token_amount: mock_new_lp_amount,
+      last_migration_timestamp: 1000 + min_lock_duration }
   let thread_continuing_output =
     Output {
       address: own_address,
-      value: mock_thread_nft(),
+      value: mock_thread_nft_with_new_lp(),
       datum: InlineDatum(migrated_datum),
       reference_script: None,
     }
@@ -1688,6 +1924,9 @@ test migrate_succeeds_via_community_wallet_after_cto() {
     }
   let redeemer =
     Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
       target_dex_credential: target_dex.payment_credential,
       current_timestamp: 1000 + min_lock_duration,
     }
@@ -2800,7 +3039,13 @@ test migrate_rejects_ada_diversion() {
       extra_signatories: [#"22"],
     }
   let redeemer =
-    Migrate { target_dex_credential: target_dex.payment_credential, current_timestamp: min_lock_duration }
+    Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
+      target_dex_credential: target_dex.payment_credential,
+      current_timestamp: min_lock_duration,
+    }
 
   !lp_escrow.spend(Some(datum), redeemer, own_ref, self)
 }
@@ -2887,11 +3132,16 @@ test migrate_rejects_a_position_that_was_never_sealed() {
   // The escrow keeps a continuing output, and its datum has to record when
   // the position moved — that record is what the cooldown is measured from.
   let migrated_datum =
-    LpEscrowDatum { ..datum, last_migration_timestamp: 1000 + min_lock_duration }
+    LpEscrowDatum {
+      ..datum,
+      lp_token_policy_id: mock_new_lp_policy,
+      lp_token_name: mock_new_lp_name,
+      lp_token_amount: mock_new_lp_amount,
+      last_migration_timestamp: 1000 + min_lock_duration }
   let thread_continuing_output =
     Output {
       address: own_address,
-      value: mock_thread_nft(),
+      value: mock_thread_nft_with_new_lp(),
       datum: InlineDatum(migrated_datum),
       reference_script: None,
     }
@@ -2905,6 +3155,9 @@ test migrate_rejects_a_position_that_was_never_sealed() {
     }
   let redeemer =
     Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
       target_dex_credential: target_dex.payment_credential,
       current_timestamp: 1000 + min_lock_duration,
     }
@@ -2946,11 +3199,16 @@ test migrate_rejects_a_second_move_inside_the_cooldown() {
   // The escrow keeps a continuing output, and its datum has to record when
   // the position moved — that record is what the cooldown is measured from.
   let migrated_datum =
-    LpEscrowDatum { ..datum, last_migration_timestamp: 1000 + min_lock_duration }
+    LpEscrowDatum {
+      ..datum,
+      lp_token_policy_id: mock_new_lp_policy,
+      lp_token_name: mock_new_lp_name,
+      lp_token_amount: mock_new_lp_amount,
+      last_migration_timestamp: 1000 + min_lock_duration }
   let thread_continuing_output =
     Output {
       address: own_address,
-      value: mock_thread_nft(),
+      value: mock_thread_nft_with_new_lp(),
       datum: InlineDatum(migrated_datum),
       reference_script: None,
     }
@@ -2964,6 +3222,9 @@ test migrate_rejects_a_second_move_inside_the_cooldown() {
     }
   let redeemer =
     Migrate {
+      new_lp_policy_id: mock_new_lp_policy,
+      new_lp_name: mock_new_lp_name,
+      new_lp_amount: mock_new_lp_amount,
       target_dex_credential: target_dex.payment_credential,
       current_timestamp: 1000 + min_lock_duration,
     }

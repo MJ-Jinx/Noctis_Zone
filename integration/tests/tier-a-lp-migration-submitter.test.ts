@@ -27,6 +27,7 @@ vi.mock('@lucid-evolution/lucid', async (importOriginal) => {
 });
 
 import { CML, type Constr, credentialToAddress, Lucid } from '@lucid-evolution/lucid';
+import { LP_ESCROW_REDEEMER } from '../redeemer-indices.js';
 import { TierALpMigrationSubmitter } from '../tier-a-lp-migration-submitter.js';
 import { threadNftAssetName } from '../tier-a-schemas.js';
 
@@ -340,6 +341,63 @@ describe('TierALpMigrationSubmitter.migrateToMinswapPool — real crypto + pool 
     const MAX_LIQUIDITY = 9_223_372_036_854_775_807n;
     const expectedRemaining = MAX_LIQUIDITY - (result.initialLiquidity - 10n);
     expect(poolValue[lpAssetUnit]).toBe(expectedRemaining);
+  });
+
+  // The escrow's own continuing output. Its absence is not a cosmetic
+  // omission: thread_nft_intact applies to EVERY redeemer and looks for the
+  // launch's thread NFT on an output back at the escrow's address, so a
+  // migration without one cannot validate whatever else it gets right. This
+  // transaction built none until 2026-08-11, and none of the assertions here
+  // looked for one, which is why nothing said so.
+  it('returns the replacement position to the escrow, with its thread NFT', async () => {
+    const { builder, payToContractCalls } = makeFakeTxBuilder();
+    const submitter = makeSubmitter(builder, {
+      lpUtxos: [{ datum: lpDatum(), assets: { lovelace: 10_000_000n, [TOKEN_UNIT]: 1_000_000n } }],
+      factoryUtxos: [realFactoryUtxo()],
+    });
+
+    const result = await submitter.migrateToMinswapPool(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 2_000_000_000);
+    const lpAssetUnit = MINSWAP_CONFIG.lpPolicyId + result.lpAssetNameHex;
+    const escrowLpAmount = result.initialLiquidity - 10n;
+
+    const escrowOut = payToContractCalls.find(
+      (c) => c[0] === (submitter as never as { lpEscrowAddress: string }).lpEscrowAddress,
+    );
+    expect(escrowOut, 'no continuing output back to the escrow').toBeDefined();
+
+    const value = (escrowOut as unknown[])[2] as Record<string, bigint>;
+    expect(value[THREAD_UNIT]).toBe(1n);
+    expect(value[lpAssetUnit]).toBe(escrowLpAmount);
+  });
+
+  // Declared and held have to be the same number. They are computed once and
+  // used twice — this is what stops the two drifting apart, which the node
+  // would otherwise be the first to notice.
+  it('declares in the redeemer exactly the position it returns', async () => {
+    const { builder, collectFromCalls, payToContractCalls } = makeFakeTxBuilder();
+    const submitter = makeSubmitter(builder, {
+      lpUtxos: [{ datum: lpDatum(), assets: { lovelace: 10_000_000n, [TOKEN_UNIT]: 1_000_000n } }],
+      factoryUtxos: [realFactoryUtxo()],
+    });
+
+    const result = await submitter.migrateToMinswapPool(REAL_EXTENDED_KEY_HEX, GOVERNOR_ADDR, 2_000_000_000);
+    const lpAssetUnit = MINSWAP_CONFIG.lpPolicyId + result.lpAssetNameHex;
+    const escrowLpAmount = result.initialLiquidity - 10n;
+
+    // Data.to is mocked in this suite, so the redeemer arrives as the Constr
+    // itself rather than as CBOR — same access the sibling redeemer test uses.
+    const decoded = collectFromCalls[0][1] as Constr<unknown>;
+    expect(decoded.index).toBe(LP_ESCROW_REDEEMER.Migrate);
+    // [target_dex_credential, current_timestamp, policy, name, amount]
+    expect(decoded.fields[2]).toBe(MINSWAP_CONFIG.lpPolicyId);
+    expect(decoded.fields[3]).toBe(result.lpAssetNameHex);
+    expect(decoded.fields[4]).toBe(escrowLpAmount);
+
+    const escrowOut = payToContractCalls.find(
+      (c) => c[0] === (submitter as never as { lpEscrowAddress: string }).lpEscrowAddress,
+    );
+    const value = (escrowOut as unknown[])[2] as Record<string, bigint>;
+    expect(value[lpAssetUnit]).toBe(decoded.fields[4]);
   });
 
   it('mints exactly MAX_LIQUIDITY LP + 1 factoryAsset + 1 poolAuthenAsset', async () => {

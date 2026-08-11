@@ -142,7 +142,7 @@ const RECORDED: Record<string, number> = {
   cto_sybil_challenge: 2_201,
   curve_order: 1_775,
   launch_token_policy: 419,
-  lp_escrow: 7_429,
+  lp_escrow: 7_628,
   nhop_challenge: 2_157,
   staking_pool: 4_069,
   token_metadata: 4_581,

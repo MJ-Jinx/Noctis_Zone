@@ -26,12 +26,20 @@
 // `crypto.createHash('sha3-256')` implements the same real algorithm
 // natively — used directly here instead of pulling in the `sha3` package.
 //
-// migration_output_ok (lp_escrow.ak's ONLY value-movement check for
-// Migrate) verified to check SOLELY for a correctly-valued token output at
-// `target_dex_credential` — no lovelace/ADA check at all — so the locked
-// ADA is free to be routed directly into Minswap's own pool-output
-// construction in the same transaction; nothing in Noctis's own contract
-// constrains where it lands beyond that.
+// What lp_escrow.ak requires of this transaction, re-read against the
+// validator rather than carried over — the note that used to sit here
+// described neither of the checks below and had gone stale twice:
+//
+//   - `migration_output_ok` wants the LP tokens AND at least the escrow's own
+//     real locked lovelace at `target_dex_credential`. The locked ADA does go
+//     into Minswap's pool output, which satisfies this; it is not unconstrained.
+//   - `replacement_position_returned` wants the position that comes back to
+//     really be in the escrow's own continuing output, in the amount the
+//     redeemer declares, with the continuing datum naming it.
+//   - `thread_nft_intact` applies to EVERY redeemer and wants that continuing
+//     output to carry the launch's thread NFT. This transaction built no
+//     continuing output at all until 2026-08-11, so it could not have
+//     validated whatever else it got right.
 //
 // Both Minswap's factory validator (spend) and authen minting policy
 // (mint) must be embedded IN FULL here, not referenced — confirmed via the
@@ -59,7 +67,7 @@ import type {
 import { Blockfrost, CML, Constr, Data, Lucid, validatorToAddress } from '@lucid-evolution/lucid';
 import { selectLaunchUtxo } from './launch-utxo-lookup.js';
 import { LP_ESCROW_REDEEMER } from './redeemer-indices.js';
-import { type LpEscrowDatumData, LpEscrowDatumSchema } from './tier-a-schemas.js';
+import { type LpEscrowDatumData, LpEscrowDatumSchema, threadNftAssetName } from './tier-a-schemas.js';
 
 function fromHex(hex: string): Uint8Array {
   return new Uint8Array(Buffer.from(hex, 'hex'));
@@ -316,12 +324,43 @@ export class TierALpMigrationSubmitter {
     const factoryRedeemer = new Constr(0, [assetAData, assetBData]); // FactoryV2.Redeemer{assetA, assetB}
     const authenMintRedeemer = new Constr(1, []); // matches createPoolTx()'s literal Constr(1, [])
 
+    // ---- The replacement position ----
+    // Minswap keeps `remainingLiquidity` in the pool and issues the rest to
+    // the provider; that share is what comes back here. The escrow declares
+    // it in the redeemer and must then really hold it, so this figure and the
+    // continuing output below cannot drift apart without the node objecting.
+    const escrowLpAmount = initialLiquidity - MINIMUM_LIQUIDITY;
+
     // ---- lp_escrow's Migrate redeemer ----
     const targetDexCredentialData = new Constr(1, [this.config.minswap.poolScriptHash]); // ScriptCredential
     const migrateRedeemer = new Constr(LP_ESCROW_REDEEMER.Migrate, [
       targetDexCredentialData,
       BigInt(currentTimestampMs),
+      this.config.minswap.lpPolicyId,
+      lpAssetNameHex,
+      escrowLpAmount,
     ]);
+
+    // ---- The escrow's own continuing output ----
+    // Required on EVERY spend, not just this one: the validator authenticates
+    // its state by the launch's thread NFT and looks for it on an output back
+    // at its own address. This transaction previously built no such output at
+    // all, so it could not have validated whatever else it got right.
+    //
+    // The datum records what the escrow now holds. Carrying the old identity
+    // forward would leave it naming a position it had just sent away.
+    const migratedDatum: LpEscrowDatumData = {
+      ...lpDatum,
+      lp_token_policy_id: this.config.minswap.lpPolicyId,
+      lp_token_name: lpAssetNameHex,
+      lp_token_amount: escrowLpAmount,
+      last_migration_timestamp: BigInt(currentTimestampMs),
+    };
+    const threadUnit = this.config.threadNftPolicyId + threadNftAssetName('lpEscrow', this.config.launchIdHex);
+    const escrowContinuingValue: Assets = {
+      [threadUnit]: 1n,
+      [lpAssetUnit]: escrowLpAmount,
+    };
 
     // Capped at max_validity_range_width (600,000ms); 240s each way.
     const validFrom = currentTimestampMs - 240_000;
@@ -363,6 +402,11 @@ export class TierALpMigrationSubmitter {
           value: Data.to<FactoryDatumData>(newFactoryDatum2, FactoryDatumShape),
         },
         { [this.config.minswap.factoryAsset]: 1n },
+      )
+      .pay.ToContract(
+        this.lpEscrowAddress,
+        { kind: 'inline', value: Data.to<LpEscrowDatumData>(migratedDatum, LpEscrowDatumSchema) },
+        escrowContinuingValue,
       )
       .attachMetadata(674, { msg: ['SDK Minswap: Create Pool'] })
       .addSigner(governorAddress)

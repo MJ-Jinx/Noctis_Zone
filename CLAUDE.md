@@ -440,6 +440,21 @@ These are **two entirely different income mechanisms**. Do not conflate them in 
 - During migration, underlying ADA + tokens never appear in any wallet UTxO
 - New LP tokens go directly back into escrow after migration
 
+> **What `Migrate` enforces (2026-08-11).** A migration names the replacement
+> position in the redeemer, and the validator holds it to that: the escrow's
+> own continuing output must really carry that token in that amount, the amount
+> must be positive, and the continuing datum must record it — so the escrow's
+> record always names the position it actually holds. Together with the
+> existing checks (sealed lock, real expiry, the 90-day cooldown, a narrow
+> validity range, whitelist membership, and governor-or-CTO authorisation),
+> a migration moves the position between whitelisted DEXes and cannot end with
+> the escrow holding nothing.
+>
+> The identity is declared rather than derived because a new pool's LP token is
+> minted by that DEX and cannot be known when the datum is authored. Verifying
+> that the returned token is genuinely the target DEX's LP token for that pool
+> needs per-DEX knowledge, and arrives with the DEX integration work.
+
 > **Resolution (2026-07-10):** a new `HarvestFees` redeemer lets Stream B trading fees reach `fee_recipient` (the creator, or the community wallet once CTO is triggered — same redirect rule as everywhere else) WITHOUT touching the locked LP position, closing the gap between this file's "no `withdraw`, ever" invariant and Stream B's "paid directly to fee_recipient" description — the fee payout has to route through this contract since the LP itself lives here, a script address, not a wallet. **Deliberately DEX-agnostic and narrow:** the redeemer only verifies its OWN two invariants (the locked `lp_token_amount` is byte-for-byte unchanged; the correct recipient actually receives the harvested lovelace in the same transaction) and does not model or verify any specific DEX's real harvest call — that remains genuinely unconfirmed per-DEX (CSwap/Minswap/Splash/Spectrum), an open sub-question this always had. Permissionless, same "the invariant is the authorization" idiom as `ExpireCurve`/`ExecuteDexChange`/`Graduate` — nobody can gain anything by calling it incorrectly since the LP position literally cannot move.
 
 ### Migration Whitelist (updatable — team multisig + 72h public notice)
