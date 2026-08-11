@@ -183,7 +183,7 @@ platform's drops tenfold. Trading continues on Noctis rather than being handed t
 which is what makes the 0.1% pool share possible — snek.fun burns its LP, so their
 equivalent slice deepens a pool nobody can claim.
 
-**Fee split verification:** 1.0 + 0.6 + 0.4 = 2.0 ✓
+**Fee split verification:** 0.5 creator + 1.0 platform = 1.5 ✓
 
 **Tier A/B:** The ops wallet allocation covers team operational costs and funds periodic NIGHT purchases to maintain sufficient DUST. The platform treasury accumulates stablecoins — **confirmed 2026-07-10: USDM** (native Cardano stablecoin, no bridge risk — was already the documented default pending confirmation). No contract change needed: `treasury.compact` treats stablecoin conversion generically (an off-chain swap step), the same "no code change needed" status as a couple of other operational-detail items. Still genuinely open, narrower than the stablecoin choice itself: the exact DEX swap mechanism from ADA → USDM, custody wallet format, and on-chain disclosure format — operational deployment details, not separately tracked as their own issue yet.
 

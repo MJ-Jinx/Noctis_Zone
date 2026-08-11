@@ -5,7 +5,7 @@
 // Tier A's counterpart to contracts/midnight/vesting.compact (Tier B/C).
 // Controls the release schedule of the creator's TOKEN allocation (5-10% of
 // total supply) — separate from bonding_curve.ak's fee-claim circuits
-// (ClaimCreatorFees/ClaimTreasuryFees/ClaimOpsFees), which handle the
+// (ClaimCreatorFees), which handles the
 // creator's ADA trade-fee income. CLAUDE.md is explicit that these are two
 // distinct income streams and must never be conflated ("Two income streams
 // for creators are distinct... never show them as one number") — this

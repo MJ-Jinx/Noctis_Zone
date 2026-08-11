@@ -166,7 +166,9 @@ struct FeeConfig {
   creatorBps: Uint<16>;   // 50  = 0.5%
   // One platform line, not a treasury slice plus an ops slice.
   platformBps: Uint<16>;  // 100 = 1.0%
-  totalBps: Uint<16>;     // 200 = 2.0%
+  // A total is deliberately not stored. It would be a second place for the
+  // same fact to live, and the one that used to sit here was never read and
+  // disagreed with the two fields above.
 }
 
 // Buy order record for tracking
@@ -964,11 +966,10 @@ constructor(
   maxPrice = disclose(maxPrice_);
   curveSupply = disclose(curveSupply_);
 
-  // Set fee config: 1.0% creator + 0.6% treasury + 0.4% ops = 2.0% total
+  // 0.5% creator + 1.0% platform = 1.5% of a curve trade.
   feeConfig = disclose(FeeConfig {
     creatorBps: 50,
-    platformBps: 100,
-    totalBps: 200
+    platformBps: 100
   });
 
   // Set governor from deployer's secret (ONE derivation for the whole
