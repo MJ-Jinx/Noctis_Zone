@@ -581,6 +581,21 @@ const readDvPurchasesCliConfig = {
 // depends on @midnight-ntwrk/wallet-sdk-* (HD derivation, WalletFacade)
 // plus midnight-js-contracts, same WASM dependency (ledger-v8) as
 // readDvPurchasesCliConfig, no package-specific WASM of its own.
+// Deploys a Tier B eligibility gate. Same packages:external treatment as
+// publishAllowlistRootCliConfig below and for the same reason — it pulls the
+// identical Midnight dependency tree, so it cannot be bundled either.
+const deployEligibilityGateCliConfig = {
+	entryPoints: [join(__dirname, "cli/deploy-eligibility-gate.ts")],
+	outfile: join(__dirname, "cli/dist/deploy-eligibility-gate.mjs"),
+	bundle: true,
+	platform: "node",
+	packages: "external",
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+};
+
 const publishAllowlistRootCliConfig = {
 	entryPoints: [join(__dirname, "cli/publish-allowlist-root.ts")],
 	outfile: join(__dirname, "cli/dist/publish-allowlist-root.mjs"),
@@ -877,6 +892,7 @@ async function run() {
 		anchorDvAllocationRootCliConfig,
 		readDvPurchasesCliConfig,
 		publishAllowlistRootCliConfig,
+		deployEligibilityGateCliConfig,
 		tierBCurveActionCliConfig,
 		resolveAddressVkhCliConfig,
 		stakeActionCliConfig,
