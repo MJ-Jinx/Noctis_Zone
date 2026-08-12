@@ -1183,6 +1183,13 @@ validator bonding_curve {
           list.has(self.extra_signatories, datum.governor_pub_key_hash),
           datum.curve_state == Inactive,
           interval.contains(self.validity_range, current_timestamp),
+          // `phase_started_at` written here is the origin `ExpireCurve`
+          // measures its 90-day backstop from, so this timestamp decides when
+          // a stalled curve becomes expirable. Bounding the declared range's
+          // width pins it to real chain time, which keeps the permissionless
+          // backstop's deadline outside the control of the party who starts
+          // the clock. Tier B's equivalent arm carries the same bound.
+          validity_range_is_narrow(self.validity_range, max_validity_range_width),
           new_datum == BondingCurveDatum {
             ..datum,
             curve_state: Active,
@@ -2139,6 +2146,57 @@ test activate_curve_fails_without_governor_signature() {
       outputs: [continuing_output],
       validity_range: interval.between(400, 600),
       // no extra_signatories — governor never signed
+    }
+
+  !bonding_curve.spend(
+    Some(datum),
+    ActivateCurve { current_timestamp: 500 },
+    own_ref,
+    self,
+  )
+}
+
+// `activate_curve_succeeds_with_governor_signature` with ONE field changed:
+// the declared validity range is wider than max_validity_range_width. The
+// timestamp is still contained in it, and every other field is identical, so
+// the width bound is the only thing this can fail on.
+//
+// It matters because ActivateCurve writes `phase_started_at`, and that field
+// is the origin ExpireCurve measures its 90-day backstop from. A range wide
+// enough to hold any timestamp the signer likes would let the party starting
+// the clock also choose where its deadline falls.
+test activate_curve_rejects_wide_validity_range() {
+  let datum = mock_datum(Inactive, 0)
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_curve_nft(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum =
+    BondingCurveDatum { ..datum, curve_state: Active, phase_started_at: 500 }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: mock_curve_nft(),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      extra_signatories: [#"22"],
+      // The one delta: 600_001 ms wide, one millisecond past the bound.
+      // 500 is still inside it, so containment alone would pass.
+      validity_range: interval.between(400, 400 + max_validity_range_width + 1),
     }
 
   !bonding_curve.spend(
