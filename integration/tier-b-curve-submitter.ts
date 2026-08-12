@@ -109,15 +109,19 @@ function buyerKeyHashFromAddress(address: string): string {
 }
 
 /**
- * The DarkVeil claim window, and the dead window after it, both in ms.
+ * The DarkVeil claim window and the dead window after it are the LAUNCH's,
+ * carried in its own datum as `dv_claim_window`/`dv_settlement_window`.
  *
- * Mirrors `dv_claim_window` and `dv_settlement_window` in
- * `bonding_curve_tier_b.ak`. Public trading cannot open until BOTH have
- * elapsed, so DarkVeil settlement is final before the first public trade
- * rather than merely likely to be.
+ * These were constants here, mirroring constants in the validator. A mirror is
+ * only correct until one side moves, and the client answering for the chain is
+ * the failure that hides: the node's refusal names neither number. Reading the
+ * datum removes the second copy rather than keeping it honest — there is now
+ * one place a window is written and one place it is read.
+ *
+ * Public trading still cannot open until BOTH have elapsed, so DarkVeil
+ * settlement is final before the first public trade rather than merely likely
+ * to be; the validator bounds both values when OpenDvClaim starts the clock.
  */
-export const DV_CLAIM_WINDOW_MS = 86_400_000;
-export const DV_SETTLEMENT_WINDOW_MS = 1_800_000;
 
 /**
  * Half-width of a DarkVeil claim's validity range.
@@ -516,7 +520,10 @@ export class LucidTierBCurveSubmitter {
             'Open the window with openDvClaim() first.',
         );
       }
-      const opensAt = Number(currentDatum.dv_claim_opened_at) + DV_CLAIM_WINDOW_MS + DV_SETTLEMENT_WINDOW_MS;
+      const opensAt =
+        Number(currentDatum.dv_claim_opened_at) +
+        Number(currentDatum.dv_claim_window) +
+        Number(currentDatum.dv_settlement_window);
       if (currentTimestampMs < opensAt) {
         throw new Error(
           `The DarkVeil claim window has not finished settling: public trading opens at ${opensAt}, ` +
@@ -756,7 +763,7 @@ export class LucidTierBCurveSubmitter {
     if (currentDatum.curve_state !== 'DvClaim') {
       throw new Error(`Curve is not in the DarkVeil claim window (state: ${currentDatum.curve_state}) — cannot claim.`);
     }
-    const claimDeadline = currentDatum.dv_claim_opened_at + BigInt(DV_CLAIM_WINDOW_MS);
+    const claimDeadline = currentDatum.dv_claim_opened_at + currentDatum.dv_claim_window;
     if (BigInt(Date.now()) > claimDeadline) {
       throw new Error(`The DarkVeil claim window closed at ${new Date(Number(claimDeadline)).toISOString()}.`);
     }

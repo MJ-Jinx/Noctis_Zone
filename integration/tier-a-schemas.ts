@@ -140,6 +140,13 @@ export const BondingCurveTierBDatumShape = Data.Object({
   // schema was first written. thread_nft_policy is a PolicyId (bytes).
   cto_governance_credential: CredentialSchema,
   thread_nft_policy: Data.Bytes(),
+  // The launch's own DarkVeil claim and settlement windows, in Posix
+  // milliseconds. Declared at genesis, never rewritten, and therefore last —
+  // the validator's datum orders written fields first and these two are only
+  // ever read. The encoding is positional, so their position here must match
+  // the validator's or a decode lands on the wrong field rather than failing.
+  dv_claim_window: Data.Integer(),
+  dv_settlement_window: Data.Integer(),
 });
 export type BondingCurveTierBDatumData = Data.Static<typeof BondingCurveTierBDatumShape>;
 export const BondingCurveTierBDatumSchema = BondingCurveTierBDatumShape as unknown as BondingCurveTierBDatumData;

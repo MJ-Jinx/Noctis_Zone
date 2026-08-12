@@ -132,6 +132,21 @@ export interface BuildGenesisDatumsInput {
    *  default DV_ALLOC_DEFAULT. Drawn from curve_supply rather than carved out
    *  of it; see dv_reserve_tokens below. */
   dvAllocPct?: number;
+  /** DarkVeil claim window in milliseconds — Tier B only. Defaults to 24h.
+   *  The validator accepts 10 minutes to 7 days; this builder additionally
+   *  refuses anything under an hour unless `allowShortDvWindows` is set. */
+  dvClaimWindowMs?: number;
+  /** Dead window between the claim window closing and the public curve
+   *  opening, in milliseconds — Tier B only. Defaults to 30 minutes. The
+   *  validator accepts 1 minute to 24 hours. */
+  dvSettlementWindowMs?: number;
+  /** Opt in to sub-hour DarkVeil windows.
+   *
+   *  A short claim window is hostile to a real registrant: miss it and the
+   *  allocation is forfeited. It exists for demos and tests, where the same
+   *  operator places every claim, and it has to be asked for by name so it
+   *  cannot be reached by passing a number that looked small enough. */
+  allowShortDvWindows?: boolean;
   creatorPubKeyHashHex: string;
   governorPubKeyHashHex: string;
   tokenPolicyIdHex: string;
@@ -292,6 +307,31 @@ export async function buildGenesisDatums(input: BuildGenesisDatumsInput) {
   if (tier === 'B' && (dvAllocPct < 10 || dvAllocPct > 20)) {
     throw new Error(`dvAllocPct must be 10-20 (DV_ALLOC_MIN/DV_ALLOC_MAX), got ${dvAllocPct}`);
   }
+
+  // The launch's own DarkVeil windows. Production values by default; the
+  // validator's own bounds are the outer limit and are repeated here so a bad
+  // value is refused before it costs a transaction rather than after.
+  const dvClaimWindowMs = input.dvClaimWindowMs ?? 86_400_000;
+  const dvSettlementWindowMs = input.dvSettlementWindowMs ?? 1_800_000;
+  if (tier === 'B') {
+    if (dvClaimWindowMs < 600_000 || dvClaimWindowMs > 604_800_000) {
+      throw new Error(`dvClaimWindowMs must be 600000 (10 min) to 604800000 (7 days), got ${dvClaimWindowMs}`);
+    }
+    if (dvSettlementWindowMs < 60_000 || dvSettlementWindowMs > 86_400_000) {
+      throw new Error(`dvSettlementWindowMs must be 60000 (1 min) to 86400000 (24h), got ${dvSettlementWindowMs}`);
+    }
+    // Narrower than the chain's floor, and deliberately so. A registrant who
+    // misses the claim window forfeits their allocation, so a sub-hour window
+    // on a launch with real participants is a trap rather than a setting.
+    // Demos, where one operator places every claim, opt in by name.
+    if (dvClaimWindowMs < 3_600_000 && !input.allowShortDvWindows) {
+      throw new Error(
+        `dvClaimWindowMs of ${dvClaimWindowMs} is under an hour. A registrant who misses the claim ` +
+          'window forfeits their allocation. Pass allowShortDvWindows: true to confirm this is a demo ' +
+          'or test launch where the same operator places every claim.',
+      );
+    }
+  }
   const walletCapPct = input.walletCapPct ?? 5;
   const stakingEnabled = input.stakingEnabled ?? false;
   const stakingAllocPct = input.stakingAllocPct ?? 25;
@@ -450,6 +490,16 @@ export async function buildGenesisDatums(input: BuildGenesisDatumsInput) {
           dv_claim_opened_at: 0n,
           claimed_bits: '',
           dv_settled: false,
+          // The launch's own windows. Declared here, at genesis, so the terms
+          // a registrant is shown before registering are the terms they get —
+          // a value supplied later could be shortened by the one party who
+          // already knows who registered.
+          //
+          // The validator bounds these when OpenDvClaim starts the clock; the
+          // narrower refusal below is this builder's own, so a short window
+          // has to be asked for rather than arrived at.
+          dv_claim_window: BigInt(dvClaimWindowMs),
+          dv_settlement_window: BigInt(dvSettlementWindowMs),
         }
       : {
           ...sharedCurveFields,

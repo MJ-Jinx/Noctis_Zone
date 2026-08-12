@@ -96,6 +96,10 @@ function baseDatum(overrides: Record<string, unknown> = {}): Record<string, unkn
   return {
     launch_id: LAUNCH_ID_HEX,
     thread_nft_policy: THREAD_POLICY,
+    // The launch's own DarkVeil windows, at the production values these
+    // fixtures assume elsewhere (a 24h claim window, a 30m dead window).
+    dv_claim_window: 86_400_000n,
+    dv_settlement_window: 1_800_000n,
     creator_pub_key_hash: CREATOR_KEY_HASH,
     // The governor-only actions refuse a signer this launch does not name, so
     // a fixture has to name one — these tests already sign as 0x22.

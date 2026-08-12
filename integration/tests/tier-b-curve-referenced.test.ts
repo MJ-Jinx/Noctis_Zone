@@ -114,6 +114,10 @@ function activeDatum(): Record<string, unknown> {
   return {
     launch_id: LAUNCH_ID_HEX,
     thread_nft_policy: THREAD_POLICY,
+    // The launch's own DarkVeil windows, at the production values these
+    // fixtures assume elsewhere (a 24h claim window, a 30m dead window).
+    dv_claim_window: 86_400_000n,
+    dv_settlement_window: 1_800_000n,
     creator_pub_key_hash: fakeKeyHash(0x99),
     // A launch records its own governor, and the submitter refuses a signer
     // that is not it. A fixture naming someone else describes a launch these

@@ -40,6 +40,18 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by bonding_curve_tier_b +271: the DarkVeil claim and settlement
+ * windows became datum fields instead of compiled constants, so a launch
+ * states its own terms and OpenDvClaim bounds them before starting the clock
+ * they are measured from. Two read-only fields, declared at the BACK per this
+ * datum's ordering rule, plus four bounds and two datum reads replacing two
+ * constant reads. Tier A did not move: it has no DarkVeil phase.
+ *
+ * Note what the 271 bytes BUY beyond configurability — the submitter used to
+ * mirror both constants in its own source, and a mirror is only correct until
+ * one side moves. It now reads the datum, so there is one place a window is
+ * written and one place it is read.
+ *
  * Last moved by bonding_curve +38: ActivateCurve now bounds the width of the
  * declared validity range, using the helper and constant the file's other
  * timestamp-gated arm already applies. It writes `phase_started_at`, which is
@@ -146,7 +158,7 @@ for (const v of blueprint.validators) {
  */
 const RECORDED: Record<string, number> = {
   bonding_curve: 11_198,
-  bonding_curve_tier_b: 13_955,
+  bonding_curve_tier_b: 14_226,
   cto_governance: 8_060,
   cto_sybil_challenge: 2_201,
   curve_order: 1_775,

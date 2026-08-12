@@ -271,6 +271,22 @@ pub type BondingCurveTierBDatum {
   // requires the referenced governance UTXO to carry this NFT
   // (asset_name = launch_id), closing the forge-a-fake-governance-UTXO gap.
   thread_nft_policy: PolicyId,
+  // How long registrants have to claim once `OpenDvClaim` starts the clock,
+  // and the dead window between that closing and public trading opening —
+  // both Posix milliseconds, both declared at genesis and never rewritten,
+  // which is why they sit at the BACK of this datum.
+  //
+  // These were compile-time constants (24h and 30m). A launch could not state
+  // different terms without a different script, and therefore a different
+  // address. As datum fields the terms belong to the launch, and the bounds
+  // `OpenDvClaim` enforces are what keep them honest.
+  //
+  // Declared at GENESIS rather than supplied to `OpenDvClaim`, deliberately:
+  // the window a registrant is shown before they register is then the window
+  // they actually get. A redeemer-supplied value could be shortened after
+  // registration closed, by the one party who knows who registered.
+  dv_claim_window: Int,
+  dv_settlement_window: Int,
 }
 
 /// One order inside a batch. The order's own UTXO holds the funds being spent
@@ -480,23 +496,42 @@ const min_platform_claim_fee_lovelace = 200_000
 /// the Tier A bug was fixed. Found during Phase 5b research.
 const max_curve_duration = 7_776_000_000
 
-/// The DarkVeil claim window — 24 hours in MILLISECONDS, same units as
-/// `max_curve_duration` above. Registrants have exactly this long to settle
-/// their allocation once `OpenDvClaim` starts the clock. A claim after it is
-/// rejected on-chain, which is what makes the Midnight-side bond forfeiture
-/// for a non-claimer well-defined rather than a matter of timing luck.
-const dv_claim_window = 86_400_000
+/// Bounds on the launch's declared `dv_claim_window` — the time registrants
+/// have to settle their allocation once `OpenDvClaim` starts the clock. A
+/// claim after it is rejected on-chain, which is what makes the Midnight-side
+/// bond forfeiture for a non-claimer well-defined rather than a matter of
+/// timing luck.
+///
+/// Bounded rather than fixed so a launch can state its own terms, and bounded
+/// at all because paying to a script address runs no code: a genesis datum is
+/// whatever its author wrote until a redeemer says otherwise. The floor keeps
+/// a window from being too short to claim in; the ceiling keeps a launch from
+/// being parked indefinitely with its curve unable to open.
+///
+/// 10 minutes. A claiming buyer needs one transaction, and Blockfrost's utxo
+/// index lags a confirmed one, so back-to-back claims from a single wallet
+/// need room to retry.
+const min_dv_claim_window = 600_000
 
-/// Dead window between the claim window closing and public trading opening —
-/// 30 minutes in MILLISECONDS. Nothing at all can execute inside it: claims
-/// are past their deadline and the curve is not `Active` yet. It exists so
-/// DarkVeil settlement is provably final before the first public trade, with
-/// margin for the relayer to reconcile who actually claimed.
+/// 7 days. `max_curve_duration` is 90 days; a claim window past a week leaves
+/// a launch looking stalled with no recourse.
+const max_dv_claim_window = 604_800_000
+
+/// Bounds on the launch's declared `dv_settlement_window` — the dead window
+/// between the claim window closing and public trading opening. Nothing at all
+/// can execute inside it: claims are past their deadline and the curve is not
+/// `Active` yet. It exists so DarkVeil settlement is provably final before the
+/// first public trade, with margin for the relayer to reconcile who claimed.
 ///
 /// Distinct from CLAUDE.md's SETTLEMENT_WINDOW (10 min), which sits earlier
 /// and on the other chain — between DarkVeil closing on Midnight and this
 /// claim window opening on Cardano.
-const dv_settlement_window = 1_800_000
+///
+/// 1 minute floor: below that it is not a window. 24 hour ceiling: the same
+/// parking argument as the claim window above.
+const min_dv_settlement_window = 60_000
+
+const max_dv_settlement_window = 86_400_000
 
 // ============================================================================
 // HELPERS
@@ -1223,7 +1258,7 @@ validator bonding_curve_tier_b {
         // window that follows it, so DarkVeil settlement is final before the
         // first public trade rather than merely likely to be.
         let window_closed =
-          !has_darkveil || current_timestamp >= datum.dv_claim_opened_at + dv_claim_window + dv_settlement_window
+          !has_darkveil || current_timestamp >= datum.dv_claim_opened_at + datum.dv_claim_window + datum.dv_settlement_window
         and {
           // Permissionless once the deadline has passed — the same "the
           // deadline is the authorization" idiom as ExpireCurve, Graduate and
@@ -1399,6 +1434,19 @@ validator bonding_curve_tier_b {
           datum.dv_reserve_tokens > 0,
           // A window with no bits is a window nobody could claim in.
           bytearray.length(claimed_bits) > 0,
+          // Bound the launch's declared windows HERE, at the one transaction
+          // that starts the clock they are measured from. Paying to a script
+          // address runs no code, so a genesis datum holds whatever its author
+          // wrote; this is the first spend that relies on these two, and every
+          // arm after it carries the datum forward unchanged, so bounding once
+          // here binds every later read.
+          //
+          // A zero claim window would confiscate every allocation on the spot;
+          // an unbounded one would leave the curve unable to open at all.
+          datum.dv_claim_window >= min_dv_claim_window,
+          datum.dv_claim_window <= max_dv_claim_window,
+          datum.dv_settlement_window >= min_dv_settlement_window,
+          datum.dv_settlement_window <= max_dv_settlement_window,
           // Every bit starts clear — the governor cannot pre-burn a
           // registrant's claim by opening the window with their bit set.
           claimed_bits == bytearray.from_int_big_endian(
@@ -1571,9 +1619,11 @@ validator bonding_curve_tier_b {
           // buyer can take supply a registrant has already bonded for, and no
           // claimer can turn round and sell what they have just claimed.
           datum.curve_state == DvClaim,
-          // 24 hours from OpenDvClaim, enforced here rather than left to
-          // whenever somebody happens to call ActivateCurve.
-          current_timestamp <= datum.dv_claim_opened_at + dv_claim_window,
+          // The launch's own declared window from OpenDvClaim, enforced here
+          // rather than left to whenever somebody happens to call
+          // ActivateCurve. OpenDvClaim bounded the value before starting the
+          // clock, and every arm since carries the datum forward unchanged.
+          current_timestamp <= datum.dv_claim_opened_at + datum.dv_claim_window,
           interval.contains(self.validity_range, current_timestamp),
           validity_range_is_narrow(self.validity_range, max_validity_range_width),
           dv_amount > 0,
@@ -2129,6 +2179,10 @@ fn mock_datum(
     // Every slot empty, which is what genesis writes and what leaves the
     // curve open to any wallet with no registration step.
     cap_root: cap_root([]),
+    // The production defaults, so every test that does not care about the
+    // windows exercises the values a real launch is expected to carry.
+    dv_claim_window: 86_400_000,
+    dv_settlement_window: 1_800_000,
   }
 }
 
@@ -2941,6 +2995,72 @@ test open_dv_claim_rejects_an_empty_bitmap() {
   !run_open_dv_claim(pre_claim_datum(), #"", #"22")
 }
 
+// The launch declares its own windows, so this is the transaction that has to
+// hold them to something. Each case below is the passing open with ONE field
+// moved one millisecond past a bound, so the bound is the only thing it can
+// fail on.
+//
+// Paying to a script address runs no code, so these values are whatever the
+// genesis author wrote until this arm says otherwise.
+test open_dv_claim_rejects_a_claim_window_below_the_floor() {
+  !run_open_dv_claim(
+    BondingCurveTierBDatum {
+      ..pre_claim_datum(),
+      dv_claim_window: min_dv_claim_window - 1,
+    },
+    #"0000",
+    #"22",
+  )
+}
+
+test open_dv_claim_rejects_a_claim_window_above_the_ceiling() {
+  !run_open_dv_claim(
+    BondingCurveTierBDatum {
+      ..pre_claim_datum(),
+      dv_claim_window: max_dv_claim_window + 1,
+    },
+    #"0000",
+    #"22",
+  )
+}
+
+test open_dv_claim_rejects_a_settlement_window_below_the_floor() {
+  !run_open_dv_claim(
+    BondingCurveTierBDatum {
+      ..pre_claim_datum(),
+      dv_settlement_window: min_dv_settlement_window - 1,
+    },
+    #"0000",
+    #"22",
+  )
+}
+
+test open_dv_claim_rejects_a_settlement_window_above_the_ceiling() {
+  !run_open_dv_claim(
+    BondingCurveTierBDatum {
+      ..pre_claim_datum(),
+      dv_settlement_window: max_dv_settlement_window + 1,
+    },
+    #"0000",
+    #"22",
+  )
+}
+
+// Both floors together, which is what a short-window launch actually carries.
+// Without this the four rejections above would be equally satisfied by an arm
+// that refused every value.
+test open_dv_claim_accepts_the_windows_at_their_floors() {
+  run_open_dv_claim(
+    BondingCurveTierBDatum {
+      ..pre_claim_datum(),
+      dv_claim_window: min_dv_claim_window,
+      dv_settlement_window: min_dv_settlement_window,
+    },
+    #"0000",
+    #"22",
+  )
+}
+
 test open_dv_claim_rejects_before_the_root_is_anchored() {
   !run_open_dv_claim(
     BondingCurveTierBDatum { ..pre_claim_datum(), dv_settled: False },
@@ -3113,6 +3233,23 @@ test claim_darkveil_tokens_accepts_on_the_final_millisecond_of_the_window() {
   and {
     run_claim(claimable_datum(0), 0, test_claim_closes),
     !run_claim(claimable_datum(0), 0, test_claim_closes + 1),
+  }
+}
+
+// The deadline is the LAUNCH's, not the script's. This is the test that would
+// have failed before the window became a datum field: at 600,001 ms a claim is
+// barely ten minutes old and sits far inside the 24 hours the old constant
+// imposed on every launch alike, so under that constant it was accepted. It is
+// refused here because THIS launch declared ten minutes.
+test claim_darkveil_tokens_follows_the_launchs_own_window() {
+  let short =
+    BondingCurveTierBDatum {
+      ..claimable_datum(0),
+      dv_claim_window: min_dv_claim_window,
+    }
+  and {
+    run_claim(short, 0, min_dv_claim_window),
+    !run_claim(short, 0, min_dv_claim_window + 1),
   }
 }
 
