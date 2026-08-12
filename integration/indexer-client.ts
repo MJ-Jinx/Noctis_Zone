@@ -68,6 +68,8 @@ export interface NightBalanceResult {
 export interface UnshieldedUtxoEvent {
   tokenType: string;
   value: string | number | bigint;
+  /** Present on created UTXOs; the chain's own view of registration status. */
+  registeredForDustGeneration?: boolean;
 }
 export interface UnshieldedTransactionEvent {
   unshieldedTransactions:
@@ -165,6 +167,47 @@ export function consumeUnshieldedTransactions(
  * Midnight indexer. `indexerWsUrl` is the indexer's GraphQL WebSocket
  * endpoint (per the indexer's own docs: `wss://<host>:<port>/api/v4/graphql/ws`).
  */
+/**
+ * The same query for SEVERAL addresses, over ONE provided subscription client.
+ *
+ * `getUnshieldedNightBalance` below builds its own `WsSubscriptionClient.layer`
+ * per call, so reading eleven wallets one at a time opened eleven connections
+ * from eleven processes. The addresses are still read sequentially here — the
+ * indexer subscription is per-address — but the connection, the process and
+ * the WASM initialisation behind `nativeToken()` are paid for once.
+ *
+ * Returns results positionally, so the caller can pair them back with whatever
+ * it derived the addresses from.
+ */
+export async function getUnshieldedNightBalances(
+  indexerWsUrl: string,
+  addresses: readonly string[],
+): Promise<NightBalanceResult[]> {
+  if (addresses.length === 0) {
+    return [];
+  }
+  const nightTokenType = nativeToken().raw;
+  return Effect.runPromise(
+    Effect.scoped(
+      Effect.forEach(
+        addresses,
+        (address) =>
+          consumeUnshieldedTransactions(
+            UnshieldedTransactions.run({ address, transactionId: 0 }) as unknown as Stream.Stream<
+              UnshieldedTransactionEvent,
+              unknown
+            >,
+            nightTokenType,
+          ),
+        // Sequential deliberately: the indexer replays an address's whole
+        // history, and running eleven of those at once against a shared public
+        // endpoint trades a server-side problem for a client-side one.
+        { concurrency: 1 },
+      ).pipe(Effect.provide(WsSubscriptionClient.layer({ url: indexerWsUrl }))),
+    ),
+  );
+}
+
 export async function getUnshieldedNightBalance(indexerWsUrl: string, address: string): Promise<NightBalanceResult> {
   const nightTokenType = nativeToken().raw;
   const stream = UnshieldedTransactions.run({
@@ -178,5 +221,85 @@ export async function getUnshieldedNightBalance(indexerWsUrl: string, address: s
         Effect.provide(WsSubscriptionClient.layer({ url: indexerWsUrl })),
       ),
     ),
+  );
+}
+
+/** One address's DUST-generation registration state, as the CHAIN reports it. */
+export interface UnshieldedRegistrationState {
+  /** True when the address holds an unspent NIGHT UTXO already registered. */
+  registered: boolean;
+  createdNightUtxos: number;
+  spentNightUtxos: number;
+}
+
+/**
+ * Ask the indexer whether this address's NIGHT is already registered for DUST
+ * generation.
+ *
+ * Do NOT infer this from a wallet's `availableCoins`. A short-lived facade
+ * serves the ORIGINAL, ALREADY-SPENT UTXO because its unshielded sub-wallet
+ * never syncs far enough to see the spend — so a caller that trusts it will
+ * re-register an already-registered wallet, get 173
+ * (InsufficientDustForRegistrationFee, the allowance having been consumed by
+ * the registration that succeeded), and on repetition earn a 1012 ban.
+ *
+ * Registration ROTATES the UTXO: the original is spent and a replacement is
+ * created carrying `registeredForDustGeneration = true`. That pair is the
+ * evidence this reads.
+ */
+export async function getUnshieldedRegistrationState(
+  indexerWsUrl: string,
+  address: string,
+): Promise<UnshieldedRegistrationState> {
+  const nightTokenType = nativeToken().raw;
+  const stream = UnshieldedTransactions.run({ address, transactionId: 0 }) as unknown as Stream.Stream<
+    UnshieldedTransactionEvent,
+    unknown
+  >;
+
+  const program = Effect.gen(function* () {
+    const pull = yield* Stream.toPull(stream);
+    let watermark: number | null = null;
+    let seen = false;
+    let caughtUp = false;
+    let createdNightUtxos = 0;
+    let spentNightUtxos = 0;
+    let registered = false;
+
+    while (!caughtUp) {
+      const result = yield* Effect.either(pull);
+      if (result._tag === 'Left') {
+        if (Option.isNone(result.left)) break;
+        return yield* Effect.fail(result.left.value);
+      }
+      for (const event of Chunk.toReadonlyArray(result.right)) {
+        const payload = event.unshieldedTransactions;
+        if (payload.type === 'UnshieldedTransactionsProgress') {
+          watermark = payload.highestTransactionId;
+          if (payload.highestTransactionId === 0 && !seen) caughtUp = true;
+          continue;
+        }
+        seen = true;
+        for (const utxo of payload.createdUtxos) {
+          if (utxo.tokenType !== nightTokenType) continue;
+          createdNightUtxos++;
+          if ((utxo as { registeredForDustGeneration?: boolean }).registeredForDustGeneration === true) {
+            registered = true;
+          }
+        }
+        for (const utxo of payload.spentUtxos) {
+          if (utxo.tokenType === nightTokenType) spentNightUtxos++;
+        }
+        if (watermark !== null && payload.transaction.id >= watermark) {
+          caughtUp = true;
+          break;
+        }
+      }
+    }
+    return { registered, createdNightUtxos, spentNightUtxos };
+  });
+
+  return Effect.runPromise(
+    Effect.scoped(program.pipe(Effect.provide(WsSubscriptionClient.layer({ url: indexerWsUrl })))),
   );
 }

@@ -596,6 +596,40 @@ const deployEligibilityGateCliConfig = {
 	logLevel: "info",
 };
 
+// Registers a wallet's NIGHT UTXOs for DUST generation, which every wallet
+// needs once before it can pay for anything. Builds on midnight-server-wallet.ts
+// exactly as the deploy CLI above does, so it inherits the same unbundlable
+// Midnight dependency tree and the same packages:external treatment.
+const midnightRegisterDustCliConfig = {
+	entryPoints: [join(__dirname, "cli/midnight-register-dust.ts")],
+	outfile: join(__dirname, "cli/dist/midnight-register-dust.mjs"),
+	bundle: true,
+	platform: "node",
+	packages: "external",
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+};
+
+// Replays wallets to a spendable DUST balance, one wallet at a time, restarting
+// each attempt in a fresh child process that resumes from the last snapshot.
+// Same unbundlable Midnight dependency tree as the two CLIs above.
+//
+// This one re-launches ITSELF as the per-attempt child, so the bundle has to be
+// directly runnable by node — which packages:external already gives it.
+const midnightSyncWalletsCliConfig = {
+	entryPoints: [join(__dirname, "cli/midnight-sync-wallets.ts")],
+	outfile: join(__dirname, "cli/dist/midnight-sync-wallets.mjs"),
+	bundle: true,
+	platform: "node",
+	packages: "external",
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+};
+
 const publishAllowlistRootCliConfig = {
 	entryPoints: [join(__dirname, "cli/publish-allowlist-root.ts")],
 	outfile: join(__dirname, "cli/dist/publish-allowlist-root.mjs"),
@@ -660,6 +694,23 @@ const deriveMidnightAddressCliConfig = {
 // Midnight wallet NIGHT balance (+ derived DUST capacity) — address derivation
 // + a public-indexer NIGHT-balance query (getUnshieldedNightBalance), same
 // WASM/ESM+banner needs as check-night-balance.
+// The batch form of midnightWalletBalanceCliConfig below — same dependencies,
+// same treatment, several seeds per process instead of one.
+const midnightWalletBalancesCliConfig = {
+	entryPoints: [join(__dirname, "cli/midnight-wallet-balances.ts")],
+	outfile: join(__dirname, "cli/dist/midnight-wallet-balances.mjs"),
+	bundle: true,
+	platform: "node",
+	external: ["cbor"],
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+	banner: {
+		js: "import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);",
+	},
+};
+
 const midnightWalletBalanceCliConfig = {
 	entryPoints: [join(__dirname, "cli/midnight-wallet-balance.ts")],
 	outfile: join(__dirname, "cli/dist/midnight-wallet-balance.mjs"),
@@ -893,11 +944,14 @@ async function run() {
 		readDvPurchasesCliConfig,
 		publishAllowlistRootCliConfig,
 		deployEligibilityGateCliConfig,
+		midnightRegisterDustCliConfig,
+		midnightSyncWalletsCliConfig,
 		tierBCurveActionCliConfig,
 		resolveAddressVkhCliConfig,
 		stakeActionCliConfig,
 		deriveMidnightAddressCliConfig,
 		midnightWalletBalanceCliConfig,
+		midnightWalletBalancesCliConfig,
 		tokenMetadataActionCliConfig,
 		executeCtoProposalCliConfig,
 		voidCtoProposalCliConfig,

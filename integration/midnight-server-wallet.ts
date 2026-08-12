@@ -54,12 +54,31 @@ import type { CoinPublicKey, EncPublicKey, FinalizedTransaction } from '@midnigh
 import type { MidnightProvider, UnboundTransaction, WalletProvider } from '@midnight-ntwrk/midnight-js-types';
 import { InMemoryTransactionHistoryStorage } from '@midnight-ntwrk/wallet-sdk-abstractions';
 import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
-import { type DefaultConfiguration, WalletEntrySchema, WalletFacade } from '@midnight-ntwrk/wallet-sdk-facade';
+import {
+  type DefaultConfiguration,
+  type FacadeState,
+  WalletEntrySchema,
+  WalletFacade,
+} from '@midnight-ntwrk/wallet-sdk-facade';
 import { HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
 import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
 import { createKeystore, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
+import {
+  type SnapshotGuards,
+  type SubWalletKind,
+  seedFingerprintOf,
+  type WalletStateStore,
+  walletSdkVersion,
+} from './midnight-wallet-state-store.js';
 
 export type MidnightNetwork = 'undeployed' | 'preview' | 'preprod' | 'mainnet';
+
+/**
+ * How long to wait for the facade's first state emission. Generous, because it
+ * covers process start and the initial indexer connection — but bounded, so a
+ * dead endpoint surfaces as an error instead of a hang.
+ */
+const FIRST_STATE_TIMEOUT_MS = 120_000;
 
 export interface ServerWalletNetworkConfig {
   network: MidnightNetwork;
@@ -168,19 +187,119 @@ class ServerWalletProvider implements WalletProvider, MidnightProvider {
   }
 }
 
+/**
+ * Resume this wallet from a stored snapshot instead of replaying chain history.
+ *
+ * See midnight-wallet-state-store.ts for why that matters: the dust sub-wallet's
+ * replay may not finish inside one process, and a snapshot lets the next process
+ * continue rather than restart.
+ */
+export interface ServerWalletSnapshotOptions {
+  store: WalletStateStore;
+  /** Stable per-wallet key — this project uses the role name (`buyer_3`). */
+  accountId: string;
+  /**
+   * Cold-start the dust sub-wallet even when a snapshot exists, restoring the
+   * other two normally.
+   *
+   * A stored dust snapshot can reference Merkle roots the node has since dropped
+   * from its recent-root history. The wallet then holds dust it cannot prove
+   * against anything the node still recognises, and submission fails rather than
+   * degrading. Re-reading dust from chain costs the replay this module exists to
+   * avoid, so it stays an explicit escape hatch, not a default.
+   */
+  dustColdStart?: boolean;
+  onRestore?: (restored: readonly SubWalletKind[]) => void;
+}
+
 export interface ServerWallet {
   walletProvider: WalletProvider;
   midnightProvider: MidnightProvider;
   /** Real WalletFacade instance — kept for callers that need waitForSyncedState()/state() directly. */
   facade: WalletFacade;
+  /** Identifies this wallet/network/SDK combination for snapshot save and load. */
+  snapshotGuards: SnapshotGuards;
+  /** Which sub-wallets resumed from a snapshot. Empty when everything replayed from chain. */
+  restoredFrom: readonly SubWalletKind[];
+  /**
+   * The unshielded keystore this wallet was derived from. DUST generation
+   * registration is signed by the NIGHT key rather than balanced like an
+   * ordinary transaction, so it needs the verifying key and a signing
+   * callback that only the keystore can give — see cli/midnight-register-dust.ts.
+   */
+  unshieldedKeystore: ReturnType<typeof createKeystore>;
   /** Must be called when done — stops the facade's background sync/subscriptions. */
   shutdown(): Promise<void>;
 }
 
 /**
- * Builds a real, synced, server-side wallet + the two ContractProviders
+ * Resolve on the first facade state that satisfies `predicate`.
+ *
+ * Subscribes to the facade's own state observable rather than importing rxjs,
+ * which is present only transitively here and is not a declared dependency of
+ * this workspace.
+ *
+ * Rejects on timeout rather than hanging: every caller of this is a CLI, and a
+ * CLI that waits forever is indistinguishable from one that crashed.
+ */
+export function waitForWalletState(
+  facade: WalletFacade,
+  predicate: (state: FacadeState) => boolean,
+  timeoutMs: number,
+  description: string,
+): Promise<FacadeState> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let subscription: { unsubscribe(): void } | undefined;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+      // May be undefined if the observable emitted synchronously on subscribe;
+      // the trailing unsubscribe below covers that case.
+      subscription?.unsubscribe();
+    };
+
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`Timed out after ${timeoutMs}ms waiting for ${description}.`))),
+      timeoutMs,
+    );
+
+    subscription = facade.state().subscribe({
+      next: (state) => {
+        if (predicate(state)) finish(() => resolve(state));
+      },
+      error: (err) => finish(() => reject(err)),
+    });
+
+    if (settled) subscription.unsubscribe();
+  });
+}
+
+/** True once this wallet can see at least one unshielded NIGHT UTXO of its own. */
+export function hasUnshieldedNight(state: FacadeState): boolean {
+  const nightTokenType = ledger.nativeToken().raw;
+  return state.unshielded.availableCoins.some((coin) => coin.utxo.type === nightTokenType);
+}
+
+/**
+ * Builds a real, started, server-side wallet + the two ContractProviders
  * fields a Node CLI needs to sign and submit a governor-authorized circuit
  * call, from a raw 32-byte seed.
+ *
+ * Started, deliberately not fully synced. `waitForSyncedState()` waits for all
+ * three sub-wallets to reach the chain tip, and on preprod the dust sub-wallet
+ * does not get there in reasonable time or memory: measured, it advances at
+ * ~250 offsets/sec while its serialized state grows ~1.6 KB/s without
+ * collapsing (upstream midnightntwrk/midnight-wallet#639), which put two
+ * earlier runs into a JavaScript heap OOM before they reached the tip.
+ *
+ * The keys read below are derived, not synced, so the first emitted state
+ * carries them. Callers that need more than keys — an unshielded balance, a
+ * spendable coin — should wait for that specific condition with
+ * `waitForWalletState`, which is both faster and honest about what it needs.
  *
  * This is the wallet that PAYS DUST fees for the transaction — a SEPARATE
  * concern from the governor's Compact WITNESS secret (getGovernorSecret(),
@@ -189,7 +308,11 @@ export interface ServerWallet {
  * roles; nothing on-chain requires them to match. See publish-allowlist-
  * root.ts's own header for how this project's CLI wires the two together.
  */
-export async function buildServerWallet(seed: Uint8Array, config: ServerWalletNetworkConfig): Promise<ServerWallet> {
+export async function buildServerWallet(
+  seed: Uint8Array,
+  config: ServerWalletNetworkConfig,
+  snapshot?: ServerWalletSnapshotOptions,
+): Promise<ServerWallet> {
   const seedBuffer = Buffer.from(seed);
 
   const hdResult = HDWallet.fromSeed(seedBuffer);
@@ -229,15 +352,51 @@ export async function buildServerWallet(seed: Uint8Array, config: ServerWalletNe
     txHistoryStorage: new InMemoryTransactionHistoryStorage(WalletEntrySchema),
   };
 
+  const snapshotGuards: SnapshotGuards = {
+    sdkVersion: walletSdkVersion(),
+    networkId: config.network,
+    seedFingerprint: seedFingerprintOf(seed),
+  };
+
+  // Null whenever no snapshot was requested, none exists, or any guard failed —
+  // all of which simply mean this wallet replays from chain.
+  const stored = snapshot ? await snapshot.store.load(snapshot.accountId, snapshotGuards) : null;
+  const restoredFrom: SubWalletKind[] = [];
+
   const facade = await WalletFacade.init({
     configuration: walletConfiguration,
-    shielded: (cfg) => ShieldedWallet(cfg).startWithSecretKeys(shieldedSecretKeys),
-    unshielded: (cfg) => UnshieldedWallet(cfg).startWithPublicKey(PublicKey.fromKeyStore(unshieldedKeystore)),
-    dust: (cfg) => DustWallet(cfg).startWithSecretKey(dustSecretKey, ledger.LedgerParameters.initialParameters().dust),
+    shielded: (cfg) => {
+      if (stored?.shielded) {
+        restoredFrom.push('shielded');
+        return ShieldedWallet(cfg).restore(stored.shielded);
+      }
+      return ShieldedWallet(cfg).startWithSecretKeys(shieldedSecretKeys);
+    },
+    unshielded: (cfg) => {
+      if (stored?.unshielded) {
+        restoredFrom.push('unshielded');
+        return UnshieldedWallet(cfg).restore(stored.unshielded);
+      }
+      return UnshieldedWallet(cfg).startWithPublicKey(PublicKey.fromKeyStore(unshieldedKeystore));
+    },
+    dust: (cfg) => {
+      if (stored?.dust && !snapshot?.dustColdStart) {
+        restoredFrom.push('dust');
+        return DustWallet(cfg).restore(stored.dust);
+      }
+      return DustWallet(cfg).startWithSecretKey(dustSecretKey, ledger.LedgerParameters.initialParameters().dust);
+    },
   });
 
+  if (restoredFrom.length > 0) snapshot?.onRestore?.(restoredFrom);
+
   await facade.start(shieldedSecretKeys, dustSecretKey);
-  const state = await facade.waitForSyncedState();
+  const state = await waitForWalletState(
+    facade,
+    () => true,
+    FIRST_STATE_TIMEOUT_MS,
+    'the wallet to emit its first state',
+  );
 
   const provider = new ServerWalletProvider(
     facade,
@@ -251,7 +410,10 @@ export async function buildServerWallet(seed: Uint8Array, config: ServerWalletNe
   return {
     walletProvider: provider,
     midnightProvider: provider,
+    unshieldedKeystore,
     facade,
+    snapshotGuards,
+    restoredFrom,
     shutdown: () => facade.stop(),
   };
 }

@@ -6,6 +6,23 @@ Notable changes to the Noctis Protocol, by release. Internal development history
 
 ## [Unreleased]
 
+### Added
+
+- Midnight wallets can be replayed to a spendable DUST balance across process
+  restarts. Each sub-wallet's sync state is snapshotted every 30 seconds while the
+  replay is still running, encrypted with AES-256-GCM under a PBKDF2-derived key,
+  and written by temporary file and rename so an interrupted write leaves either
+  the previous complete snapshot or the new one. A snapshot is restored only when
+  the SDK version, network and seed fingerprint all match what wrote it; anything
+  else replays from chain, as does a snapshot that cannot be decrypted or parsed.
+- A supervising CLI replays wallets one at a time, giving each attempt its own
+  process and a fresh heap to continue in, so progress accumulates across
+  attempts. Each attempt reports the index it reached, which is what makes the
+  run's own convergence readable.
+- Registering a wallet's NIGHT for DUST generation reads its registration state
+  from the chain, so re-running it reports that there is nothing to do instead of
+  submitting again.
+
 ### Changed
 
 - Bonding curve trades on Tier A and Tier B are priced by summing the price of each

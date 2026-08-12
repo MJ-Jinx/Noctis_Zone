@@ -166,9 +166,24 @@ const FAKE_STATE = {
   },
 };
 
+/**
+ * Minimal stand-in for the facade's state observable. buildServerWallet takes
+ * the FIRST emitted state rather than a fully synced one, so this emits once
+ * and hands back an unsubscribe — enough to exercise the real subscribe path.
+ */
+function fakeStateObservable(state: unknown = FAKE_STATE) {
+  return {
+    subscribe: ({ next }: { next: (s: unknown) => void; error?: (e: unknown) => void }) => {
+      next(state);
+      return { unsubscribe: vi.fn() };
+    },
+  };
+}
+
 function makeFakeFacade() {
   return {
     start: vi.fn().mockResolvedValue(undefined),
+    state: vi.fn(() => fakeStateObservable()),
     waitForSyncedState: vi.fn().mockResolvedValue(FAKE_STATE),
     balanceUnboundTransaction: vi.fn().mockResolvedValue('recipe-1'),
     signRecipe: vi.fn().mockResolvedValue('signed-recipe-1'),
@@ -340,7 +355,25 @@ describe('buildServerWallet — happy path wiring', () => {
     expect(facade.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('getCoinPublicKey/getEncryptionPublicKey return the hex strings from waitForSyncedState', async () => {
+  it('takes the first emitted state and never waits for a fully synced one', async () => {
+    // The dust sub-wallet does not reach the chain tip on preprod in workable
+    // time or memory, so waiting for a full sync here means never returning.
+    // This asserts the absence of that call, because nothing else would: the
+    // wallet builds fine either way against a mock that resolves both.
+    stubHdChain({
+      type: 'keysDerived',
+      keys: { ROLE_ZSWAP: 'a', ROLE_NIGHT_EXTERNAL: 'b', ROLE_DUST: 'c' },
+    });
+    const facade = makeFakeFacade();
+    walletFacadeInitFn.mockResolvedValue(facade);
+
+    await buildServerWallet(new Uint8Array(32), fakeConfig('undeployed'));
+
+    expect(facade.state).toHaveBeenCalled();
+    expect(facade.waitForSyncedState).not.toHaveBeenCalled();
+  });
+
+  it('getCoinPublicKey/getEncryptionPublicKey return the hex strings from the first emitted state', async () => {
     stubHdChain({
       type: 'keysDerived',
       keys: { ROLE_ZSWAP: 'a', ROLE_NIGHT_EXTERNAL: 'b', ROLE_DUST: 'c' },
