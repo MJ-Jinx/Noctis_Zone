@@ -32,12 +32,15 @@
 // submitTx) to satisfy the single-method interfaces midnight-js-contracts
 // actually requires.
 //
-// HONEST SCOPE NOTE: this has NOT been exercised against a live network —
-// Midnight transaction submission always needs a real proof-server
-// and hosted ZK artifacts, both still unprovisioned as of this
-// writing. This is code-complete and verified against real SDK source, the
-// same "code-complete, blocked on infra" status the wallet bridge already carries — not
-// a claim of live-tested correctness.
+// SCOPE (2026-08-12): this now runs against real Preprod. Wallets built here
+// have submitted real transactions — DUST generation registration for the whole
+// test set — against an operated proof server, and their registration state is
+// confirmed from the chain rather than from the wallet's own view.
+//
+// A wallet is returned STARTED, not fully synced, and the difference matters:
+// see buildServerWallet's own note. Callers that need a balance rather than
+// keys must wait for that specific condition, and callers that pay a fee should
+// resume from a snapshot — see midnight-wallet-state-store.ts.
 // ============================================================================
 
 import WebSocket from 'ws';
@@ -67,7 +70,7 @@ import {
   type SnapshotGuards,
   type SubWalletKind,
   seedFingerprintOf,
-  type WalletStateStore,
+  WalletStateStore,
   walletSdkVersion,
 } from './midnight-wallet-state-store.js';
 
@@ -210,6 +213,37 @@ export interface ServerWalletSnapshotOptions {
    */
   dustColdStart?: boolean;
   onRestore?: (restored: readonly SubWalletKind[]) => void;
+}
+
+/** The two fields a CLI needs to accept for its wallet to resume from a snapshot. */
+export interface SnapshotCliInput {
+  /** Directory holding snapshots. Must be outside the repository. */
+  snapshotDir?: string;
+  snapshotPassphrase?: string;
+}
+
+/**
+ * Build snapshot options from a CLI's own input, or undefined if it did not ask
+ * for them.
+ *
+ * Every CLI that pays a DUST fee needs its wallet to have replayed far enough to
+ * see that DUST, so they all want the same opt-in on the same two fields. This
+ * keeps that wiring identical between them instead of separately reinvented.
+ *
+ * Both fields are required together: a snapshot directory without the passphrase
+ * that wrote it can only produce snapshots nothing can read back.
+ */
+export function snapshotOptionsFrom(
+  input: SnapshotCliInput,
+  accountId: string,
+  log?: (message: string) => void,
+): ServerWalletSnapshotOptions | undefined {
+  if (!input.snapshotDir || !input.snapshotPassphrase) return undefined;
+  return {
+    store: new WalletStateStore(input.snapshotDir, input.snapshotPassphrase),
+    accountId,
+    onRestore: (restored) => log?.(`${accountId}: resumed ${restored.join(', ')} from snapshot`),
+  };
 }
 
 export interface ServerWallet {

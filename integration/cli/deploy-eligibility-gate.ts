@@ -39,11 +39,17 @@ import { MemoryLevel } from 'memory-level';
 import type { MerkleProofEntry } from '../../contracts/midnight/witnesses.js';
 import { fromHex32, resolveEligibilityGateDeployArgs } from '../eligibility-gate-deploy-args.js';
 import { NoctisMidnightClient } from '../midnight-client.js';
-import { buildServerWallet, defaultNetworkConfig, type MidnightNetwork } from '../midnight-server-wallet.js';
+import {
+  buildServerWallet,
+  defaultNetworkConfig,
+  type MidnightNetwork,
+  type SnapshotCliInput,
+  snapshotOptionsFrom,
+} from '../midnight-server-wallet.js';
 import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { jsonSafe, parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
-interface Input {
+interface Input extends SnapshotCliInput {
   network: MidnightNetwork;
   /** Becomes the contract's permanent governor — see the header. */
   governorSecretHex: string;
@@ -133,13 +139,20 @@ async function main() {
     throw new Error(`relayUrl/indexerHttpUrl/indexerWsUrl must be supplied explicitly for network "${input.network}".`);
   }
 
-  const serverWallet = await buildServerWallet(walletSeed, {
-    network: networkConfig.network,
-    relayUrl: networkConfig.relayUrl,
-    provingServerUrl: networkConfig.provingServerUrl,
-    indexerHttpUrl: networkConfig.indexerHttpUrl,
-    indexerWsUrl: networkConfig.indexerWsUrl,
-  });
+  // A deployment is paid for in DUST, and a wallet only sees its DUST once it
+  // has replayed far enough to find it. Resuming from a snapshot is what makes
+  // that affordable here; without one this wallet replays from chain.
+  const serverWallet = await buildServerWallet(
+    walletSeed,
+    {
+      network: networkConfig.network,
+      relayUrl: networkConfig.relayUrl,
+      provingServerUrl: networkConfig.provingServerUrl,
+      indexerHttpUrl: networkConfig.indexerHttpUrl,
+      indexerWsUrl: networkConfig.indexerWsUrl,
+    },
+    snapshotOptionsFrom(input, 'wallet_seed', (message) => process.stderr.write(`${message}\n`)),
+  );
 
   try {
     const zkConfigProvider = new NodeZkConfigProvider(input.zkConfigBasePath);
