@@ -2,7 +2,7 @@
 	"name": "@noctis/integration",
 	"version": "0.1.0",
 	"private": true,
-	"description": "Noctis Protocol integration layer — Midnight SDK wrapper, Blockfrost client, wallet connections",
+	"description": "Noctis Protocol integration layer \u00e2\u20ac\u201d Midnight SDK wrapper, Blockfrost client, wallet connections",
 	"type": "module",
 	"scripts": {
 		"typecheck": "tsc --noEmit -p tsconfig.json",
@@ -22,7 +22,6 @@
 		"assert": "^2.1.0",
 		"esbuild": "^0.28.1",
 		"events": "^3.3.0",
-		"memory-level": "^3.1.0",
 		"process": "^0.11.10",
 		"ts-loader": "^9.6.2",
 		"typescript": "^5.6.0",
@@ -57,6 +56,7 @@
 		"@scure/bip39": "^2.2.0",
 		"cbor": "^10.0.12",
 		"effect": "^3.20.0",
+		"memory-level": "^3.1.0",
 		"ws": "^8.21.1"
 	}
 }

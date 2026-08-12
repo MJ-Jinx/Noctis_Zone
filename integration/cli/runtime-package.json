@@ -1,0 +1,29 @@
+{
+  "name": "noctis-cli-runtime",
+  "private": true,
+  "type": "module",
+  "description": "Exact runtime dependencies of the two CLI bundles built with packages:external. Versions are PINNED to the tree these bundles were built and tested against, so the deployed runtime is the tested one.",
+  "dependencies": {
+    "@lucid-evolution/lucid": "0.5.6",
+    "@midnight-ntwrk/compact-js": "2.5.1",
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/ledger-v8": "8.1.0",
+    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-types": "4.1.1",
+    "@midnight-ntwrk/midnight-js-utils": "4.1.1",
+    "@midnight-ntwrk/wallet-sdk-abstractions": "2.1.0",
+    "@midnight-ntwrk/wallet-sdk-dust-wallet": "4.1.0",
+    "@midnight-ntwrk/wallet-sdk-facade": "4.0.1",
+    "@midnight-ntwrk/wallet-sdk-hd": "3.0.2",
+    "@midnight-ntwrk/wallet-sdk-shielded": "3.0.1",
+    "@midnight-ntwrk/wallet-sdk-unshielded-wallet": "3.1.0",
+    "@noble/hashes": "2.2.0",
+    "memory-level": "3.1.0",
+    "ws": "8.21.1"
+  }
+}
