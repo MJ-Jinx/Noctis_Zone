@@ -40,6 +40,15 @@ for (const v of blueprint.validators) {
 /**
  * Measured 2026-08-08. Update in the same commit that moves one. Newest first.
  *
+ * Last moved by bonding_curve +38: ActivateCurve now bounds the width of the
+ * declared validity range, using the helper and constant the file's other
+ * timestamp-gated arm already applies. It writes `phase_started_at`, which is
+ * the origin ExpireCurve measures its 90-day backstop from, so pinning it to
+ * real chain time keeps that deadline off the signer's own clock. Tier B was
+ * untouched — its four timestamp-gated arms already carry the bound — which
+ * is why only one hash moved here, and only one reference script had to be
+ * re-derived.
+ *
  * Last moved by a positivity guard on the fee-claim amounts: bonding_curve
  * +21, bonding_curve_tier_b +22, for `amount > 0` on two claim arms each.
  * Twenty bytes for a check nobody should have to reason about is a good
@@ -136,7 +145,7 @@ for (const v of blueprint.validators) {
  * decision rather than a surprise.
  */
 const RECORDED: Record<string, number> = {
-  bonding_curve: 11_160,
+  bonding_curve: 11_198,
   bonding_curve_tier_b: 13_955,
   cto_governance: 8_060,
   cto_sybil_challenge: 2_201,
