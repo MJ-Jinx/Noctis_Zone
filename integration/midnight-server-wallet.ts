@@ -207,9 +207,15 @@ export interface ServerWalletSnapshotOptions {
    *
    * A stored dust snapshot can reference Merkle roots the node has since dropped
    * from its recent-root history. The wallet then holds dust it cannot prove
-   * against anything the node still recognises, and submission fails rather than
-   * degrading. Re-reading dust from chain costs the replay this module exists to
-   * avoid, so it stays an explicit escape hatch, not a default.
+   * against anything the node still recognises, and the node rejects the
+   * transaction as `Zswap.Invalid.UnknownMerkleRoot` (241) — whose documented fix
+   * is to resync against the current head and rebuild. Re-reading dust from chain
+   * costs the replay this module exists to avoid, so it stays an explicit escape
+   * hatch, not a default.
+   *
+   * Note this is a DIFFERENT failure from `NotNormalized` (117), which is a
+   * zero-fee problem on an idle chain and is handled by the cost parameters
+   * below. Confusing the two sends you looking in the wrong place.
    */
   dustColdStart?: boolean;
   onRestore?: (restored: readonly SubWalletKind[]) => void;

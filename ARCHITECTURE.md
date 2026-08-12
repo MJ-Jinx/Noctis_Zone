@@ -200,15 +200,16 @@ Platform operator (a CLI — no browser wallet is involved on this path)
  ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ REPLAY TO A SPENDABLE DUST BALANCE                                       │
-│ integration/cli/midnight-sync-wallets.ts   (one wallet at a time)        │
+│ integration/cli/midnight-sync-wallets.ts                                 │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ Each attempt runs in its own child process with a fresh heap and         │
 │ resumes from the last snapshot, so replay progress accumulates across    │
 │ attempts rather than restarting with each one.                           │
 │                                                                          │
-│ Wallets are replayed strictly serially: running them together            │
-│ multiplies peak memory and buys no throughput, because the cost is the   │
-│ replay itself rather than any wait on the network.                       │
+│ One invocation replays its wallets in turn, and several invocations can  │
+│ run side by side. Memory is not what limits that — ten wallets together  │
+│ held about 1.5 GB. Throughput is: a wallet alone advanced at ~230        │
+│ blocks/sec and ~130 with nine siblings, contending for one indexer.      │
 └──────────────────────────────────────────────────────────────────────────┘
  │  every 30 seconds, and once more on the way out
  ▼

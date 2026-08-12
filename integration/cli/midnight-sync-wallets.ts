@@ -17,9 +17,12 @@
 //     heap, resuming from the last snapshot. Progress therefore accumulates
 //     across attempts even though no single attempt reaches the tip.
 //
-// Wallets are synced STRICTLY ONE AT A TIME. Running them together multiplies
-// peak memory by the number of wallets and buys no throughput, since the cost is
-// the replay itself rather than any wait on the network.
+// One invocation replays its wallets one after another. Several invocations can
+// run side by side, and measured on Preprod that is worth doing: ten wallets
+// together held ~1.5 GB in total, so memory is not what limits concurrency. What
+// does limit it is throughput — a wallet replaying alone advanced at ~230 blocks
+// per second and ~130 with nine siblings, because they contend for the same
+// indexer. Ten at once still finishes far sooner than ten in sequence.
 //
 // The attempt log is also the diagnostic: each attempt reports the dust applied
 // index it reached. Those should climb. If they stop climbing while each attempt
@@ -77,7 +80,8 @@ interface AttemptResult {
   status: 'synced' | 'incomplete';
   dustAtomic: string;
   appliedIndex: string;
-  highestIndex: string;
+  /** How far the dust wallet still trails what it considers relevant. Zero when synced. */
+  dustLag: string;
   restoredFrom: readonly string[];
 }
 
@@ -132,10 +136,23 @@ async function runWorker(): Promise<never> {
   // Report progress and heap on a slower cadence than the snapshot loop. Heap is
   // here because the attempt log is meant to answer "is this converging or is the
   // state itself the problem", and that cannot be read from progress alone.
+  //
+  // Lag is measured against `highestRelevantWalletIndex`, which is what the SDK
+  // itself compares in `isCompleteWithin`. `highestIndex` is NOT that number and
+  // is left at 0 for the dust wallet, so a gap computed from it means nothing.
+  //
+  // Only the dust lag is printed. The other two sub-wallets type their `progress`
+  // differently in the SDK — shielded and dust expose the progress DATA, while
+  // unshielded exposes the ops object, which carries no indices — so there is no
+  // one expression that reads a lag from all three. Whether they are caught up is
+  // covered by `isSynced` below, which the SDK computes over all three itself.
   const describe = (state: FacadeState) => {
-    const { appliedIndex, highestIndex } = state.dust.progress;
+    const { appliedIndex, highestRelevantWalletIndex } = state.dust.progress;
     const heapMb = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(0);
-    return `${role}: dust ${appliedIndex}/${highestIndex}, heap ${heapMb}MB`;
+    return (
+      `${role}: dust ${appliedIndex} (lag ${highestRelevantWalletIndex - appliedIndex}), ` +
+      `synced=${state.isSynced}, heap ${heapMb}MB`
+    );
   };
   let last: FacadeState | undefined;
   const ticker = setInterval(() => {
@@ -143,18 +160,23 @@ async function runWorker(): Promise<never> {
   }, 30_000);
   ticker.unref?.();
   try {
-    // Done when the dust sub-wallet holds spendable DUST at the current time.
-    // That, not reaching the tip, is what makes the wallet able to pay a fee —
-    // and it is reachable earlier, because the balance appears as soon as the
-    // registered UTXO's generation has been replayed.
+    // Done when the wallet can actually SPEND, which takes both conditions.
+    //
+    // A visible DUST balance alone is not enough. A wallet that has replayed far
+    // enough to see its DUST can still be a long way behind the chain, and a
+    // transaction it builds then references a Merkle root the node no longer
+    // keeps — rejected as `Zswap.Invalid.UnknownMerkleRoot` (241), whose
+    // documented fix is to resync against the current head and rebuild. So this
+    // waits for the facade's own definition of synced, which requires all three
+    // sub-wallets to be strictly caught up, and only then checks the balance.
     const synced = await waitForWalletState(
       wallet.facade,
       (state) => {
         last = state;
-        return state.dust.balance(new Date()) > 0n;
+        return state.isSynced && state.dust.balance(new Date()) > 0n;
       },
       attemptMs,
-      'the dust wallet to report a spendable balance',
+      'the wallet to catch up to the chain head with spendable DUST',
     );
     last = synced;
     log(describe(synced));
@@ -168,7 +190,7 @@ async function runWorker(): Promise<never> {
         status: 'synced',
         dustAtomic: synced.dust.balance(new Date()).toString(),
         appliedIndex: synced.dust.progress.appliedIndex.toString(),
-        highestIndex: synced.dust.progress.highestIndex.toString(),
+        dustLag: (synced.dust.progress.highestRelevantWalletIndex - synced.dust.progress.appliedIndex).toString(),
         restoredFrom: wallet.restoredFrom,
       } satisfies AttemptResult,
       0,
@@ -186,7 +208,9 @@ async function runWorker(): Promise<never> {
         status: 'incomplete',
         dustAtomic: last ? last.dust.balance(new Date()).toString() : '0',
         appliedIndex: last ? last.dust.progress.appliedIndex.toString() : '0',
-        highestIndex: last ? last.dust.progress.highestIndex.toString() : '0',
+        dustLag: last
+          ? (last.dust.progress.highestRelevantWalletIndex - last.dust.progress.appliedIndex).toString()
+          : '0',
         restoredFrom: wallet.restoredFrom,
       } satisfies AttemptResult,
       0,
