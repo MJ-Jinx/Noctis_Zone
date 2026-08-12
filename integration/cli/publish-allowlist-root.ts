@@ -54,6 +54,7 @@ import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config
 import { MemoryLevel } from 'memory-level';
 import { NoctisLaunchManager, NoctisMidnightClient } from '../midnight-client.js';
 import { buildServerWallet, defaultNetworkConfig, type MidnightNetwork } from '../midnight-server-wallet.js';
+import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
 interface Input {
@@ -93,6 +94,13 @@ async function main() {
     'zkConfigBasePath',
     'proofServerUrl',
   ]);
+
+  // Before the wallet, the network, or anything that costs time: are these the
+  // compiled artifacts this bundle was built for? The tree is not git-tracked,
+  // so it is delivered by hand and can be absent or a generation behind while
+  // every other check passes. Failing here names the artifacts; failing later
+  // names a proof.
+  assertZkConfigMatchesBuild(input.zkConfigBasePath);
 
   setNetworkId(input.network);
 

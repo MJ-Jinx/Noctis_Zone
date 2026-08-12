@@ -11,7 +11,7 @@
 // or references either widget.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -786,9 +786,68 @@ function blueprintFingerprint() {
 	return createHash("sha256").update(lines, "utf8").digest("hex");
 }
 
+/**
+ * A stable identifier for the compiled Compact ZK artifacts a governor
+ * operation proves against, injected into every bundle so a CLI can refuse an
+ * artifact set it was not built for.
+ *
+ * THE TWIN: zk-config-fingerprint.ts computes this same value at runtime and
+ * compares, and zk-config-fingerprint.test.ts pins the algorithm. Change one
+ * and you must change the other.
+ *
+ * Returns undefined when the tree is absent. That tree is gitignored (79 MB of
+ * prover keys), so a fresh checkout or a CI runner legitimately has no copy,
+ * and refusing to build there would be wrong. It is announced loudly rather
+ * than silently, because a bundle built without it carries no guard.
+ */
+function zkConfigFingerprint() {
+	const base = join(__dirname, "..", "contracts", "midnight", "compiled_realzk", "eligibility_gate");
+	let info;
+	try {
+		info = JSON.parse(readFileSync(join(base, "compiler", "contract-info.json"), "utf8"));
+	} catch {
+		return undefined;
+	}
+
+	const canonicalise = (v) => {
+		if (Array.isArray(v)) return v.map(canonicalise);
+		if (v !== null && typeof v === "object") {
+			const out = {};
+			for (const k of Object.keys(v).sort()) out[k] = canonicalise(v[k]);
+			return out;
+		}
+		return v;
+	};
+
+	const lines = [
+		`contract-info:${createHash("sha256").update(JSON.stringify(canonicalise(info)), "utf8").digest("hex")}`,
+	];
+	const keysDir = join(base, "keys");
+	for (const name of readdirSync(keysDir).sort()) {
+		const full = join(keysDir, name);
+		if (!statSync(full).isFile()) continue;
+		if (name.endsWith(".verifier")) {
+			lines.push(`keys/${name}:${createHash("sha256").update(readFileSync(full)).digest("hex")}`);
+		} else if (name.endsWith(".prover")) {
+			lines.push(`keys/${name}:len=${statSync(full).size}`);
+		}
+	}
+	return createHash("sha256").update(lines.sort().join("\n"), "utf8").digest("hex");
+}
+
 async function run() {
 	const fingerprint = blueprintFingerprint();
 	console.log(`blueprint fingerprint: ${fingerprint}`);
+	const zkFingerprint = zkConfigFingerprint();
+	if (zkFingerprint) {
+		console.log(`zk config fingerprint: ${zkFingerprint}`);
+	} else {
+		console.warn(
+			"zk config fingerprint: NOT COMPUTED — contracts/midnight/compiled_realzk/eligibility_gate " +
+				"is absent, so bundles from this build carry no ZK artifact guard. Fine for a checkout " +
+				"without the artifacts; not fine for a build you intend to deploy.",
+		);
+	}
 	const configs = [
 		cliConfig,
 		allowlistTreeCliConfig,
@@ -839,7 +898,14 @@ async function run() {
 		// accident.
 		.map((c) => ({
 			...c,
-			define: { ...c.define, __BLUEPRINT_FINGERPRINT__: JSON.stringify(fingerprint) },
+			define: {
+				...c.define,
+				__BLUEPRINT_FINGERPRINT__: JSON.stringify(fingerprint),
+				// `undefined` rather than a string when the artifacts are absent:
+				// the runtime side treats a non-string as "no build to disagree
+				// with" and stays silent, the same way it does under tsx/vitest.
+				__ZK_CONFIG_FINGERPRINT__: JSON.stringify(zkFingerprint),
+			},
 		}));
 
 	if (watch) {
