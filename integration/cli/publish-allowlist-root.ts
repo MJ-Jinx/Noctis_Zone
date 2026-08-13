@@ -53,12 +53,19 @@ import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
 import { MemoryLevel } from 'memory-level';
 import { NoctisLaunchManager, NoctisMidnightClient } from '../midnight-client.js';
-import { buildServerWallet, defaultNetworkConfig, type MidnightNetwork } from '../midnight-server-wallet.js';
+import {
+  buildServerWallet,
+  defaultNetworkConfig,
+  type MidnightNetwork,
+  type SnapshotCliInput,
+  snapshotOptionsFrom,
+  waitForWalletState,
+} from '../midnight-server-wallet.js';
 import { ephemeralPrivateStatePassword } from '../private-state-store.js';
 import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
-interface Input {
+interface Input extends SnapshotCliInput {
   network: MidnightNetwork;
   governorSecretHex: string;
   walletSeedHex: string;
@@ -69,6 +76,12 @@ interface Input {
   relayUrl?: string;
   indexerHttpUrl?: string;
   indexerWsUrl?: string;
+  /**
+   * How long to allow the governor wallet to reach the chain head. This call
+   * pays a fee, so it proves a DUST spend, and a proof built against a stale
+   * view of the chain is one the node refuses as invalid.
+   */
+  syncTimeoutMs?: number;
 }
 
 function fromHex(hex: string, label: string): Uint8Array {
@@ -124,15 +137,33 @@ async function main() {
     );
   }
 
-  const serverWallet = await buildServerWallet(walletSeed, {
-    network: networkConfig.network,
-    relayUrl: networkConfig.relayUrl,
-    provingServerUrl: networkConfig.provingServerUrl,
-    indexerHttpUrl: networkConfig.indexerHttpUrl,
-    indexerWsUrl: networkConfig.indexerWsUrl,
-  });
+  // Resuming from a snapshot turns this from a full chain replay into a short
+  // catch-up. Without one the wait below is the whole history.
+  const serverWallet = await buildServerWallet(
+    walletSeed,
+    {
+      network: networkConfig.network,
+      relayUrl: networkConfig.relayUrl,
+      provingServerUrl: networkConfig.provingServerUrl,
+      indexerHttpUrl: networkConfig.indexerHttpUrl,
+      indexerWsUrl: networkConfig.indexerWsUrl,
+    },
+    snapshotOptionsFrom(input, 'wallet_seed', (message) => process.stderr.write(`${message}\n`)),
+  );
 
   try {
+    // Publishing a root costs a fee, so it proves a DUST spend. Proved against
+    // a view of the chain that has moved on, the node refuses it as an invalid
+    // proof — a failure that names the proof rather than the staleness behind
+    // it. Same wait the deploy makes, for the same reason.
+    process.stderr.write('waiting for the governor wallet to catch up to the chain head\n');
+    await waitForWalletState(
+      serverWallet.facade,
+      (state) => state.isSynced && state.dust.balance(new Date()) > 0n,
+      input.syncTimeoutMs ?? 900_000,
+      'the governor wallet to reach the chain head with spendable DUST',
+    );
+
     const zkConfigProvider = new NodeZkConfigProvider(input.zkConfigBasePath);
     const providers: ContractProviders = {
       privateStateProvider: levelPrivateStateProvider({
