@@ -630,6 +630,20 @@ const midnightSyncWalletsCliConfig = {
 	logLevel: "info",
 };
 
+// Turns server-held wallets into a launch's allowlist root plus one membership
+// proof per registrant. Pure computation over the zk-proofs package — no
+// Midnight SDK, so this bundles normally rather than needing packages:external.
+const buildDvAllowlistBundleCliConfig = {
+	entryPoints: [join(__dirname, "cli/build-dv-allowlist-bundle.ts")],
+	outfile: join(__dirname, "cli/dist/build-dv-allowlist-bundle.mjs"),
+	bundle: true,
+	platform: "node",
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+};
+
 const publishAllowlistRootCliConfig = {
 	entryPoints: [join(__dirname, "cli/publish-allowlist-root.ts")],
 	outfile: join(__dirname, "cli/dist/publish-allowlist-root.mjs"),
@@ -946,6 +960,7 @@ async function run() {
 		deployEligibilityGateCliConfig,
 		midnightRegisterDustCliConfig,
 		midnightSyncWalletsCliConfig,
+		buildDvAllowlistBundleCliConfig,
 		tierBCurveActionCliConfig,
 		resolveAddressVkhCliConfig,
 		stakeActionCliConfig,
