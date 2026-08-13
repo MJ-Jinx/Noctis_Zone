@@ -101,7 +101,7 @@ const COMPILED_ASSETS_ROOT = '../contracts/midnight/compiled';
  * afterwards by maintenance update. Only ever pass this when deploying — every
  * other use needs the whole contract, or the deferred circuits are unreachable.
  */
-function compileEligibilityGate(witnesses: EligibilityGateWitnesses, deferCircuits: readonly string[] = []) {
+export function compileEligibilityGate(witnesses: EligibilityGateWitnesses, deferCircuits: readonly string[] = []) {
   const contract =
     deferCircuits.length === 0
       ? EligibilityGateContract

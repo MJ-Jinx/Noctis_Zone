@@ -1,6 +1,5 @@
-import { MemoryLevel } from 'memory-level';
 import { describe, expect, it, vi } from 'vitest';
-import { createDarkVeilPrivateStore } from '../private-state-store.js';
+import { createDarkVeilPrivateStore, inMemoryLevelFactory } from '../private-state-store.js';
 
 // Real password meeting the SDK's actual strength policy (validatePassword:
 // 16+ chars, 3+ character classes, no 4+-char runs/sequences, no more than
@@ -18,27 +17,11 @@ const OTHER_REAL_PASSWORD = 'Qx7$mVenice42Lagoon';
 const WALLET_A_SIGNATURE = 'aa'.repeat(64);
 const WALLET_B_SIGNATURE = 'bb'.repeat(64);
 
-function freshMemoryLevelFactory() {
-  // A brand-new in-memory backing store per TEST (each call to this outer
-  // function), but memoized BY dbName within that test -- the real
-  // LevelFactory contract expects repeat calls with the same dbName to
-  // return the same underlying database (matching how the default
-  // classic-level/browser-level backend opens one persistent handle and
-  // reuses it), not a fresh empty store every invocation. Confirmed this
-  // the hard way: an unmemoized factory silently broke every read-after-
-  // write in this file (buy nonce "persistence" was actually regenerating
-  // a new nonce every call; exportPrivateStates found nothing to export)
-  // because each set()/get() was hitting a different empty MemoryLevel.
-  const cache = new Map<string, MemoryLevel<string, string>>();
-  return (dbName: string) => {
-    let db = cache.get(dbName);
-    if (!db) {
-      db = new MemoryLevel<string, string>();
-      cache.set(dbName, db);
-    }
-    return db;
-  };
-}
+// The shared factory the CLIs use, not a copy of it — a test-only duplicate is
+// exactly how the production CLIs came to pass an unmemoized factory while this
+// file quietly held the correct one. See its own doc comment for why memoizing
+// by dbName is what the provider requires.
+const freshMemoryLevelFactory = inMemoryLevelFactory;
 
 function makeStore(accountId: string, walletSignature: string, password = REAL_PASSWORD) {
   const getMasterSignature = vi.fn(async () => walletSignature);
@@ -223,5 +206,29 @@ describe('private-state-store.ts — optional secondary backup flow (export/impo
 
     const { store: storeB } = makeStore('wallet-addr-1', WALLET_B_SIGNATURE);
     await expect(storeB.importBackup(backup, 'Wr0ngPassw0rd!!Nope')).rejects.toThrow(/Failed to decrypt export data/);
+  });
+});
+
+describe('inMemoryLevelFactory', () => {
+  it('returns the same database for a repeated name, so a write is readable afterwards', () => {
+    // The provider opens a database per operation and closes it again. A
+    // factory constructing one each time gives every call its own empty
+    // database, and a value written by one call is gone by the next — which is
+    // silent, because nothing errors: reads simply find nothing.
+    const factory = inMemoryLevelFactory();
+
+    expect(factory('noctis-db')).toBe(factory('noctis-db'));
+  });
+
+  it('keeps different names apart', () => {
+    const factory = inMemoryLevelFactory();
+
+    expect(factory('one')).not.toBe(factory('two'));
+  });
+
+  it('gives each caller its own set of databases', () => {
+    // Two stores in the same process are meant to be two stores, so this must
+    // not become a module-level cache shared between them.
+    expect(inMemoryLevelFactory()('shared-name')).not.toBe(inMemoryLevelFactory()('shared-name'));
   });
 });

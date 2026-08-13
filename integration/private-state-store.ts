@@ -63,6 +63,7 @@ import {
 } from '@midnight-ntwrk/midnight-js-types';
 import { validatePassword } from '@midnight-ntwrk/midnight-js-utils';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { MemoryLevel } from 'memory-level';
 import type { UserSecretKey } from '../contracts/midnight/witnesses.js';
 
 // ============================================================================
@@ -376,4 +377,30 @@ export function createDarkVeilPrivateStore(config: CreateDarkVeilPrivateStoreCon
  */
 export function ephemeralPrivateStatePassword(): string {
   return `Aa1!${randomBytes(24).toString('base64url')}`;
+}
+
+/**
+ * An in-memory store that keeps what is written to it for the life of the
+ * process.
+ *
+ * The provider opens a database per operation and closes it again, so a factory
+ * that constructs one each time hands every call its own empty database:
+ * writes land in a database that is discarded immediately and reads see a fresh
+ * one. Returning the same instance per name is what makes a value written by
+ * one call readable by the next — which the signing key for a maintenance
+ * update depends on, since it is set and then read back within one run.
+ *
+ * One factory per caller, not a module-level cache: two stores in the same
+ * process are meant to be two stores.
+ */
+export function inMemoryLevelFactory(): (dbName: string) => never {
+  const databases = new Map<string, unknown>();
+  return (dbName: string) => {
+    let database = databases.get(dbName);
+    if (!database) {
+      database = new MemoryLevel(dbName as never);
+      databases.set(dbName, database);
+    }
+    return database as never;
+  };
 }

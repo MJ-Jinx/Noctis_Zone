@@ -35,7 +35,6 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
-import { MemoryLevel } from 'memory-level';
 import type { MerkleProofEntry } from '../../contracts/midnight/witnesses.js';
 import { fromHex32, resolveEligibilityGateDeployArgs } from '../eligibility-gate-deploy-args.js';
 import { describeError, safeShow, unwrapForDiagnosis } from '../error-detail.js';
@@ -49,7 +48,7 @@ import {
   snapshotOptionsFrom,
   waitForWalletState,
 } from '../midnight-server-wallet.js';
-import { ephemeralPrivateStatePassword } from '../private-state-store.js';
+import { ephemeralPrivateStatePassword, inMemoryLevelFactory } from '../private-state-store.js';
 import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { jsonSafe, parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
@@ -209,7 +208,7 @@ async function main() {
         // One-shot process: the private state never needs to outlive it.
         privateStoragePasswordProvider: ephemeralPrivateStatePassword,
         accountId: `deploy-eligibility-gate-${input.launchIdHex}`,
-        levelFactory: (dbName: string) => new MemoryLevel(dbName as never) as never,
+        levelFactory: inMemoryLevelFactory(),
       }),
       publicDataProvider: indexerPublicDataProvider(networkConfig.indexerHttpUrl, networkConfig.indexerWsUrl),
       zkConfigProvider,

@@ -51,7 +51,6 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
-import { MemoryLevel } from 'memory-level';
 import { NoctisLaunchManager, NoctisMidnightClient } from '../midnight-client.js';
 import {
   assertProofServerReachable,
@@ -62,7 +61,7 @@ import {
   snapshotOptionsFrom,
   waitForWalletState,
 } from '../midnight-server-wallet.js';
-import { ephemeralPrivateStatePassword } from '../private-state-store.js';
+import { ephemeralPrivateStatePassword, inMemoryLevelFactory } from '../private-state-store.js';
 import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
@@ -178,7 +177,7 @@ async function main() {
         // here, unlike a real user session's persistent browser store.
         privateStoragePasswordProvider: ephemeralPrivateStatePassword,
         accountId: `governor-allowlist-publish-${input.contractAddress}`,
-        levelFactory: (dbName: string) => new MemoryLevel(dbName as never) as never,
+        levelFactory: inMemoryLevelFactory(),
       }),
       publicDataProvider: indexerPublicDataProvider(networkConfig.indexerHttpUrl, networkConfig.indexerWsUrl),
       zkConfigProvider,

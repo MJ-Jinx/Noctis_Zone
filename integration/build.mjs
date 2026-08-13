@@ -584,6 +584,21 @@ const readDvPurchasesCliConfig = {
 // Deploys a Tier B eligibility gate. Same packages:external treatment as
 // publishAllowlistRootCliConfig below and for the same reason — it pulls the
 // identical Midnight dependency tree, so it cannot be bundled either.
+// Completes a gate that was deployed in phases, one maintenance update per
+// circuit. Same packages:external treatment as the deploy CLI above and for
+// the same reason — it pulls the identical Midnight dependency tree.
+const deliverDeferredCircuitsCliConfig = {
+	entryPoints: [join(__dirname, "cli/deliver-deferred-circuits.ts")],
+	outfile: join(__dirname, "cli/dist/deliver-deferred-circuits.mjs"),
+	bundle: true,
+	platform: "node",
+	packages: "external",
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+};
+
 const deployEligibilityGateCliConfig = {
 	entryPoints: [join(__dirname, "cli/deploy-eligibility-gate.ts")],
 	outfile: join(__dirname, "cli/dist/deploy-eligibility-gate.mjs"),
@@ -958,6 +973,7 @@ async function run() {
 		readDvPurchasesCliConfig,
 		publishAllowlistRootCliConfig,
 		deployEligibilityGateCliConfig,
+		deliverDeferredCircuitsCliConfig,
 		midnightRegisterDustCliConfig,
 		midnightSyncWalletsCliConfig,
 		buildDvAllowlistBundleCliConfig,
