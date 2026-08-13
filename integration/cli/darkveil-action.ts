@@ -156,6 +156,16 @@ function proofFrom(
   }));
 }
 
+/**
+ * Timestamped phase marker on stderr.
+ *
+ * Every phase below can block for minutes — catch-up, proving, balancing — and
+ * without these a slow run and a wedged one look identical: one line of output
+ * and then nothing. Which phase the silence falls in is the first thing worth
+ * knowing about any failure here.
+ */
+const step = (message: string) => process.stderr.write(`[${new Date().toISOString().slice(11, 19)}] ${message}\n`);
+
 function requireBigint(value: string | undefined, field: string): bigint {
   if (value === undefined || value === '') {
     throw new Error(`${field} is required for this action.`);
@@ -229,11 +239,20 @@ async function main() {
     // of the chain that has moved on, the node refuses it as an invalid proof —
     // a failure that names the proof rather than the staleness behind it.
     process.stderr.write('waiting for the wallet to catch up to the chain head\n');
-    await waitForWalletState(
+    const synced = await waitForWalletState(
       serverWallet.facade,
       (state) => state.isSynced && state.dust.balance(new Date()) > 0n,
       input.syncTimeoutMs ?? 900_000,
       'the wallet to reach the chain head with spendable DUST',
+    );
+
+    // COINS, not just the balance. `balance(time)` is a generated figure for a
+    // moment in time; the fee balancer chooses from these. The two can disagree,
+    // and a wallet whose balance looks healthy while it holds nothing selectable
+    // fails much later, inside the balancer, with an error that names neither.
+    const dustCoins = synced.dust.availableCoins;
+    step(
+      `wallet ready — ${synced.dust.balance(new Date())} DUST across ${dustCoins.length} coin(s), dust index ${synced.dust.progress.appliedIndex}`,
     );
 
     const zkConfigProvider = new NodeZkConfigProvider(input.zkConfigBasePath);
@@ -252,6 +271,7 @@ async function main() {
       midnightProvider: serverWallet.midnightProvider,
     };
 
+    step('connecting to the contract');
     const client = new NoctisMidnightClient({ bytes: identitySecret }, { bytes: governorSecret });
     await client.connectEligibilityGate(
       providers,
@@ -267,6 +287,13 @@ async function main() {
     // Read first, so an action can report the state it acted on rather than
     // leaving the caller to query separately for it.
     const before = await manager.getDarkVeilSnapshot();
+    step(`launch is phase=${before.phase} dvState=${before.dvState}; running "${input.action}"`);
+    if (input.action !== 'read') {
+      // One line, because the three stages inside it are the SDK's, not ours,
+      // and it reports nothing between them — so a stall anywhere in here looks
+      // the same from outside. Naming them at least says what is being waited on.
+      step('prove -> balance -> submit (the proof server does the first, this process the rest)');
+    }
 
     let result: unknown = null;
     let commitmentHex: string | undefined;

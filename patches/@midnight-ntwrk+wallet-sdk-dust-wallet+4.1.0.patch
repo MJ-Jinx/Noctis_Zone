@@ -1,0 +1,48 @@
+diff --git a/node_modules/@midnight-ntwrk/wallet-sdk-dust-wallet/dist/v1/Transacting.js b/node_modules/@midnight-ntwrk/wallet-sdk-dust-wallet/dist/v1/Transacting.js
+index a5e881b..7a3e32e 100644
+--- a/node_modules/@midnight-ntwrk/wallet-sdk-dust-wallet/dist/v1/Transacting.js
++++ b/node_modules/@midnight-ntwrk/wallet-sdk-dust-wallet/dist/v1/Transacting.js
+@@ -249,9 +249,9 @@ export class TransactingCapabilityImplementation {
+         const initialFees = transactions.reduce((total, transaction) => total +
+             TransactingCapabilityImplementation.feeImbalance(transaction, this.calculateFee(transaction, ledgerParams)), 0n);
+         const dust = this.getCoins().getAvailableCoinsWithGeneratedDust(state, currentTime);
+-        return pipe(Effect.iterate({ currentFee: initialFees, recipeInputs: [], converged: false }, {
++        return pipe(Effect.iterate({ currentFee: initialFees, recipeInputs: [], converged: false, iterations: 0 }, {
+             while: (s) => !s.converged,
+-            body: ({ currentFee }) => Effect.try({
++            body: ({ currentFee, iterations }) => Effect.try({
+                 try: () => {
+                     const recipe = getBalanceRecipe({
+                         coins: dust.map((coin) => ({
+@@ -259,7 +259,12 @@ export class TransactingCapabilityImplementation {
+                             value: coin.value,
+                             token: coin.token,
+                         })),
+-                        initialImbalances: CapImbalances.fromEntry('dust', currentFee),
++                        // PATCHED (Noctis). The balancer reads a NEGATIVE imbalance as a
++                        // deficit to cover with inputs, and a positive one as a surplus to
++                        // pay out as change. The fee is a positive number, so as shipped it
++                        // asked for change instead of inputs: zero inputs, zero coverage, and
++                        // `newFee <= coverage` false forever. Upstream midnight-wallet#438.
++                        initialImbalances: CapImbalances.fromEntry('dust', currentFee <= 0n ? currentFee : -currentFee),
+                         feeTokenType: 'dust',
+                         coinSelection: this.getCoinSelection(),
+                         transactionCostModel: {
+@@ -272,7 +277,16 @@ export class TransactingCapabilityImplementation {
+                     const recipeInputs = recipe.inputs.map(({ token, value }) => ({ token, value }));
+                     const newFee = this.dryRunFee(recipeInputs, transactions, secretKey, state, ttl, currentTime, ledgerParams);
+                     const recipeAmountCoverage = recipeInputs.reduce((sum, input) => sum + input.value, 0n);
+-                    return { currentFee: newFee, recipeInputs, converged: newFee <= recipeAmountCoverage };
++                    // PATCHED (Noctis): a bound, so a fixpoint that is never reached
++                    // fails with numbers instead of looping. Unbounded, each pass
++                    // allocates ledger WASM objects that cannot be collected while the
++                    // loop holds the event loop, so it ends in an out-of-memory trap
++                    // reported as `unreachable` — naming neither the loop nor the fee.
++                    if (iterations >= 32) {
++                        throw new Error(`dust fee balancing did not converge after ${iterations} iterations `
++                            + `(fee ${newFee}, inputs ${recipeInputs.length}, coverage ${recipeAmountCoverage})`);
++                    }
++                    return { currentFee: newFee, recipeInputs, converged: newFee <= recipeAmountCoverage, iterations: iterations + 1 };
+                 },
+                 catch: (err) => {
+                     if (err instanceof BalancingInsufficientFundsError) {

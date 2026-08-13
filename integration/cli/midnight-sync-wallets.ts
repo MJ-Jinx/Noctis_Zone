@@ -79,6 +79,19 @@ interface Input {
 interface AttemptResult {
   status: 'synced' | 'incomplete';
   dustAtomic: string;
+  /**
+   * How many spendable DUST coins the wallet actually holds.
+   *
+   * Reported alongside the balance because they answer different questions and
+   * can disagree. `balance(time)` is a GENERATED figure computed for a moment
+   * in time; this is the count of coins the fee balancer has to choose from. A
+   * healthy balance with no coins behind it still cannot pay for anything, and
+   * a balance spread over very many small coins makes balancing expensive —
+   * neither is visible from the balance alone.
+   */
+  dustCoins: number;
+  /** The largest single coin, which is what a one-input fee payment can draw on. */
+  largestDustCoinAtomic: string;
   appliedIndex: string;
   /** How far the dust wallet still trails what it considers relevant. Zero when synced. */
   dustLag: string;
@@ -185,10 +198,15 @@ async function runWorker(): Promise<never> {
     await saver.stop();
     await wallet.shutdown();
 
+    const dustCoins = synced.dust.availableCoins;
     return await writeAndExit(
       {
         status: 'synced',
         dustAtomic: synced.dust.balance(new Date()).toString(),
+        dustCoins: dustCoins.length,
+        largestDustCoinAtomic: dustCoins
+          .reduce((largest, coin) => (coin.generatedNow > largest ? coin.generatedNow : largest), 0n)
+          .toString(),
         appliedIndex: synced.dust.progress.appliedIndex.toString(),
         dustLag: (synced.dust.progress.highestRelevantWalletIndex - synced.dust.progress.appliedIndex).toString(),
         restoredFrom: wallet.restoredFrom,
@@ -207,6 +225,12 @@ async function runWorker(): Promise<never> {
       {
         status: 'incomplete',
         dustAtomic: last ? last.dust.balance(new Date()).toString() : '0',
+        dustCoins: last ? last.dust.availableCoins.length : 0,
+        largestDustCoinAtomic: last
+          ? last.dust.availableCoins
+              .reduce((largest, coin) => (coin.generatedNow > largest ? coin.generatedNow : largest), 0n)
+              .toString()
+          : '0',
         appliedIndex: last ? last.dust.progress.appliedIndex.toString() : '0',
         dustLag: last
           ? (last.dust.progress.highestRelevantWalletIndex - last.dust.progress.appliedIndex).toString()
@@ -298,7 +322,9 @@ async function runSupervisor(input: Input): Promise<never> {
     }
 
     if (synced) {
-      log(`${wallet.role}: synced — ${synced.dustAtomic} DUST spendable`);
+      log(
+        `${wallet.role}: synced — ${synced.dustAtomic} DUST spendable across ${synced.dustCoins} coin(s), largest ${synced.largestDustCoinAtomic}`,
+      );
       results[wallet.role] = { ...synced, attempts: progress.length };
     } else {
       log(`${wallet.role}: not synced within ${maxAttempts} attempts`);

@@ -86,6 +86,7 @@ import {
   buildServerWallet,
   defaultNetworkConfig,
   type ServerWalletNetworkConfig,
+  snapshotOptionsFrom,
   submitWithReconnect,
 } from '../midnight-server-wallet.js';
 
@@ -577,5 +578,45 @@ describe('assertProofServerReachable', () => {
   it('points at the keep-alive, since that is the usual remedy here', async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED')) as never;
     await expect(assertProofServerReachable('http://localhost:6310')).rejects.toThrow(/wsl-keepalive/);
+  });
+});
+
+// ============================================================================
+// snapshotOptionsFrom
+// ============================================================================
+// A pure mapper, but the kind that silently loses a field: every value here is
+// optional, so dropping one changes behaviour without failing to compile.
+
+describe('snapshotOptionsFrom', () => {
+  const BOTH = { snapshotDir: 'C:/snaps', snapshotPassphrase: 'pw' };
+
+  it('returns undefined unless BOTH the directory and the passphrase are given', () => {
+    // A directory without the passphrase that wrote it can only produce
+    // snapshots nothing can read back, so half the pair is not a partial
+    // configuration — it is no configuration.
+    expect(snapshotOptionsFrom({}, 'wallet_seed')).toBeUndefined();
+    expect(snapshotOptionsFrom({ snapshotDir: 'C:/snaps' }, 'wallet_seed')).toBeUndefined();
+    expect(snapshotOptionsFrom({ snapshotPassphrase: 'pw' }, 'wallet_seed')).toBeUndefined();
+    expect(snapshotOptionsFrom(BOTH, 'wallet_seed')).toBeDefined();
+  });
+
+  it('carries the accountId through', () => {
+    expect(snapshotOptionsFrom(BOTH, 'buyer_7')?.accountId).toBe('buyer_7');
+  });
+
+  it('passes dustColdStart through, so the escape hatch reaches the CLI that needs it', () => {
+    // The CLIs that PAY a fee are the ones a stale dust snapshot stops. Dropped
+    // here, the flag would be accepted on stdin and quietly do nothing, and the
+    // run would fail exactly as it did without it.
+    expect(snapshotOptionsFrom({ ...BOTH, dustColdStart: true }, 'wallet_seed')?.dustColdStart).toBe(true);
+    expect(snapshotOptionsFrom({ ...BOTH, dustColdStart: false }, 'wallet_seed')?.dustColdStart).toBe(false);
+    expect(snapshotOptionsFrom(BOTH, 'wallet_seed')?.dustColdStart).toBeUndefined();
+  });
+
+  it('reports which sub-wallets were restored, naming the account', () => {
+    const lines: string[] = [];
+    const options = snapshotOptionsFrom(BOTH, 'buyer_3', (message) => lines.push(message));
+    options?.onRestore?.(['shielded', 'dust']);
+    expect(lines).toEqual(['buyer_3: resumed shielded, dust from snapshot']);
   });
 });

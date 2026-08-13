@@ -4,12 +4,16 @@
   "private": true,
   "description": "Noctis Protocol — token launchpad monorepo (Cardano L1 + Midnight Network)",
   "scripts": {
-    "prepare": "git config core.hooksPath .githooks"
+    "prepare": "git config core.hooksPath .githooks",
+    "postinstall": "patch-package"
   },
   "workspaces": [
     "contracts/midnight",
     "integration",
     "packages/types",
     "packages/zk-proofs"
-  ]
+  ],
+  "devDependencies": {
+    "patch-package": "^8.0.1"
+  }
 }

@@ -298,11 +298,20 @@ export interface ServerWalletSnapshotOptions {
   onRestore?: (restored: readonly SubWalletKind[]) => void;
 }
 
-/** The two fields a CLI needs to accept for its wallet to resume from a snapshot. */
+/** The fields a CLI needs to accept for its wallet to resume from a snapshot. */
 export interface SnapshotCliInput {
   /** Directory holding snapshots. Must be outside the repository. */
   snapshotDir?: string;
   snapshotPassphrase?: string;
+  /**
+   * Pass through to {@link ServerWalletSnapshotOptions.dustColdStart}.
+   *
+   * Exposed on every CLI rather than only the sync one, because the CLIs that
+   * PAY a fee are exactly the ones a stale dust snapshot stops — so the
+   * documented remedy has to be reachable from the command that hits the
+   * problem, not only from a separate one run beforehand.
+   */
+  dustColdStart?: boolean;
 }
 
 /**
@@ -325,6 +334,7 @@ export function snapshotOptionsFrom(
   return {
     store: new WalletStateStore(input.snapshotDir, input.snapshotPassphrase),
     accountId,
+    dustColdStart: input.dustColdStart,
     onRestore: (restored) => log?.(`${accountId}: resumed ${restored.join(', ')} from snapshot`),
   };
 }

@@ -46,7 +46,7 @@
 		"@midnight-ntwrk/midnight-js-protocol": "4.1.1",
 		"@midnight-ntwrk/midnight-js-types": "4.1.1",
 		"@midnight-ntwrk/wallet-sdk-abstractions": "^2.1.0",
-		"@midnight-ntwrk/wallet-sdk-dust-wallet": "^4.1.0",
+		"@midnight-ntwrk/wallet-sdk-dust-wallet": "4.1.0",
 		"@midnight-ntwrk/wallet-sdk-facade": "^4.0.1",
 		"@midnight-ntwrk/wallet-sdk-hd": "^3.0.2",
 		"@midnight-ntwrk/wallet-sdk-shielded": "^3.0.1",
