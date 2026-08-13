@@ -312,6 +312,18 @@ export interface SnapshotCliInput {
    * problem, not only from a separate one run beforehand.
    */
   dustColdStart?: boolean;
+  /**
+   * Which wallet's snapshot to resume — overriding the CLI's own default.
+   *
+   * A CLI that always pays from one wallet can name it once and never think
+   * about this. A CLI that pays from a DIFFERENT wallet per invocation cannot:
+   * it must say which, because a snapshot belongs to a specific seed. Asking
+   * for the wrong one is not a silent no-op that costs a little time — the
+   * seed fingerprint guard rejects it, the wallet falls back to replaying the
+   * whole chain, and on a public testnet that does not finish inside any
+   * sensible budget.
+   */
+  snapshotAccountId?: string;
 }
 
 /**
@@ -324,6 +336,9 @@ export interface SnapshotCliInput {
  *
  * Both fields are required together: a snapshot directory without the passphrase
  * that wrote it can only produce snapshots nothing can read back.
+ *
+ * `accountId` is the CLI's default. `input.snapshotAccountId` overrides it, for
+ * the CLIs whose paying wallet changes per invocation — see that field.
  */
 export function snapshotOptionsFrom(
   input: SnapshotCliInput,
@@ -331,11 +346,12 @@ export function snapshotOptionsFrom(
   log?: (message: string) => void,
 ): ServerWalletSnapshotOptions | undefined {
   if (!input.snapshotDir || !input.snapshotPassphrase) return undefined;
+  const resolved = input.snapshotAccountId ?? accountId;
   return {
     store: new WalletStateStore(input.snapshotDir, input.snapshotPassphrase),
-    accountId,
+    accountId: resolved,
     dustColdStart: input.dustColdStart,
-    onRestore: (restored) => log?.(`${accountId}: resumed ${restored.join(', ')} from snapshot`),
+    onRestore: (restored) => log?.(`${resolved}: resumed ${restored.join(', ')} from snapshot`),
   };
 }
 

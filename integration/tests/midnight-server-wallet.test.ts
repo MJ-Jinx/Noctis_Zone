@@ -604,6 +604,28 @@ describe('snapshotOptionsFrom', () => {
     expect(snapshotOptionsFrom(BOTH, 'buyer_7')?.accountId).toBe('buyer_7');
   });
 
+  it('lets the caller override the accountId, for CLIs whose paying wallet changes per run', () => {
+    // A CLI with ONE paying wallet names it once. A CLI that pays from a
+    // different wallet each run cannot, and getting this wrong is not a small
+    // cost: a snapshot is fingerprinted to its seed, so asking for another
+    // wallet's is rejected by the guard and the wallet replays the whole chain
+    // instead — which on a public testnet does not finish. The failure reads as
+    // a sync timeout and says nothing about the account name that caused it.
+    expect(snapshotOptionsFrom({ ...BOTH, snapshotAccountId: 'buyer_2' }, 'wallet_seed')?.accountId).toBe('buyer_2');
+  });
+
+  it('names the overridden account when reporting a restore, not the default', () => {
+    // The restore line is the only signal that a snapshot was used at all. If
+    // it kept printing the default it would read as a successful resume of the
+    // wrong wallet, which is the confusion this whole override exists to end.
+    const lines: string[] = [];
+    const options = snapshotOptionsFrom({ ...BOTH, snapshotAccountId: 'buyer_2' }, 'wallet_seed', (m) =>
+      lines.push(m),
+    );
+    options?.onRestore?.(['dust']);
+    expect(lines).toEqual(['buyer_2: resumed dust from snapshot']);
+  });
+
   it('passes dustColdStart through, so the escape hatch reaches the CLI that needs it', () => {
     // The CLIs that PAY a fee are the ones a stale dust snapshot stops. Dropped
     // here, the flag would be accepted on stdin and quietly do nothing, and the
