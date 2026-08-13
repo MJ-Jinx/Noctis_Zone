@@ -1,0 +1,27 @@
+# Line endings.
+#
+# The repository already stores text with LF, and biome — which the Checks
+# workflow and the pre-push hook both run — formats to LF. On Windows,
+# core.autocrlf=true rewrites files to CRLF whenever git touches them, so an
+# ordinary checkout, pull, or merge leaves source that biome then rejects, and
+# the push is blocked by a formatting error on a file nobody edited.
+#
+# Pinning the checkout to LF makes a working tree on any platform match both
+# what the repository stores and what the formatter expects.
+* text=auto eol=lf
+
+# Anything whose bytes must survive verbatim.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.wasm binary
+*.docx binary
