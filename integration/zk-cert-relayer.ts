@@ -55,7 +55,14 @@ export interface FairLaunchCert {
   totalParticipants: bigint;
   totalTokensAllocated: bigint;
   totalRaised: bigint;
-  participationRate: number; // Uint<8> — percentage of allowlist that participated
+  /**
+   * Uint<8> — percentage of the allowlist that took part.
+   *
+   * A bigint, because that is what the compiled contract hands back for every
+   * Compact numeric type regardless of width. The bundle below narrows it to a
+   * JSON number, which is where the range is checked.
+   */
+  participationRate: bigint;
   closeTimestamp: bigint;
   certHash: Uint8Array; // Compact's own persistentHash — NOT the Blake2b-256 hash below
 }
@@ -97,6 +104,12 @@ export interface ProofBundle {
   totalParticipants: string; // decimal string — bigint doesn't survive JSON.stringify
   totalTokensAllocated: string;
   totalRaised: string;
+  /**
+   * A JSON number rather than the decimal string the other figures use, and it
+   * stays that way: this value is hashed, so the encoding is part of what the
+   * certificate commits to. `Uint<8>` spans 0-255, well inside what a JSON
+   * number represents exactly, so narrowing it loses nothing.
+   */
   participationRate: number;
   closeTimestamp: string;
   certHash: string; // hex — Compact's own persistentHash, included for cross-verification
@@ -152,13 +165,24 @@ export function assembleProofBundle(cert: FairLaunchCert, tier: 'B' | 'C', dvAll
         'confused it with something else.',
     );
   }
+  // Narrowed here, not at the boundary, and checked rather than trusted. The
+  // bundle is hashed by JSON serialisation, and JSON has no bigint — so a value
+  // arriving as one has to become a number for the hash to exist at all. The
+  // declared Uint<8> makes every legal value exact as a number; anything
+  // outside that range did not come from this certificate's own field, and
+  // stopping is better than hashing a figure the contract never published.
+  if (cert.participationRate < 0n || cert.participationRate > 255n) {
+    throw new Error(
+      `participationRate ${cert.participationRate} is outside the Uint<8> range the certificate declares (0-255).`,
+    );
+  }
   return {
     launchId: toHex(cert.launchId),
     tier,
     totalParticipants: cert.totalParticipants.toString(),
     totalTokensAllocated: cert.totalTokensAllocated.toString(),
     totalRaised: cert.totalRaised.toString(),
-    participationRate: cert.participationRate,
+    participationRate: Number(cert.participationRate),
     closeTimestamp: cert.closeTimestamp.toString(),
     certHash: toHex(cert.certHash),
     dvAllocationRoot: dvAllocationRoot ? toHex(dvAllocationRoot) : '',
@@ -274,14 +298,10 @@ export async function relayCertificate(
   relayerAddress: string,
   extraMetadata: Record<string, string | number | boolean> = {},
 ): Promise<RelayCertificateResult> {
-  const certResult = await launchManager.getFairLaunchCert();
-  // Real field per @midnight-ntwrk/midnight-js-contracts' CallResult type:
-  // the JS-typed circuit return value lives at `.private.result`, not
-  // `.result` directly — confirmed against the installed package's real
-  // .d.ts (call.d.ts) before writing this, per the "hand-verify every
-  // .callTx return shape" rule (compact-js's CompiledContract widening
-  // means the compiler won't catch a wrong field name here).
-  const cert = certResult.private.result as FairLaunchCert;
+  // Returns the certificate itself. On Tier B that is a read of the published
+  // ledger; on Tier C it is a circuit call whose `.private.result` unwrapping
+  // the manager handles. Either way the caller gets a FairLaunchCert.
+  const cert = await launchManager.getFairLaunchCert();
 
   const bundle = assembleProofBundle(cert, tier, dvAllocationRoot);
   const proofBundleHash = computeProofBundleHash(bundle);

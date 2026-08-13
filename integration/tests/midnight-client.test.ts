@@ -32,6 +32,15 @@ vi.mock('@midnight-ntwrk/midnight-js-contracts', () => ({
   findDeployedContract: vi.fn(),
 }));
 
+// Reading published state is a real network query against the indexer. What
+// belongs in a unit test is that the client routes to it with the right
+// provider and address, not the query itself — that is verified against the
+// real deployed contract instead.
+vi.mock('../midnight-public-state.js', () => ({
+  readDarkVeilSnapshot: vi.fn(),
+  readEligibilityGateLedger: vi.fn(),
+}));
+
 // Minimal stand-in for CompiledContractOps.make(...).pipe(withWitnesses(w),
 // withCompiledFileAssets(path)) — see midnight-client.ts's compileX helpers.
 // `asEffectContract` (compact-adapter.ts) is a pure type-level cast at
@@ -90,6 +99,8 @@ import {
   TREASURY_WARNING_LOVELACE,
   TREASURY_WITHDRAWAL_WINDOW_SECONDS,
 } from '../midnight-client.js';
+import type { DarkVeilSnapshot } from '../midnight-public-state.js';
+import { readDarkVeilSnapshot, readEligibilityGateLedger } from '../midnight-public-state.js';
 
 // ============================================================================
 // Shared fixtures
@@ -689,6 +700,8 @@ const FALLBACK_METHODS: Array<{
   circuit: string;
   args: unknown[];
 }> = [
+  { method: 'startRegistration', circuit: 'startRegistration', args: [] },
+  { method: 'startBuying', circuit: 'startBuying', args: [fakeBytes32(100)] },
   { method: 'registerForDarkVeil', circuit: 'registerForDarkVeil', args: [] },
   {
     method: 'updateAllowlistRoot',
@@ -712,22 +725,15 @@ const FALLBACK_METHODS: Array<{
     circuit: 'claimRatioBondRefund',
     args: [fakeBytes32(104), 100n],
   },
-  { method: 'getFairLaunchCert', circuit: 'getFairLaunchCert', args: [] },
   {
     method: 'cancelDarkVeilBuyCommit',
     circuit: 'cancelBuyCommit',
     args: [fakeBytes32(105)],
   },
-  { method: 'getDvState', circuit: 'getDvState', args: [] },
-  { method: 'getDvPrice', circuit: 'getDvPrice', args: [] },
-  { method: 'getDvAllocation', circuit: 'getDvAllocation', args: [] },
-  { method: 'getTotalCommitted', circuit: 'getTotalCommitted', args: [] },
-  {
-    method: 'getTotalRaisedCommitted',
-    circuit: 'getTotalRaisedCommitted',
-    args: [],
-  },
 ];
+// The DarkVeil figures a launch page renders are published ledger fields, so
+// reading them is not a circuit call and they are not in this table. See the
+// `getDarkVeilSnapshot` / `getFairLaunchCert` blocks below.
 
 describe.each(FALLBACK_METHODS)(
   'NoctisLaunchManager.$method (eligibilityGate-or-bondingCurve fallback)',
@@ -780,6 +786,133 @@ describe.each(FALLBACK_METHODS)(
     });
   },
 );
+
+// ============================================================================
+// NoctisLaunchManager — reads of published state
+// ============================================================================
+// These figures are ledger fields on Tier B, so reading them is a query
+// against the indexer rather than a circuit call: no wallet, no proof server,
+// no transaction, and nothing for the caller to pay. Tier C's merged curve
+// returns the certificate from a circuit instead, so the two tiers take
+// genuinely different routes and both are covered here.
+
+const SNAPSHOT: DarkVeilSnapshot = {
+  phase: 1,
+  dvState: 2,
+  dvFailed: false,
+  dvPrice: 3n,
+  dvAllocation: 150_000_000n,
+  baseSlot: 10_000_000n,
+  registrationCount: 15n,
+  totalTokensCommitted: 42n,
+  totalRaisedCommitted: 126n,
+  allowlistRootHex: 'ab'.repeat(32),
+  registrantRootHex: 'cd'.repeat(32),
+  settlementFinalized: false,
+  fairLaunchCert: {
+    launchId: fakeBytes32(1),
+    totalParticipants: 15n,
+    totalTokensAllocated: 150_000_000n,
+    totalRaised: 450_000_000n,
+    participationRate: 78n,
+    closeTimestamp: 1_753_000_000n,
+    certHash: fakeBytes32(2),
+  },
+};
+
+/** A client whose providers carry a public data provider, as a real one does. */
+async function connectedTierBClient(): Promise<NoctisMidnightClient> {
+  const client = new NoctisMidnightClient(USER_SK);
+  await client.connectEligibilityGate(
+    { publicDataProvider: 'the-provider' } as never,
+    FAKE_CONTRACT_ADDRESS,
+    [],
+    fakeBytes32(0),
+    fakeBytes32(0),
+  );
+  return client;
+}
+
+describe('NoctisLaunchManager.getDarkVeilSnapshot', () => {
+  beforeEach(() => {
+    vi.mocked(readDarkVeilSnapshot).mockReset().mockResolvedValue(SNAPSHOT);
+    vi.mocked(readEligibilityGateLedger).mockReset();
+  });
+
+  it('reads the connected gate through the provider it was connected with', async () => {
+    const manager = new NoctisLaunchManager(await connectedTierBClient());
+
+    const snapshot = await manager.getDarkVeilSnapshot();
+
+    expect(snapshot).toBe(SNAPSHOT);
+    expect(readDarkVeilSnapshot).toHaveBeenCalledWith('the-provider', FAKE_CONTRACT_ADDRESS);
+  });
+
+  it('refuses on Tier C, whose curve does not publish these fields', async () => {
+    const client = new NoctisMidnightClient(USER_SK);
+    client.bondingCurve = fakeHandle({});
+    const manager = new NoctisLaunchManager(client);
+
+    await expect(manager.getDarkVeilSnapshot()).rejects.toThrow(/no eligibilityGate is connected/);
+    expect(readDarkVeilSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('throws when nothing is connected', async () => {
+    const manager = new NoctisLaunchManager(new NoctisMidnightClient(USER_SK));
+
+    await expect(manager.getDarkVeilSnapshot()).rejects.toThrow(/no eligibilityGate is connected/);
+  });
+
+  it('says so when the gate was connected without a public data provider', async () => {
+    // Injecting the handle directly skips connect, which is where the provider
+    // is remembered — the same shape as a caller who built providers by hand.
+    const client = new NoctisMidnightClient(USER_SK);
+    client.eligibilityGate = fakeHandle({});
+    const manager = new NoctisLaunchManager(client);
+
+    await expect(manager.getDarkVeilSnapshot()).rejects.toThrow(/No public data provider is available/);
+  });
+});
+
+describe('NoctisLaunchManager.getFairLaunchCert', () => {
+  beforeEach(() => {
+    vi.mocked(readEligibilityGateLedger).mockReset();
+    vi.mocked(readDarkVeilSnapshot).mockReset();
+  });
+
+  it('reads the certificate off the published ledger on Tier B', async () => {
+    vi.mocked(readEligibilityGateLedger).mockResolvedValue({
+      fairLaunchCert: SNAPSHOT.fairLaunchCert,
+    } as never);
+    const manager = new NoctisLaunchManager(await connectedTierBClient());
+
+    const cert = await manager.getFairLaunchCert();
+
+    expect(cert).toBe(SNAPSHOT.fairLaunchCert);
+    expect(readEligibilityGateLedger).toHaveBeenCalledWith('the-provider', FAKE_CONTRACT_ADDRESS);
+  });
+
+  it('calls the circuit on Tier C and unwraps the JS-typed return value', async () => {
+    const circuitFn = vi.fn().mockResolvedValue({ private: { result: SNAPSHOT.fairLaunchCert } });
+    const client = new NoctisMidnightClient(USER_SK);
+    client.bondingCurve = fakeHandle({ getFairLaunchCert: circuitFn });
+    const manager = new NoctisLaunchManager(client);
+
+    const cert = await manager.getFairLaunchCert();
+
+    // The circuit result nests the value under `.private.result`; returning the
+    // wrapper instead would hand every caller an object with no cert fields.
+    expect(cert).toBe(SNAPSHOT.fairLaunchCert);
+    expect(circuitFn).toHaveBeenCalledTimes(1);
+    expect(readEligibilityGateLedger).not.toHaveBeenCalled();
+  });
+
+  it('throws when nothing is connected', async () => {
+    const manager = new NoctisLaunchManager(new NoctisMidnightClient(USER_SK));
+
+    await expect(manager.getFairLaunchCert()).rejects.toThrow(/eligibility_gate not connected/);
+  });
+});
 
 // ============================================================================
 // NoctisLaunchManager — single-required-PSM passthrough methods
@@ -911,6 +1044,53 @@ describe.each(SINGLE_PSM_METHODS)(
     });
   },
 );
+
+// ============================================================================
+// NoctisLaunchManager — the Cardano settlement record (Tier B only)
+// ============================================================================
+// Tier B's DarkVeil purchases settle on Cardano, so the governor attests each
+// real settlement back to the gate. Tier C settles inside its own merged curve
+// and has no such circuit — so these must NOT fall back to bondingCurve, or a
+// Tier C caller gets a runtime failure naming a circuit instead of a tier.
+
+describe('NoctisLaunchManager settlement record', () => {
+  it('records a settlement against the eligibility gate with the buyer key and amount', async () => {
+    const recordDarkVeilSettlement = vi.fn().mockResolvedValue({ ok: true });
+    const client = new NoctisMidnightClient(USER_SK);
+    client.eligibilityGate = fakeHandle({ recordDarkVeilSettlement });
+    const manager = new NoctisLaunchManager(client);
+
+    await manager.recordDarkVeilSettlement(fakeBytes32(200), 5_000n);
+
+    expect(recordDarkVeilSettlement).toHaveBeenCalledWith(fakeBytes32(200), 5_000n);
+  });
+
+  it('finalizes the settlement record against the eligibility gate', async () => {
+    const finalizeDvSettlement = vi.fn().mockResolvedValue({ ok: true });
+    const client = new NoctisMidnightClient(USER_SK);
+    client.eligibilityGate = fakeHandle({ finalizeDvSettlement });
+    const manager = new NoctisLaunchManager(client);
+
+    await manager.finalizeDvSettlement();
+
+    expect(finalizeDvSettlement).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['recordDarkVeilSettlement', 'finalizeDvSettlement'] as const)(
+    '%s does not fall back to bondingCurve, which has no such circuit',
+    async (method) => {
+      const circuitFn = vi.fn().mockResolvedValue({ ok: true });
+      const client = new NoctisMidnightClient(USER_SK);
+      client.bondingCurve = fakeHandle({ [method]: circuitFn });
+      const manager = new NoctisLaunchManager(client);
+
+      await expect((manager[method] as (...a: unknown[]) => Promise<unknown>)(fakeBytes32(201), 1n)).rejects.toThrow(
+        /Tier B circuit on the eligibility gate/,
+      );
+      expect(circuitFn).not.toHaveBeenCalled();
+    },
+  );
+});
 
 // ============================================================================
 // NoctisLaunchManager — deeper scenario tests for branching/computed methods

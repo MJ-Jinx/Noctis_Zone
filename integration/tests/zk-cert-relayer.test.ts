@@ -36,7 +36,10 @@ function baseCert(overrides: Partial<FairLaunchCert> = {}): FairLaunchCert {
     totalParticipants: 42n,
     totalTokensAllocated: 150_000_000n,
     totalRaised: 25_000_000n,
-    participationRate: 78,
+    // A bigint, matching what the compiled contract really returns for a
+    // Compact numeric field. A number here would make every test below pass
+    // against a shape the chain never produces.
+    participationRate: 78n,
     closeTimestamp: 1_753_000_000n,
     certHash: fakeBytes(2),
     ...overrides,
@@ -55,6 +58,20 @@ describe('assembleProofBundle', () => {
     expect(bundle.closeTimestamp).toBe('1753000000');
     expect(bundle.participationRate).toBe(78);
     expect(bundle.tier).toBe('B');
+  });
+
+  it('narrows participationRate to a JSON-serialisable number, so the bundle can be hashed at all', () => {
+    // The certificate's numeric fields all arrive as bigints, and JSON.stringify
+    // throws on one. Hashing the assembled bundle is what proves this field was
+    // really narrowed rather than carried through as a bigint.
+    const bundle = assembleProofBundle(baseCert(), 'B', dvRoot());
+    expect(typeof bundle.participationRate).toBe('number');
+    expect(() => computeProofBundleHash(bundle)).not.toThrow();
+  });
+
+  it('refuses a participationRate outside the Uint<8> range the certificate declares', () => {
+    expect(() => assembleProofBundle(baseCert({ participationRate: 256n }), 'B', dvRoot())).toThrow(/Uint<8> range/);
+    expect(() => assembleProofBundle(baseCert({ participationRate: -1n }), 'B', dvRoot())).toThrow(/Uint<8> range/);
   });
 
   it('sets tier to FullZKCert-eligible "C" when passed', () => {
@@ -161,7 +178,7 @@ describe('computeMetadataHash', () => {
 describe('relayCertificate — orchestration', () => {
   function fakeLaunchManager(cert: FairLaunchCert): NoctisLaunchManager {
     return {
-      getFairLaunchCert: vi.fn().mockResolvedValue({ private: { result: cert } }),
+      getFairLaunchCert: vi.fn().mockResolvedValue(cert),
     } as unknown as NoctisLaunchManager;
   }
 
@@ -173,7 +190,10 @@ describe('relayCertificate — orchestration', () => {
     return { submitAnchorCertificate: vi.fn().mockResolvedValue({ txHash }) };
   }
 
-  it('extracts the cert from .private.result (not .result directly — a real SDK-specific gotcha this file documents)', async () => {
+  // The manager hands back a FairLaunchCert whichever way it obtained one — a
+  // published-ledger read on Tier B, a circuit call on Tier C — so the relayer
+  // no longer has an SDK return shape to unwrap.
+  it('assembles the bundle from the certificate the manager returns', async () => {
     const cert = baseCert();
     const launchManager = fakeLaunchManager(cert);
     const result = await relayCertificate(

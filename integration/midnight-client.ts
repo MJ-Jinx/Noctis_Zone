@@ -46,10 +46,14 @@
 
 import * as CompiledContractOps from '@midnight-ntwrk/compact-js/effect/CompiledContract';
 import { type ContractProviders, deployContract, findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
+import type { PublicDataProvider } from '@midnight-ntwrk/midnight-js-types';
 import { Contract as BondingCurveContract } from '../contracts/midnight/compiled/bonding_curve/contract/index.js';
 import { Contract as CreatorEscrowContract } from '../contracts/midnight/compiled/creator_escrow/contract/index.js';
 import { Contract as CtoGovernanceContract } from '../contracts/midnight/compiled/cto_governance/contract/index.js';
-import { Contract as EligibilityGateContract } from '../contracts/midnight/compiled/eligibility_gate/contract/index.js';
+import {
+  Contract as EligibilityGateContract,
+  type FairLaunchCert,
+} from '../contracts/midnight/compiled/eligibility_gate/contract/index.js';
 import { Contract as LpEscrowContract } from '../contracts/midnight/compiled/lp_escrow/contract/index.js';
 import { Contract as TreasuryContract } from '../contracts/midnight/compiled/treasury/contract/index.js';
 import { Contract as VestingContract } from '../contracts/midnight/compiled/vesting/contract/index.js';
@@ -77,6 +81,7 @@ import {
 import { asEffectContract } from './compact-adapter.js';
 import { buyCost, type CurveParams } from './curve-pricing.js';
 import { deferCircuitsForDeploy, deriveContractSigningKey } from './midnight-deploy-subset.js';
+import { type DarkVeilSnapshot, readDarkVeilSnapshot, readEligibilityGateLedger } from './midnight-public-state.js';
 
 // ============================================================================
 // PER-PSM COMPILED CONTRACT FACTORIES
@@ -216,6 +221,14 @@ export class NoctisMidnightClient {
   private userSecretKey: UserSecretKey;
   private governorSecretKey: UserSecretKey;
 
+  /**
+   * Kept from whichever providers this client was last deployed or connected
+   * with, so published ledger fields can be read straight off the indexer.
+   * Reading public state needs no wallet, no proof server and no transaction —
+   * see integration/midnight-public-state.ts.
+   */
+  private publicDataProvider: PublicDataProvider | null = null;
+
   eligibilityGate: PsmHandle | null = null;
   bondingCurve: PsmHandle | null = null;
   creatorEscrow: PsmHandle | null = null;
@@ -244,6 +257,40 @@ export class NoctisMidnightClient {
    */
   callerPublicKeyFor(launchId: Uint8Array): Uint8Array {
     return deriveUserPublicKey(this.userSecretKey, DOMAINS.ELIGIBILITY_USER, launchId).bytes;
+  }
+
+  /**
+   * Records the public data provider on the way past, so published ledger
+   * fields stay readable for as long as this client is connected. Returns the
+   * providers untouched — it sits in the argument position of every deploy and
+   * connect call rather than being a step each one has to remember to make.
+   */
+  private remembering(providers: ContractProviders): ContractProviders {
+    this.publicDataProvider = providers.publicDataProvider;
+    return providers;
+  }
+
+  /**
+   * The provider used to read published state, and the address of whichever
+   * DarkVeil-bearing contract is connected.
+   *
+   * @throws if no such contract is connected, naming both fields checked.
+   */
+  darkVeilPublicRead(): { publicDataProvider: PublicDataProvider; contractAddress: string } {
+    const handle = this.eligibilityGate ?? this.bondingCurve;
+    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
+    if (!this.publicDataProvider) {
+      throw new Error('No public data provider is available — this client was connected without one.');
+    }
+    return {
+      publicDataProvider: this.publicDataProvider,
+      contractAddress: String(handle.deployTxData.public.contractAddress),
+    };
+  }
+
+  /** True when a Tier B eligibility gate is the connected DarkVeil contract. */
+  isTierB(): boolean {
+    return this.eligibilityGate !== null;
   }
 
   // --- Eligibility Gate (Tier B — merged with DarkVeil, Phase 2 2026-07-11) ---
@@ -317,7 +364,7 @@ export class NoctisMidnightClient {
       this.governorSecretKey,
     );
     const compiled = compileEligibilityGate(witnesses, deferCircuits);
-    const deployed = await deployContract(providers, {
+    const deployed = await deployContract(this.remembering(providers), {
       // Derived rather than sampled, so the authority that can complete this
       // deploy survives the process that started it — see
       // deriveContractSigningKey.
@@ -364,7 +411,7 @@ export class NoctisMidnightClient {
       this.governorSecretKey,
     );
     const compiled = compileEligibilityGate(witnesses);
-    this.eligibilityGate = await findDeployedContract(providers, {
+    this.eligibilityGate = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
       privateStateId: 'eligibility_gate',
@@ -450,7 +497,7 @@ export class NoctisMidnightClient {
       this.governorSecretKey,
     );
     const compiled = compileBondingCurve(witnesses);
-    const deployed = await deployContract(providers, {
+    const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
       privateStateId: 'bonding_curve',
       initialPrivateState: undefined,
@@ -498,7 +545,7 @@ export class NoctisMidnightClient {
       this.governorSecretKey,
     );
     const compiled = compileBondingCurve(witnesses);
-    this.bondingCurve = await findDeployedContract(providers, {
+    this.bondingCurve = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
       privateStateId: 'bonding_curve',
@@ -515,7 +562,7 @@ export class NoctisMidnightClient {
   ): Promise<PsmRecord> {
     const witnesses = creatorEscrowWitnesses(this.userSecretKey, this.governorSecretKey, communitySk);
     const compiled = compileCreatorEscrow(witnesses);
-    const deployed = await deployContract(providers, {
+    const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
       privateStateId: 'creator_escrow',
       initialPrivateState: undefined,
@@ -532,7 +579,7 @@ export class NoctisMidnightClient {
   ): Promise<void> {
     const witnesses = creatorEscrowWitnesses(this.userSecretKey, this.governorSecretKey, communitySk);
     const compiled = compileCreatorEscrow(witnesses);
-    this.creatorEscrow = await findDeployedContract(providers, {
+    this.creatorEscrow = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
       privateStateId: 'creator_escrow',
@@ -556,7 +603,7 @@ export class NoctisMidnightClient {
   ): Promise<PsmRecord> {
     const witnesses = vestingWitnesses(this.userSecretKey, this.governorSecretKey);
     const compiled = compileVesting(witnesses);
-    const deployed = await deployContract(providers, {
+    const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
       privateStateId: 'vesting',
       initialPrivateState: undefined,
@@ -569,7 +616,7 @@ export class NoctisMidnightClient {
   async connectVesting(providers: ContractProviders, contractAddress: string): Promise<void> {
     const witnesses = vestingWitnesses(this.userSecretKey, this.governorSecretKey);
     const compiled = compileVesting(witnesses);
-    this.vesting = await findDeployedContract(providers, {
+    this.vesting = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
       privateStateId: 'vesting',
@@ -586,7 +633,7 @@ export class NoctisMidnightClient {
   ): Promise<PsmRecord> {
     const witnesses = lpEscrowWitnesses(this.governorSecretKey, communitySk);
     const compiled = compileLpEscrow(witnesses);
-    const deployed = await deployContract(providers, {
+    const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
       privateStateId: 'lp_escrow',
       initialPrivateState: undefined,
@@ -603,7 +650,7 @@ export class NoctisMidnightClient {
   ): Promise<void> {
     const witnesses = lpEscrowWitnesses(this.governorSecretKey, communitySk);
     const compiled = compileLpEscrow(witnesses);
-    this.lpEscrow = await findDeployedContract(providers, {
+    this.lpEscrow = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
       privateStateId: 'lp_escrow',
@@ -635,7 +682,7 @@ export class NoctisMidnightClient {
   ): Promise<PsmRecord> {
     const witnesses = treasuryWitnesses(this.governorSecretKey);
     const compiled = compileTreasury(witnesses);
-    const deployed = await deployContract(providers, {
+    const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
       privateStateId: 'treasury',
       initialPrivateState: undefined,
@@ -655,7 +702,7 @@ export class NoctisMidnightClient {
   async connectTreasury(providers: ContractProviders, contractAddress: string): Promise<void> {
     const witnesses = treasuryWitnesses(this.governorSecretKey);
     const compiled = compileTreasury(witnesses);
-    this.treasury = await findDeployedContract(providers, {
+    this.treasury = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
       privateStateId: 'treasury',
@@ -741,7 +788,7 @@ export class NoctisMidnightClient {
       this.governorSecretKey,
     );
     const compiled = compileCtoGovernance(witnesses);
-    const deployed = await deployContract(providers, {
+    const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
       privateStateId: 'cto_governance',
       initialPrivateState: undefined,
@@ -788,7 +835,7 @@ export class NoctisMidnightClient {
       balanceLeafHeldSince,
     );
     const compiled = compileCtoGovernance(witnesses);
-    this.ctoGovernance = await findDeployedContract(providers, {
+    this.ctoGovernance = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
       privateStateId: 'cto_governance',
@@ -967,6 +1014,38 @@ export class NoctisLaunchManager {
    * `currentTimestampSeconds` is bound to real chain time by the circuit and
    * dates the attestation round.
    */
+  /**
+   * Opens registration. Governor-only, and callable once — the phase moves out
+   * of Inactive and the circuit refuses to move it again, so a second call
+   * cannot reopen a window that has already run.
+   *
+   * Nothing else in the DarkVeil sequence can happen until this has been
+   * called: registerForDarkVeil requires the registration sub-phase.
+   */
+  async startRegistration() {
+    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
+    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
+    return handle.callTx.startRegistration();
+  }
+
+  /**
+   * Freezes registration and opens the buying window, publishing the
+   * registrant root in the same call.
+   *
+   * The root is computed off-chain over the registrant set as it stands at
+   * this exact moment, which is why publishing it and freezing the window are
+   * one circuit rather than two: the set the root commits to is final because
+   * nothing can join after the same call that published it.
+   *
+   * The circuit holds this to the minimum participant floor — below it, the
+   * launch has to be cancelled instead, which refunds every bond in full.
+   */
+  async startBuying(registrantRoot: Uint8Array) {
+    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
+    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
+    return handle.callTx.startBuying(registrantRoot);
+  }
+
   async updateAllowlistRoot(newRoot: Uint8Array, currentTimestampSeconds: bigint) {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
@@ -1063,6 +1142,51 @@ export class NoctisLaunchManager {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
     return handle.callTx.closeDarkVeil(closeTimestamp, baseSlot);
+  }
+
+  /**
+   * Records that a buyer really settled `settledAmount` tokens for real ADA on
+   * Cardano, observed from their own ClaimDarkVeilTokens transaction.
+   *
+   * Governor-only, and the single writer of the settlement record the ratio
+   * refund reads: a registrant's refund is computed from what they actually
+   * settled, so their entitlement follows the Cardano transaction rather than
+   * anything they assert on Midnight. `settledAmount` must be taken from that
+   * transaction's own `dv_amount`.
+   *
+   * Tier B only. Tier C settles inside its own merged curve, so there is no
+   * separate Cardano leg for a governor to attest to.
+   */
+  async recordDarkVeilSettlement(buyerKey: Uint8Array, settledAmount: bigint) {
+    const handle = this.client.eligibilityGate;
+    if (!handle) {
+      throw new Error(
+        'recordDarkVeilSettlement is a Tier B circuit on the eligibility gate; no eligibilityGate is connected.',
+      );
+    }
+    return handle.callTx.recordDarkVeilSettlement(buyerKey, settledAmount);
+  }
+
+  /**
+   * Closes the settlement record: the governor attesting that the Cardano
+   * claim window has ended and every real settlement has been recorded.
+   *
+   * One-way, and it gates the sweep of fully-forfeited bonds — so it is the
+   * point after which a registrant with no recorded settlement is treated as
+   * one who never settled. A launch whose claim window never actually ran must
+   * be cancelled or marked failed instead, which routes every bond back in
+   * full.
+   *
+   * Tier B only, for the same reason as recordDarkVeilSettlement above.
+   */
+  async finalizeDvSettlement() {
+    const handle = this.client.eligibilityGate;
+    if (!handle) {
+      throw new Error(
+        'finalizeDvSettlement is a Tier B circuit on the eligibility gate; no eligibilityGate is connected.',
+      );
+    }
+    return handle.callTx.finalizeDvSettlement();
   }
 
   /**
@@ -1176,21 +1300,31 @@ export class NoctisLaunchManager {
   }
 
   /**
-   * Reads the ZK Fair Launch Certificate after DarkVeil closes (this
-   * is what the relayer in integration/zk-cert-relayer.ts fetches and
-   * anchors to Cardano L1's zk_anchor.ak). `getFairLaunchCert` is a
-   * read-only circuit on both eligibilityGate (Tier B, merged) and
-   * bondingCurve (Tier C, merged) — same fallback pattern as the rest of
-   * this class. Still goes through `.callTx` like everything else here:
-   * this codebase has no separate public-ledger-read path yet (would go
-   * through the indexer's publicDataProvider directly), so a submitted
-   * no-op-effect transaction is the only invocation path currently
-   * available.
+   * Reads the ZK Fair Launch Certificate after DarkVeil closes — what the
+   * relayer in integration/zk-cert-relayer.ts fetches and anchors to Cardano
+   * L1's zk_anchor.ak.
+   *
+   * On Tier B the certificate is a published ledger field, so this reads it
+   * off the indexer: free, permissionless, and no transaction. Anyone can
+   * check the certificate against the chain themselves, which is what makes it
+   * evidence rather than a claim.
+   *
+   * Tier C's merged curve returns it from a circuit instead, so that tier goes
+   * through `.callTx` and the JS-typed return value is unwrapped from
+   * `.private.result` (the real field per midnight-js-contracts' CallResult —
+   * compact-js's CompiledContract widening means the compiler will not catch a
+   * wrong field name here).
    */
-  async getFairLaunchCert() {
-    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
+  async getFairLaunchCert(): Promise<FairLaunchCert> {
+    if (this.client.isTierB()) {
+      const { publicDataProvider, contractAddress } = this.client.darkVeilPublicRead();
+      const ledger = await readEligibilityGateLedger(publicDataProvider, contractAddress);
+      return ledger.fairLaunchCert;
+    }
+    const handle = this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.getFairLaunchCert();
+    const result = await handle.callTx.getFairLaunchCert();
+    return result.private.result as FairLaunchCert;
   }
 
   /**
@@ -1207,42 +1341,23 @@ export class NoctisLaunchManager {
   }
 
   /**
-   * Read-only DarkVeil state accessors — needed by a live widget to
-   * render the current phase/price/allocation without the caller having to
-   * reach into `handle.callTx.<name>()` directly. None of these had a
-   * wrapper before now, despite being real, already-deployed circuits on
-   * both tiers (confirmed via `getFairLaunchCert`'s own comment above: this
-   * codebase has no separate public-ledger-read path yet, so a submitted
-   * no-op-effect transaction is still the only invocation path available).
+   * Everything a launch page renders about a Tier B DarkVeil phase — the
+   * phase, the flat price, the allocation, what has been committed, the
+   * certificate — in one read off the indexer.
+   *
+   * These are published ledger fields, so this costs nothing, needs no wallet
+   * or proof server, and leaves no transaction behind. One round trip returns
+   * the lot, and any figure it reports can be checked against the chain by
+   * anyone who cares to.
    */
-  async getDvState() {
-    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
-    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.getDvState();
-  }
-
-  async getDvPrice() {
-    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
-    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.getDvPrice();
-  }
-
-  async getDvAllocation() {
-    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
-    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.getDvAllocation();
-  }
-
-  async getTotalCommitted() {
-    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
-    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.getTotalCommitted();
-  }
-
-  async getTotalRaisedCommitted() {
-    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
-    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
-    return handle.callTx.getTotalRaisedCommitted();
+  async getDarkVeilSnapshot(): Promise<DarkVeilSnapshot> {
+    if (!this.client.isTierB()) {
+      throw new Error(
+        'getDarkVeilSnapshot reads the Tier B eligibility gate’s published ledger; no eligibilityGate is connected.',
+      );
+    }
+    const { publicDataProvider, contractAddress } = this.client.darkVeilPublicRead();
+    return readDarkVeilSnapshot(publicDataProvider, contractAddress);
   }
 
   // --- Bonding curve buy (Tier C only) ---
