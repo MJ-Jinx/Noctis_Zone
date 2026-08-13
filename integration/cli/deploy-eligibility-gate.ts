@@ -69,6 +69,20 @@ interface Input extends SnapshotCliInput {
   allowlistAttestorKeysHex: [string, string, string];
   allowlistThreshold: number;
 
+  /**
+   * Circuits this deploy leaves out, to be added afterwards by maintenance
+   * update, authorised by a signing key derived from `governorSecretHex` and
+   * `launchIdHex`.
+   *
+   * A deploy writes the contract's whole state at once — the constructor's
+   * ledger state plus a verifier key per exported circuit — and a block caps
+   * the bytes written in it. Naming circuits here is how a contract whose keys
+   * total more than that budget reaches the chain intact.
+   *
+   * Omitted, the deploy carries every circuit.
+   */
+  deferCircuits?: string[];
+
   totalSupply: string;
   maxWalletPercent: number;
   bondAmount: string;
@@ -187,7 +201,14 @@ async function main() {
     }));
     const zeroNonce = new Uint8Array(32);
 
-    const record = await client.deployEligibilityGate(providers, args, emptyProof, zeroNonce, zeroNonce);
+    const record = await client.deployEligibilityGate(
+      providers,
+      args,
+      emptyProof,
+      zeroNonce,
+      zeroNonce,
+      input.deferCircuits ?? [],
+    );
 
     process.stdout.write(
       JSON.stringify(
@@ -196,7 +217,12 @@ async function main() {
           contractAddress: record.contractAddress,
           launchIdHex: input.launchIdHex,
           walletCap: args.walletCap.toString(),
-          note: 'Record contractAddress against the launch — the whole DarkVeil path keys off it.',
+          ...(record.pendingCircuits ? { pendingCircuits: record.pendingCircuits } : {}),
+          note: record.pendingCircuits
+            ? 'Record contractAddress against the launch — the whole DarkVeil path keys off it. ' +
+              'This contract does not yet answer the circuits in pendingCircuits: add their verifier ' +
+              'keys with the same governor secret and launch id before relying on them.'
+            : 'Record contractAddress against the launch — the whole DarkVeil path keys off it.',
         }),
       ),
     );

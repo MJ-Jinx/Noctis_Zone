@@ -17,7 +17,12 @@ import { pathToFileURL } from 'node:url';
 import { type ContractState, createConstructorContext } from '@midnight-ntwrk/compact-runtime';
 import { describe, expect, it } from 'vitest';
 import { Contract as EligibilityGateContract } from '../../contracts/midnight/compiled/eligibility_gate/contract/index.js';
-import { deferCircuitsForDeploy, operationNames, trimContractState } from '../midnight-deploy-subset.js';
+import {
+  deferCircuitsForDeploy,
+  deriveContractSigningKey,
+  operationNames,
+  trimContractState,
+} from '../midnight-deploy-subset.js';
 
 const b32 = (fill: number) => new Uint8Array(32).fill(fill);
 const proof = Array.from({ length: 20 }, () => ({ sibling: b32(0), goesLeft: false }));
@@ -226,5 +231,44 @@ describe('a deploy built from the trimmed state', () => {
     const tx = Transaction.fromParts('undeployed', undefined, undefined, intent);
 
     expect(Number(tx.cost(LedgerParameters.initialParameters()).bytesWritten)).toBeGreaterThan(50_000);
+  });
+});
+
+describe('deriveContractSigningKey', () => {
+  const governor = new Uint8Array(32).fill(11);
+  const launch = new Uint8Array(32).fill(22);
+
+  it('is the same key every time', () => {
+    // The whole point: the process that completes the deploy is not the one
+    // that started it, so this has to be recomputable rather than remembered.
+    expect(deriveContractSigningKey(governor, launch)).toBe(deriveContractSigningKey(governor, launch));
+  });
+
+  it('differs per launch', () => {
+    // One launch's maintenance authority must not be another's.
+    expect(deriveContractSigningKey(governor, launch)).not.toBe(
+      deriveContractSigningKey(governor, new Uint8Array(32).fill(23)),
+    );
+  });
+
+  it('differs per governor', () => {
+    expect(deriveContractSigningKey(governor, launch)).not.toBe(
+      deriveContractSigningKey(new Uint8Array(32).fill(12), launch),
+    );
+  });
+
+  it('is not the governor secret in disguise', () => {
+    // A derivation that leaked the secret through would hand contract
+    // maintenance to anyone who ever sees a signing key.
+    expect(deriveContractSigningKey(governor, launch)).not.toContain(Buffer.from(governor).toString('hex'));
+  });
+
+  it('produces a key the ledger accepts', async () => {
+    const { signatureVerifyingKey } = await import('@midnight-ntwrk/midnight-js-protocol/compact-runtime');
+    expect(() => signatureVerifyingKey(deriveContractSigningKey(governor, launch))).not.toThrow();
+  });
+
+  it('refuses a launch id that is not 32 bytes', () => {
+    expect(() => deriveContractSigningKey(governor, new Uint8Array(16))).toThrow(/32 bytes/);
   });
 });

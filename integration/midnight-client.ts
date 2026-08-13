@@ -76,6 +76,7 @@ import {
 } from '../contracts/midnight/witnesses.js';
 import { asEffectContract } from './compact-adapter.js';
 import { buyCost, type CurveParams } from './curve-pricing.js';
+import { deferCircuitsForDeploy, deriveContractSigningKey } from './midnight-deploy-subset.js';
 
 // ============================================================================
 // PER-PSM COMPILED CONTRACT FACTORIES
@@ -90,8 +91,17 @@ import { buyCost, type CurveParams } from './curve-pricing.js';
 
 const COMPILED_ASSETS_ROOT = '../contracts/midnight/compiled';
 
-function compileEligibilityGate(witnesses: EligibilityGateWitnesses) {
-  return CompiledContractOps.make('eligibility_gate', asEffectContract<PrivateState>(EligibilityGateContract)).pipe(
+/**
+ * @param deferCircuits Circuits the DEPLOY should leave out, to be added
+ * afterwards by maintenance update. Only ever pass this when deploying — every
+ * other use needs the whole contract, or the deferred circuits are unreachable.
+ */
+function compileEligibilityGate(witnesses: EligibilityGateWitnesses, deferCircuits: readonly string[] = []) {
+  const contract =
+    deferCircuits.length === 0
+      ? EligibilityGateContract
+      : deferCircuitsForDeploy(EligibilityGateContract, deferCircuits).contract;
+  return CompiledContractOps.make('eligibility_gate', asEffectContract<PrivateState>(contract)).pipe(
     CompiledContractOps.withWitnesses(witnesses),
     CompiledContractOps.withCompiledFileAssets(`${COMPILED_ASSETS_ROOT}/eligibility_gate`),
   );
@@ -154,6 +164,13 @@ type PsmHandle = Awaited<ReturnType<typeof deployContract>> | Awaited<ReturnType
 export interface PsmRecord {
   contractAddress: string;
   deployedAt: number; // POSIX timestamp
+  /**
+   * Circuits the deploy left out, still to be added by maintenance update.
+   * Present and non-empty means the contract on chain cannot yet answer a call
+   * to these — whoever holds this record needs to know that before relying on
+   * one. Absent or empty means the contract carries its whole circuit set.
+   */
+  pendingCircuits?: string[];
 }
 
 export interface NoctisDeployments {
@@ -166,10 +183,11 @@ export interface NoctisDeployments {
   ctoGovernance: PsmRecord | null;
 }
 
-function toRecord(handle: PsmHandle): PsmRecord {
+function toRecord(handle: PsmHandle, pendingCircuits: readonly string[] = []): PsmRecord {
   return {
     contractAddress: String(handle.deployTxData.public.contractAddress),
     deployedAt: Math.floor(Date.now() / 1000),
+    ...(pendingCircuits.length > 0 ? { pendingCircuits: [...pendingCircuits] } : {}),
   };
 }
 
@@ -280,6 +298,16 @@ export class NoctisMidnightClient {
     merkleProof: MerkleProofEntry[],
     buyNonce: Uint8Array,
     registrationNonce: Uint8Array,
+    /**
+     * Circuits this deploy leaves out, added afterwards by maintenance update.
+     * A deploy writes the whole contract state at once and a block caps the
+     * bytes written in it, so this is how a contract whose verifier keys total
+     * more than that budget reaches the chain intact.
+     *
+     * The returned record names them, and names the signing key's owner, so a
+     * caller cannot complete the deploy without knowing what is outstanding.
+     */
+    deferCircuits: readonly string[] = [],
   ): Promise<PsmRecord> {
     const witnesses = eligibilityGateWitnesses(
       this.userSecretKey,
@@ -288,8 +316,12 @@ export class NoctisMidnightClient {
       buyNonce,
       this.governorSecretKey,
     );
-    const compiled = compileEligibilityGate(witnesses);
+    const compiled = compileEligibilityGate(witnesses, deferCircuits);
     const deployed = await deployContract(providers, {
+      // Derived rather than sampled, so the authority that can complete this
+      // deploy survives the process that started it — see
+      // deriveContractSigningKey.
+      signingKey: deriveContractSigningKey(this.governorSecretKey.bytes, args.launchId),
       compiledContract: compiled,
       privateStateId: 'eligibility_gate',
       initialPrivateState: undefined,
@@ -314,7 +346,7 @@ export class NoctisMidnightClient {
       ],
     });
     this.eligibilityGate = deployed;
-    return toRecord(deployed);
+    return toRecord(deployed, deferCircuits);
   }
 
   async connectEligibilityGate(

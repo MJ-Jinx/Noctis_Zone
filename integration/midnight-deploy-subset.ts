@@ -32,7 +32,48 @@
 // the deferred circuits are unreachable through it.
 // ============================================================================
 
+import { createHmac } from 'node:crypto';
 import { ContractState } from '@midnight-ntwrk/compact-runtime';
+import { type SigningKey, signingKeyFromBip340 } from '@midnight-ntwrk/midnight-js-protocol/compact-runtime';
+
+/**
+ * The key that may add the deferred circuits to a deployed contract.
+ *
+ * A contract's maintenance authority is fixed at deploy from the signing key
+ * given to `deployContract`, and only that key can add a verifier key
+ * afterwards. Left to itself the SDK samples a random one and keeps it in the
+ * private state store, which for a one-shot CLI process is an in-memory store
+ * that goes away when the process exits — so the second half of the deploy
+ * would have no way to authorise itself.
+ *
+ * Deriving it from the governor secret makes it reproducible from something
+ * that already has to survive, and puts contract maintenance in exactly the
+ * hands that already govern the launch rather than introducing a second holder.
+ * Per-launch, so one launch's authority is not another's.
+ *
+ * `signingKeyFromBip340` rejects a scalar outside the curve's range, so the
+ * counter advances until one is accepted. A single try succeeds with
+ * overwhelming probability; the loop is what makes this total rather than
+ * almost-total.
+ */
+export function deriveContractSigningKey(governorSecret: Uint8Array, launchId: Uint8Array): SigningKey {
+  if (launchId.length !== 32) {
+    throw new Error(`launchId must be 32 bytes, got ${launchId.length}.`);
+  }
+  for (let counter = 0; counter < 256; counter++) {
+    const candidate = createHmac('sha256', 'noctis:midnight:contract-authority:v1')
+      .update(governorSecret)
+      .update(launchId)
+      .update(Uint8Array.of(counter))
+      .digest();
+    try {
+      return signingKeyFromBip340(new Uint8Array(candidate));
+    } catch {
+      // Out of range for the curve — try the next counter.
+    }
+  }
+  throw new Error('Could not derive a valid contract signing key from this governor secret and launch id.');
+}
 
 /**
  * The entry points registered on a contract state, as strings.
