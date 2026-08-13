@@ -194,7 +194,7 @@ async function main() {
     // (merkleProof/buyNonce/registrationNonce) — connectEligibilityGate
     // requires concrete values for every declared witness even though
     // updateAllowlistRoot never reads them.
-    await client.connectEligibilityGate(providers, input.contractAddress, [], new Uint8Array(32), new Uint8Array(32));
+    await client.connectEligibilityGate(providers, input.contractAddress, [], new Uint8Array(32));
 
     const manager = new NoctisLaunchManager(client);
     // ONE attestor's call. The root moves only once the threshold is met by

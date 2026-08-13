@@ -235,21 +235,9 @@ export async function registerOnChain(session: DarkVeilSession, params: Register
 
   const client = new NoctisMidnightClient(identity.userSecretKey);
   if (params.tier === 'B') {
-    await client.connectEligibilityGate(
-      params.providers,
-      params.contractAddress,
-      params.merkleProof,
-      buyNonce,
-      identity.registrationNonce,
-    );
+    await client.connectEligibilityGate(params.providers, params.contractAddress, params.merkleProof, buyNonce);
   } else {
-    await client.connectBondingCurve(
-      params.providers,
-      params.contractAddress,
-      params.merkleProof,
-      buyNonce,
-      identity.registrationNonce,
-    );
+    await client.connectBondingCurve(params.providers, params.contractAddress, params.merkleProof, buyNonce);
   }
 
   // registerForDarkVeil takes nothing: it derives the caller's identity and

@@ -31,12 +31,12 @@ const PROOF: MerkleProofEntry[] = [];
 
 describe('witnesses.ts — a missing privileged secret is an error, not a downgrade', () => {
   it('eligibility gate refuses to answer for a governor it was never given', () => {
-    const w = eligibilityGateWitnesses(USER, PROOF, NONCE, NONCE);
+    const w = eligibilityGateWitnesses(USER, PROOF, NONCE);
     expect(() => w.getGovernorSecret(undefined)).toThrow(/needs governorSk/);
   });
 
   it('bonding curve refuses the same', () => {
-    const w = bondingCurveWitnesses(USER, PROOF, NONCE, NONCE);
+    const w = bondingCurveWitnesses(USER, PROOF, NONCE);
     expect(() => w.getGovernorSecret(undefined)).toThrow(/needs governorSk/);
   });
 
@@ -67,7 +67,7 @@ describe('witnesses.ts — a missing privileged secret is an error, not a downgr
   });
 
   it('the user secret is still answered freely — only privileged ones are gated', () => {
-    const w = eligibilityGateWitnesses(USER, PROOF, NONCE, NONCE);
+    const w = eligibilityGateWitnesses(USER, PROOF, NONCE);
     expect(w.getUserSecret(undefined)[1]).toBe(USER);
   });
 

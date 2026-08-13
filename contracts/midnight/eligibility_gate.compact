@@ -1149,10 +1149,16 @@ export circuit submitBuyCommit(
 // dvTokensPurchased (needed by claimRatioBondRefund above) atomically,
 // same pattern Tier C's merged revealBuyCommit already uses.
 //
-// NOT fixed here (deliberately, tracked separately): no receiveUnshielded —
-// Tier B's ADA-denominated buy still has no payment enforcement. The
-// per-registrant baseSlot cap below bounds this gap's blast radius; it
-// does not close it.
+// This circuit records a purchase; it does not take payment, and is not
+// where a Tier B buyer pays. ADA is not a Midnight-native asset, so a
+// Tier B DarkVeil purchase is settled on Cardano: the buyer presents their
+// own allocation against the anchored root and pays there, via the curve's
+// ClaimDarkVeilTokens. What this circuit commits to is bounded before that
+// happens — the amount revealed here cannot exceed the per-registrant
+// baseSlot, nor the pool-wide dvAllocation, nor the wallet's cumulative
+// cap, each asserted below — and what a buyer actually receives is decided
+// by the Cardano claim against the governor-attested settlement record.
+//
 // Fix (2026-07-30): takes currentTimestamp now, bound to real chain
 // time via blockTimeGte/blockTimeLte (same 1-hour-band idiom already used
 // throughout cto_governance.compact/lp_escrow.compact) — an unbound

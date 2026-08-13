@@ -28,7 +28,7 @@
 // `sdk.call(name, argsRecord)` shape on any real @midnight-ntwrk package):
 //
 //   const contract = new EligibilityGateContract(
-//     eligibilityGateWitnesses(userSk, merkleProof, registrationNonce)
+//     eligibilityGateWitnesses(userSk, merkleProof, buyNonce)
 //   );
 //   await deployed.callTx.registerForDarkVeil(bondCommitment);
 //
@@ -252,7 +252,7 @@ export const DOMAINS = {
 
 // ---------------------------------------------------------------------------
 // 1. ELIGIBILITY GATE PSM (Tier B — merged with DarkVeil, Phase 2 2026-07-11)
-// Witnesses: getUserSecret, getMerkleProof, getRegistrationNonce,
+// Witnesses: getUserSecret, getMerkleProof, getRegistrantMerkleProof,
 //            getGovernorSecret, getBuyNonce
 //
 // Security-audit fix (Phase 2, 2026-07-11): eligibility_gate.compact is now
@@ -284,11 +284,16 @@ export const DOMAINS = {
 // every caller submits a buy commitment — registration/admin calls don't
 // need it) so existing call sites that never touch submitBuyCommit aren't
 // forced to supply one.
+// A declared-but-never-called witness does not reach the compiled contract:
+// `getRegistrationNonce` was dropped from eligibility_gate.compact once nothing
+// read it, and the compiler leaves it out of bonding_curve.compact's generated
+// witness type too, where it is still declared but uncalled. Neither compiled
+// contract asks for it, so neither builder below offers it — a witness in this
+// object that the contract never requests reads as private input it needs.
 export type EligibilityGateWitnesses = {
   getUserSecret: WitnessFn<UserSecretKey>;
   getMerkleProof: WitnessFn<MerkleProofEntry[]>; // Vector<20, MerkleProofEntry>
   getRegistrantMerkleProof: WitnessFn<MerkleProofEntry[]>; // Vector<20, MerkleProofEntry>
-  getRegistrationNonce: WitnessFn<Uint8Array>; // Bytes<32>
   getGovernorSecret: WitnessFn<UserSecretKey>;
   getBuyNonce: WitnessFn<Uint8Array>; // Bytes<32>
 };
@@ -296,7 +301,6 @@ export type EligibilityGateWitnesses = {
 export function eligibilityGateWitnesses(
   userSk: UserSecretKey,
   merkleProof: MerkleProofEntry[],
-  registrationNonce: Uint8Array,
   buyNonce: Uint8Array,
   governorSk?: UserSecretKey,
   registrantMerkleProof?: MerkleProofEntry[],
@@ -305,7 +309,6 @@ export function eligibilityGateWitnesses(
     getUserSecret: () => [undefined, userSk],
     getMerkleProof: () => [undefined, merkleProof],
     getRegistrantMerkleProof: () => [undefined, registrantMerkleProof ?? merkleProof],
-    getRegistrationNonce: () => [undefined, registrationNonce],
     getGovernorSecret: () => [undefined, requirePrivileged(governorSk, 'governorSk', 'eligibilityGateWitnesses')],
     getBuyNonce: () => [undefined, buyNonce],
   };
@@ -337,14 +340,12 @@ export type BondingCurveWitnesses = {
   // Membership in the REGISTRANT tree, which is a different tree published at
   // a different time from the allowlist — see the twin builder above.
   getRegistrantMerkleProof: WitnessFn<MerkleProofEntry[]>; // Vector<20, MerkleProofEntry>
-  getRegistrationNonce: WitnessFn<Uint8Array>; // Bytes<32>
   getBuyNonce: WitnessFn<Uint8Array>; // Bytes<32>
 };
 
 export function bondingCurveWitnesses(
   userSk: UserSecretKey,
   merkleProof: MerkleProofEntry[],
-  registrationNonce: Uint8Array,
   buyNonce: Uint8Array,
   governorSk?: UserSecretKey,
   registrantMerkleProof?: MerkleProofEntry[],
@@ -359,7 +360,6 @@ export function bondingCurveWitnesses(
     // silently — verifyRegistrant recomputes the published root or the call
     // fails.
     getRegistrantMerkleProof: () => [undefined, registrantMerkleProof ?? merkleProof],
-    getRegistrationNonce: () => [undefined, registrationNonce],
     getBuyNonce: () => [undefined, buyNonce],
   };
 }

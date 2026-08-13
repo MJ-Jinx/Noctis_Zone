@@ -39,21 +39,9 @@ async function connectForBuyFlow(session: DarkVeilSession, params: BuyFlowContra
 
   const client = new NoctisMidnightClient(identity.userSecretKey);
   if (params.tier === 'B') {
-    await client.connectEligibilityGate(
-      params.providers,
-      params.contractAddress,
-      params.merkleProof,
-      buyNonce,
-      identity.registrationNonce,
-    );
+    await client.connectEligibilityGate(params.providers, params.contractAddress, params.merkleProof, buyNonce);
   } else {
-    await client.connectBondingCurve(
-      params.providers,
-      params.contractAddress,
-      params.merkleProof,
-      buyNonce,
-      identity.registrationNonce,
-    );
+    await client.connectBondingCurve(params.providers, params.contractAddress, params.merkleProof, buyNonce);
   }
 
   const buyerKey = deriveUserPublicKey(identity.userSecretKey, DOMAINS.ELIGIBILITY_USER, params.launchIdBytes).bytes;

@@ -587,6 +587,22 @@ const readDvPurchasesCliConfig = {
 // Completes a gate that was deployed in phases, one maintenance update per
 // circuit. Same packages:external treatment as the deploy CLI above and for
 // the same reason — it pulls the identical Midnight dependency tree.
+// Drives a Tier B DarkVeil phase: the governor's phase transitions and each
+// registrant's own register/commit/reveal/claim. Same packages:external
+// treatment as the deploy CLI and for the same reason — identical Midnight
+// dependency tree.
+const darkVeilActionCliConfig = {
+	entryPoints: [join(__dirname, "cli/darkveil-action.ts")],
+	outfile: join(__dirname, "cli/dist/darkveil-action.mjs"),
+	bundle: true,
+	platform: "node",
+	packages: "external",
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+};
+
 const deliverDeferredCircuitsCliConfig = {
 	entryPoints: [join(__dirname, "cli/deliver-deferred-circuits.ts")],
 	outfile: join(__dirname, "cli/dist/deliver-deferred-circuits.mjs"),
@@ -974,6 +990,7 @@ async function run() {
 		publishAllowlistRootCliConfig,
 		deployEligibilityGateCliConfig,
 		deliverDeferredCircuitsCliConfig,
+		darkVeilActionCliConfig,
 		midnightRegisterDustCliConfig,
 		midnightSyncWalletsCliConfig,
 		buildDvAllowlistBundleCliConfig,

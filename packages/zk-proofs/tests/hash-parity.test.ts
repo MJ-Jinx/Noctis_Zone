@@ -122,6 +122,109 @@ describe('eligibility-gate.ts — parity with the compiled circuit', () => {
   });
 });
 
+describe('eligibility-gate.ts — the DarkVeil buy commitment', () => {
+  it('computeBuyCommit matches what revealBuyCommit recomputes from the caller and nonce', () => {
+    // submitBuyCommit stores whatever commitment it is handed and checks
+    // nothing about its contents — it is REVEAL that recomputes the value from
+    // the caller's own identity and nonce and refuses a mismatch. So this test
+    // has to go all the way through the reveal; a submit alone would accept a
+    // twin that was completely wrong.
+    const sk = fakeBytes32(41);
+    const launchId = fakeBytes32(9);
+    const buyNonce = fakeBytes32(77);
+    const myKey = eligibilityGate.deriveUserPublicKey(sk, launchId);
+
+    const allowlist = eligibilityGate.buildAllowlistTree([eligibilityGate.hashAllowlistLeaf(myKey)]);
+    const registrants = eligibilityGate.buildRegistrantTree([eligibilityGate.hashRegistrantLeaf(myKey)]);
+
+    const witnesses: EligibilityGateWitnesses<PrivateState> = {
+      getUserSecret: (_ctx) => [undefined, { bytes: sk }],
+      getMerkleProof: (_ctx) => [undefined, allowlist.getProof(0)],
+      getRegistrantMerkleProof: (_ctx) => [undefined, registrants.getProof(0)],
+      getGovernorSecret: (_ctx) => [undefined, { bytes: fakeBytes32(2) }],
+      getBuyNonce: (_ctx) => [undefined, buyNonce],
+    };
+    const contract = new EligibilityGateContract<PrivateState>(witnesses);
+    const dvPrice = 3n;
+    const { contractAddress, ctx } = deployForTest(
+      contract,
+      undefined,
+      launchId,
+      allowlist.root,
+      1_000_000_000n, // totalSupply
+      5n, // maxWalletPercent
+      1000n, // bondAmount
+      50_000_000n, // walletCap
+      500n, // dvAllocation
+      dvPrice,
+      1n, // allowlistSize
+      1_000_000n, // registrationCloseTime
+      1n, // minDvParticipants
+      fakeBytes32(88), // creatorPubKey — distinct from myKey
+      fakeBytes32(60), // platformAddr
+      deriveRoleKey({ bytes: fakeBytes32(2) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+      deriveRoleKey({ bytes: fakeBytes32(32) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+      deriveRoleKey({ bytes: fakeBytes32(33) }, DOMAINS.ELIGIBILITY_GOVERNOR).bytes,
+      2n,
+    );
+
+    // Drive the real DarkVeil sequence: DarkVeil phase -> registration ->
+    // register -> buying (publishing the registrant root) -> commit -> close
+    // -> reveal.
+    let c = nextContext(contractAddress, contract.circuits.advancePhase(ctx, LaunchPhase.DarkVeil).context);
+    c = nextContext(contractAddress, contract.circuits.startRegistration(c).context);
+    c = nextContext(contractAddress, contract.circuits.registerForDarkVeil(c).context);
+    c = nextContext(contractAddress, contract.circuits.startBuying(c, registrants.root).context);
+
+    const tokenAmount = 250n;
+    const commitment = eligibilityGate.computeBuyCommit({
+      buyerKey: myKey,
+      launchId,
+      tokenAmount,
+      pricePerToken: dvPrice,
+      nonce: buyNonce,
+    });
+
+    c = nextContext(contractAddress, contract.circuits.submitBuyCommit(c, commitment, 100n).context);
+    // baseSlot must cover tokenAmount, or the reveal fails the per-registrant
+    // cap rather than the ownership check this test is about.
+    c = nextContextAtTime(contractAddress, contract.circuits.closeDarkVeil(c, 200n, 500n).context, 300);
+
+    const revealed = contract.circuits.revealBuyCommit(c, commitment, tokenAmount, dvPrice, 300n);
+
+    // The reveal succeeding IS the parity assertion: the circuit recomputed
+    // this commitment from its own caller identity and nonce and got the same
+    // 32 bytes this package produced.
+    const state = eligibilityGateLedger(revealed.context.currentQueryContext.state);
+    expect(state.dvTokensPurchased.lookup(myKey)).toBe(tokenAmount);
+    expect(state.totalTokensCommitted).toBe(tokenAmount);
+  });
+
+  it('a buy commitment binds every one of its inputs', () => {
+    // Without this, a twin that ignored its arguments and returned a constant
+    // would satisfy the parity test above.
+    const base = {
+      buyerKey: fakeBytes32(41),
+      launchId: fakeBytes32(9),
+      tokenAmount: 250n,
+      pricePerToken: 3n,
+      nonce: fakeBytes32(77),
+    };
+    const reference = eligibilityGate.computeBuyCommit(base);
+
+    const variants = [
+      { ...base, buyerKey: fakeBytes32(42) },
+      { ...base, launchId: fakeBytes32(10) },
+      { ...base, tokenAmount: 251n },
+      { ...base, pricePerToken: 4n },
+      { ...base, nonce: fakeBytes32(78) },
+    ];
+    for (const variant of variants) {
+      expect(eligibilityGate.computeBuyCommit(variant)).not.toEqual(reference);
+    }
+  });
+});
+
 describe('cto-governance.ts — parity with the compiled circuit', () => {
   it('deriveUserPublicKey + computeVoteNullifier match what castVote derives and hasVoted checks', () => {
     const sk = fakeBytes32(11);

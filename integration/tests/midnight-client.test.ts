@@ -115,7 +115,6 @@ const GOVERNOR_SK: UserSecretKey = { bytes: fakeBytes32(2) };
 const COMMUNITY_SK: UserSecretKey = { bytes: fakeBytes32(3) };
 const MERKLE_PROOF: MerkleProofEntry[] = [{ sibling: fakeBytes32(9), goesLeft: true }];
 const BUY_NONCE = fakeBytes32(20);
-const REG_NONCE = fakeBytes32(21);
 const FAKE_PROVIDERS = {} as ContractProviders;
 const FAKE_CONTRACT_ADDRESS = `0x${'ab'.repeat(32)}`;
 
@@ -294,7 +293,7 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
 
   it('passes the exact 17-item positional args array in constructor order', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
-    const record = await client.deployEligibilityGate(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE, REG_NONCE);
+    const record = await client.deployEligibilityGate(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE);
 
     expect(deployContract).toHaveBeenCalledTimes(1);
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
@@ -327,9 +326,9 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
     });
   });
 
-  it('builds witnesses carrying the real user/governor secrets and both Merkle proofs/nonces', async () => {
+  it('builds witnesses carrying the real user/governor secrets, both Merkle proofs and the buy nonce', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
-    await client.deployEligibilityGate(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE, REG_NONCE);
+    await client.deployEligibilityGate(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE);
 
     const call = recorded<{
       compiledContract: {
@@ -341,13 +340,12 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
     expect(w.getGovernorSecret(undefined)[1]).toEqual(GOVERNOR_SK);
     expect(w.getMerkleProof(undefined)[1]).toEqual(MERKLE_PROOF);
     expect(w.getRegistrantMerkleProof(undefined)[1]).toEqual(MERKLE_PROOF);
-    expect(w.getRegistrationNonce(undefined)[1]).toEqual(REG_NONCE);
     expect(w.getBuyNonce(undefined)[1]).toEqual(BUY_NONCE);
   });
 
   it('connectEligibilityGate calls findDeployedContract with the given contractAddress and privateStateId', async () => {
     const client = new NoctisMidnightClient(USER_SK);
-    await client.connectEligibilityGate(FAKE_PROVIDERS, 'addr-eg-1', MERKLE_PROOF, BUY_NONCE, REG_NONCE);
+    await client.connectEligibilityGate(FAKE_PROVIDERS, 'addr-eg-1', MERKLE_PROOF, BUY_NONCE);
 
     expect(findDeployedContract).toHaveBeenCalledTimes(1);
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
@@ -355,6 +353,36 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
     expect(call.privateStateId).toBe('eligibility_gate');
     expect(call.initialPrivateState).toBeUndefined();
     expect(client.eligibilityGate).not.toBeNull();
+  });
+
+  it('carries the registrant proof separately from the allowlist proof', async () => {
+    // Two different trees, published at two different times: the allowlist at
+    // deploy, the registrant set at startBuying. submitBuyCommit verifies
+    // against the registrant root, so conflating them produces a proof for the
+    // wrong root — and the witness factory falls back to the allowlist proof
+    // when none is given, which is exactly how that happens silently.
+    const registrantProof: MerkleProofEntry[] = [{ sibling: fakeBytes32(77), goesLeft: false }];
+    const client = new NoctisMidnightClient(USER_SK);
+
+    await client.connectEligibilityGate(FAKE_PROVIDERS, 'addr-eg-1', MERKLE_PROOF, BUY_NONCE, registrantProof);
+
+    const call = recorded<{ compiledContract: { witnesses: Record<string, (c: undefined) => [undefined, unknown]> } }>(
+      vi.mocked(findDeployedContract).mock.calls[0][1],
+    );
+    const w = call.compiledContract.witnesses;
+    expect(w.getRegistrantMerkleProof(undefined)[1]).toEqual(registrantProof);
+    expect(w.getMerkleProof(undefined)[1]).toEqual(MERKLE_PROOF);
+  });
+
+  it('falls back to the allowlist proof only when no registrant proof is given', async () => {
+    const client = new NoctisMidnightClient(USER_SK);
+
+    await client.connectEligibilityGate(FAKE_PROVIDERS, 'addr-eg-1', MERKLE_PROOF, BUY_NONCE);
+
+    const call = recorded<{ compiledContract: { witnesses: Record<string, (c: undefined) => [undefined, unknown]> } }>(
+      vi.mocked(findDeployedContract).mock.calls[0][1],
+    );
+    expect(call.compiledContract.witnesses.getRegistrantMerkleProof(undefined)[1]).toEqual(MERKLE_PROOF);
   });
 });
 
@@ -384,7 +412,7 @@ describe('NoctisMidnightClient.deployBondingCurve / connectBondingCurve', () => 
 
   it('passes the exact 22-item positional args array in constructor order', async () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
-    await client.deployBondingCurve(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE, REG_NONCE);
+    await client.deployBondingCurve(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE);
 
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.privateStateId).toBe('bonding_curve');
@@ -417,7 +445,7 @@ describe('NoctisMidnightClient.deployBondingCurve / connectBondingCurve', () => 
 
   it('connectBondingCurve calls findDeployedContract with the given contractAddress and privateStateId', async () => {
     const client = new NoctisMidnightClient(USER_SK);
-    await client.connectBondingCurve(FAKE_PROVIDERS, 'addr-bc-1', MERKLE_PROOF, BUY_NONCE, REG_NONCE);
+    await client.connectBondingCurve(FAKE_PROVIDERS, 'addr-bc-1', MERKLE_PROOF, BUY_NONCE);
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.contractAddress).toBe('addr-bc-1');
     expect(call.privateStateId).toBe('bonding_curve');
@@ -730,6 +758,8 @@ const FALLBACK_METHODS: Array<{
     circuit: 'cancelBuyCommit',
     args: [fakeBytes32(105)],
   },
+  { method: 'cancelDarkVeil', circuit: 'cancelDarkVeil', args: [] },
+  { method: 'markDarkVeilFailed', circuit: 'markDarkVeilFailed', args: [] },
 ];
 // The DarkVeil figures a launch page renders are published ledger fields, so
 // reading them is not a circuit call and they are not in this table. See the
@@ -827,7 +857,6 @@ async function connectedTierBClient(): Promise<NoctisMidnightClient> {
     { publicDataProvider: 'the-provider' } as never,
     FAKE_CONTRACT_ADDRESS,
     [],
-    fakeBytes32(0),
     fakeBytes32(0),
   );
   return client;

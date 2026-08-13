@@ -48,3 +48,30 @@ export function deriveLaunchIdentity(seed: Uint8Array, launchId: Uint8Array): Ui
   }
   return deriveUserPublicKey(deriveUserSecretFromSeed(seed), launchId);
 }
+
+/**
+ * The nonce that hides a registrant's DarkVeil buy amount between commit and
+ * reveal.
+ *
+ * Derived rather than generated, for the same reason the user secret is: the
+ * commit and the reveal are separate transactions, potentially hours and a
+ * process restart apart, and the reveal has to reproduce this exact value or
+ * the contract rejects it as not the commitment owner — with the buying window
+ * closed and the bond already locked. A generated nonce would have to survive
+ * in storage for that to work; a derived one only needs the seed, which the
+ * registrant already has to keep.
+ *
+ * Scoped per contract address, so the same registrant taking part in two
+ * launches commits under two unrelated nonces.
+ *
+ * Its own domain, distinct from the user secret's: the two are derived from the
+ * same seed and must not be relatable.
+ */
+export function deriveDarkVeilBuyNonce(seed: Uint8Array, contractAddress: string): Uint8Array {
+  if (!contractAddress) {
+    throw new Error('contractAddress is required — a buy nonce is scoped to one launch.');
+  }
+  return new Uint8Array(
+    createHmac('sha256', 'noctis:midnight:dv-buy-nonce:v1').update(seed).update(contractAddress).digest(),
+  );
+}

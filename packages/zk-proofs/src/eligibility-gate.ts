@@ -76,6 +76,52 @@ export function computeRegistrationCommit(input: RegistrationCommitInput): Uint8
   });
 }
 
+export interface BuyCommitInput {
+  buyerKey: Uint8Array;
+  launchId: Uint8Array;
+  tokenAmount: bigint;
+  pricePerToken: bigint;
+  nonce: Uint8Array;
+}
+
+const BUY_COMMIT_DOMAIN = 'noctis:dv:buy:commit:v1';
+
+/**
+ * Field order and domain match `computeBuyCommit` in BOTH
+ * eligibility_gate.compact (Tier B) and bonding_curve.compact (Tier C).
+ *
+ * Unlike the registration commit above this one DOES carry a nonce, and must:
+ * the whole point of the commit/reveal pair is that the committed amount stays
+ * private until reveal, and every input other than the nonce is either public
+ * or guessable from a small range.
+ */
+const buyCommitInputType = structType<BuyCommitInput & { domain: Uint8Array }>([
+  ['domain', bytes32Type],
+  ['buyerKey', bytes32Type],
+  ['launchId', bytes32Type],
+  ['tokenAmount', uintType(128)],
+  ['pricePerToken', uintType(128)],
+  ['nonce', bytes32Type],
+]);
+
+/**
+ * `computeBuyCommit` — the value `submitBuyCommit` stores and
+ * `revealBuyCommit` recomputes from the caller's own identity and nonce.
+ *
+ * `submitBuyCommit` accepts whatever it is handed; it is the REVEAL that binds
+ * the commitment to its owner. So a commitment built from the wrong identity,
+ * launch, amount, price or nonce submits perfectly happily and then fails at
+ * reveal with "Not the commitment owner" — after the buying window has closed,
+ * with the bond already locked. Build it with this function and the same values
+ * the reveal will use.
+ */
+export function computeBuyCommit(input: BuyCommitInput): Uint8Array {
+  return persistentHash(buyCommitInputType, {
+    domain: pad32(BUY_COMMIT_DOMAIN),
+    ...input,
+  });
+}
+
 // ============================================================================
 // Allowlist Merkle tree (2026-07-09)
 // ============================================================================

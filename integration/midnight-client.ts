@@ -344,7 +344,6 @@ export class NoctisMidnightClient {
     },
     merkleProof: MerkleProofEntry[],
     buyNonce: Uint8Array,
-    registrationNonce: Uint8Array,
     /**
      * Circuits this deploy leaves out, added afterwards by maintenance update.
      * A deploy writes the whole contract state at once and a block caps the
@@ -356,13 +355,7 @@ export class NoctisMidnightClient {
      */
     deferCircuits: readonly string[] = [],
   ): Promise<PsmRecord> {
-    const witnesses = eligibilityGateWitnesses(
-      this.userSecretKey,
-      merkleProof,
-      registrationNonce,
-      buyNonce,
-      this.governorSecretKey,
-    );
+    const witnesses = eligibilityGateWitnesses(this.userSecretKey, merkleProof, buyNonce, this.governorSecretKey);
     const compiled = compileEligibilityGate(witnesses, deferCircuits);
     const deployed = await deployContract(this.remembering(providers), {
       // Derived rather than sampled, so the authority that can complete this
@@ -401,14 +394,21 @@ export class NoctisMidnightClient {
     contractAddress: string,
     merkleProof: MerkleProofEntry[],
     buyNonce: Uint8Array,
-    registrationNonce: Uint8Array,
+    /**
+     * Membership in the REGISTRANT tree, which `submitBuyCommit` verifies
+     * against the root published at `startBuying`. A different tree from the
+     * allowlist, published at a different time — so a caller submitting a buy
+     * commitment must supply it. Omitted, the witness falls back to the
+     * allowlist proof, which verifies against the wrong root.
+     */
+    registrantProof?: MerkleProofEntry[],
   ): Promise<void> {
     const witnesses = eligibilityGateWitnesses(
       this.userSecretKey,
       merkleProof,
-      registrationNonce,
       buyNonce,
       this.governorSecretKey,
+      registrantProof,
     );
     const compiled = compileEligibilityGate(witnesses);
     this.eligibilityGate = await findDeployedContract(this.remembering(providers), {
@@ -487,15 +487,8 @@ export class NoctisMidnightClient {
     },
     merkleProof: MerkleProofEntry[],
     buyNonce: Uint8Array,
-    registrationNonce: Uint8Array,
   ): Promise<PsmRecord> {
-    const witnesses = bondingCurveWitnesses(
-      this.userSecretKey,
-      merkleProof,
-      registrationNonce,
-      buyNonce,
-      this.governorSecretKey,
-    );
+    const witnesses = bondingCurveWitnesses(this.userSecretKey, merkleProof, buyNonce, this.governorSecretKey);
     const compiled = compileBondingCurve(witnesses);
     const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
@@ -535,15 +528,8 @@ export class NoctisMidnightClient {
     contractAddress: string,
     merkleProof: MerkleProofEntry[],
     buyNonce: Uint8Array,
-    registrationNonce: Uint8Array,
   ): Promise<void> {
-    const witnesses = bondingCurveWitnesses(
-      this.userSecretKey,
-      merkleProof,
-      registrationNonce,
-      buyNonce,
-      this.governorSecretKey,
-    );
+    const witnesses = bondingCurveWitnesses(this.userSecretKey, merkleProof, buyNonce, this.governorSecretKey);
     const compiled = compileBondingCurve(witnesses);
     this.bondingCurve = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
@@ -1142,6 +1128,34 @@ export class NoctisLaunchManager {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
     return handle.callTx.closeDarkVeil(closeTimestamp, baseSlot);
+  }
+
+  /**
+   * Cancels a DarkVeil phase outright. Governor-only, and it marks the phase
+   * failed, which is what routes every locked bond back in full through
+   * claimBondRefund rather than the ratio refund.
+   *
+   * The correct path when registration closed below the participant floor, or
+   * when the launch is abandoned before the Cardano claim window ran: a
+   * registrant is owed their whole bond in either case.
+   */
+  async cancelDarkVeil() {
+    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
+    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
+    return handle.callTx.cancelDarkVeil();
+  }
+
+  /**
+   * Marks a DarkVeil phase failed without cancelling it. Governor-only.
+   *
+   * The circuit refuses a phase that already closed normally, because a closed
+   * phase settles against what each registrant actually bought — marking it
+   * failed would open the full-refund path to bonds that are owed only a ratio.
+   */
+  async markDarkVeilFailed() {
+    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
+    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
+    return handle.callTx.markDarkVeilFailed();
   }
 
   /**

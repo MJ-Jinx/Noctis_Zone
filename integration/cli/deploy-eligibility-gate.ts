@@ -237,7 +237,6 @@ async function main() {
       args,
       emptyProof,
       zeroNonce,
-      zeroNonce,
       input.deferCircuits ?? [],
     );
 
