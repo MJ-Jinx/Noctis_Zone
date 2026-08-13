@@ -81,7 +81,12 @@ vi.mock('@midnight-ntwrk/ledger-v8', () => ({
   },
 }));
 
-import { buildServerWallet, defaultNetworkConfig, type ServerWalletNetworkConfig } from '../midnight-server-wallet.js';
+import {
+  buildServerWallet,
+  defaultNetworkConfig,
+  type ServerWalletNetworkConfig,
+  submitWithReconnect,
+} from '../midnight-server-wallet.js';
 
 // ============================================================================
 // defaultNetworkConfig
@@ -479,5 +484,59 @@ describe('buildServerWallet — ServerWalletProvider.balanceTx / submitTx', () =
 
     expect(facade.submitTransaction).toHaveBeenCalledWith('finalized-tx-x');
     expect(txHash).toBe('txhash-1');
+  });
+});
+
+describe('submitWithReconnect', () => {
+  const noSleep = async () => {};
+
+  it('returns the hash when the first attempt works', async () => {
+    const submit = vi.fn().mockResolvedValue('0xabc');
+    await expect(submitWithReconnect(submit, 'tx', { sleep: noSleep })).resolves.toBe('0xabc');
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('tries again when the connection was lost', async () => {
+    // The case this exists for: proving outlasts the node's idle timeout, so
+    // the first submission after a long proof meets a closed socket.
+    const submit = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('disconnected from wss://rpc.preprod.midnight.network/: 1000:: Normal Closure'))
+      .mockResolvedValue('0xdef');
+    await expect(submitWithReconnect(submit, 'tx', { sleep: noSleep })).resolves.toBe('0xdef');
+    expect(submit).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a transaction the node refused', async () => {
+    // A refusal is a verdict, not a hiccup — repeating it wastes a fee window
+    // and hides the real reason behind an attempt count.
+    const submit = vi.fn().mockRejectedValue(new Error('Invalid Transaction: BadProof'));
+    await expect(submitWithReconnect(submit, 'tx', { sleep: noSleep })).rejects.toThrow(/BadProof/);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up after the last attempt and reports the real error', async () => {
+    const submit = vi.fn().mockRejectedValue(new Error('Transport error (POST /prove)'));
+    await expect(submitWithReconnect(submit, 'tx', { attempts: 3, sleep: noSleep })).rejects.toThrow(/Transport error/);
+    expect(submit).toHaveBeenCalledTimes(3);
+  });
+
+  it('waits between attempts, so the provider has time to reconnect', async () => {
+    const waited: number[] = [];
+    const submit = vi.fn().mockRejectedValueOnce(new Error('socket closed')).mockResolvedValue('0x1');
+    await submitWithReconnect(submit, 'tx', {
+      delayMs: 3_000,
+      sleep: async (ms) => {
+        waited.push(ms);
+      },
+    });
+    expect(waited).toEqual([3_000]);
+  });
+
+  it('recognises a lost connection reported through a cause', async () => {
+    const err = new Error('Transaction submission failed');
+    (err as { cause?: unknown }).cause = new Error('disconnected from wss://rpc: 1000:: Normal Closure');
+    const submit = vi.fn().mockRejectedValueOnce(err).mockResolvedValue('0x2');
+    await expect(submitWithReconnect(submit, 'tx', { sleep: noSleep })).resolves.toBe('0x2');
   });
 });

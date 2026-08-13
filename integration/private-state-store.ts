@@ -48,6 +48,7 @@
 // reconnect their wallet), not the primary recovery mechanism anymore.
 // ============================================================================
 
+import { randomBytes } from 'node:crypto';
 import {
   type LevelPrivateStateProviderConfig,
   levelPrivateStateProvider,
@@ -359,4 +360,20 @@ export function createDarkVeilPrivateStore(config: CreateDarkVeilPrivateStoreCon
     importBackup,
     provider,
   };
+}
+
+/**
+ * A password for a private-state store that lives only as long as the process.
+ *
+ * The store these CLIs use is in memory and is thrown away on exit, so nothing
+ * ever reads it back and there is no value in a fixed string — while a fixed
+ * string is exactly what gets copied into the next CLI and eventually into one
+ * whose store is NOT ephemeral. Generated per process, it cannot be.
+ *
+ * The SDK requires characters from at least three of uppercase, lowercase,
+ * digits and symbols, so one of each is included rather than left to chance in
+ * the random part.
+ */
+export function ephemeralPrivateStatePassword(): string {
+  return `Aa1!${randomBytes(24).toString('base64url')}`;
 }

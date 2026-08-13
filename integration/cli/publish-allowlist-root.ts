@@ -54,6 +54,7 @@ import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config
 import { MemoryLevel } from 'memory-level';
 import { NoctisLaunchManager, NoctisMidnightClient } from '../midnight-client.js';
 import { buildServerWallet, defaultNetworkConfig, type MidnightNetwork } from '../midnight-server-wallet.js';
+import { ephemeralPrivateStatePassword } from '../private-state-store.js';
 import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
@@ -140,7 +141,7 @@ async function main() {
         // One-shot CLI process — private state never needs to survive past
         // this call, so an in-memory store (never touches disk) is correct
         // here, unlike a real user session's persistent browser store.
-        privateStoragePasswordProvider: () => 'ephemeral-cli-process',
+        privateStoragePasswordProvider: ephemeralPrivateStatePassword,
         accountId: `governor-allowlist-publish-${input.contractAddress}`,
         levelFactory: (dbName: string) => new MemoryLevel(dbName as never) as never,
       }),

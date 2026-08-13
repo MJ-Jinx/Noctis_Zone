@@ -66,6 +66,7 @@ import {
 import { HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
 import { ShieldedWallet } from '@midnight-ntwrk/wallet-sdk-shielded';
 import { createKeystore, PublicKey, UnshieldedWallet } from '@midnight-ntwrk/wallet-sdk-unshielded-wallet';
+import { describeError } from './error-detail.js';
 import {
   type SnapshotGuards,
   type SubWalletKind,
@@ -200,9 +201,71 @@ class ServerWalletProvider implements WalletProvider, MidnightProvider {
   }
 
   async submitTx(tx: FinalizedTransaction): Promise<string> {
-    return await this.wallet.submitTransaction(tx);
+    if (process.env.NP_TX_COST) {
+      process.stderr.write(`${describeTransactionCost(tx)}\n`);
+    }
+    return await submitWithReconnect((transaction) => this.wallet.submitTransaction(transaction), tx);
   }
 }
+
+/**
+ * Errors that mean the node connection died, rather than that the node said no.
+ *
+ * Matched against the WHOLE failure chain. The word identifying a dropped
+ * socket sits two or three layers down — "Transaction submission error"
+ * wrapping "Transaction submission failed" wrapping the disconnect itself — so
+ * a check reading only the message, or one level of cause, finds none of the
+ * terms it looks for and mistakes a dropped connection for a refusal.
+ */
+function isLostConnection(err: unknown): boolean {
+  return /disconnect|Transport error|not connected|socket|ECONNRESET|closed/i.test(describeError(err));
+}
+
+/**
+ * Submit, and try again if the node connection was lost rather than the
+ * transaction refused.
+ *
+ * The submission service opens its websocket to the node when the wallet is
+ * built, then nothing uses it until a transaction is ready. Balancing a
+ * transaction includes proving it, which takes long enough that a public
+ * endpoint may close the connection as idle in the meantime — a clean close, so
+ * the first submission after a long proof finds a socket that is already gone.
+ * The provider reconnects on its own within a few seconds, so what this needs
+ * is another attempt, not another proof.
+ *
+ * Retrying is safe because the transaction is already final: a second attempt
+ * carries the identical extrinsic, which a node recognises as one it has
+ * already seen rather than as a second transaction. A refusal is not retried —
+ * it would be refused again for the same reason.
+ */
+export async function submitWithReconnect<T>(
+  submit: (tx: T) => Promise<string>,
+  tx: T,
+  { attempts = 4, delayMs = 3_000, sleep = defaultSleep }: SubmitRetryOptions = {},
+): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await submit(tx);
+    } catch (err) {
+      lastError = err;
+      if (!isLostConnection(err) || attempt === attempts) {
+        throw err;
+      }
+      await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
+export interface SubmitRetryOptions {
+  attempts?: number;
+  /** Long enough for the provider's own reconnect to have completed. */
+  delayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Resume this wallet from a stored snapshot instead of replaying chain history.
@@ -477,4 +540,38 @@ export async function buildServerWallet(
     restoredFrom,
     shutdown: () => facade.stop(),
   };
+}
+
+/**
+ * What a finished transaction costs, against the limits a block enforces.
+ *
+ * The node refuses a transaction that would exhaust a block without saying
+ * which of the five dimensions it exhausted, and the answer is not guessable:
+ * a deploy is dominated by bytes written, while proof verification is paid for
+ * in compute time. Measuring the real balanced-and-proven transaction is the
+ * only way to know which one to attack.
+ */
+export function describeTransactionCost(tx: unknown): string {
+  const priced = tx as { cost?: (params: ledger.LedgerParameters) => Record<string, bigint> };
+  if (typeof priced.cost !== 'function') {
+    return 'transaction cost: unavailable (this transaction type does not price itself)';
+  }
+  const limits: Record<string, bigint> = {
+    readTime: 2_000_000_000_000n,
+    computeTime: 2_000_000_000_000n,
+    blockUsage: 1_000_000n,
+    bytesWritten: 50_000n,
+    bytesChurned: 50_000_000n,
+  };
+  try {
+    const cost = priced.cost(ledger.LedgerParameters.initialParameters());
+    const parts = Object.entries(limits).map(([dimension, limit]) => {
+      const used = cost[dimension] ?? 0n;
+      const percent = (Number(used) / Number(limit)) * 100;
+      return `${dimension} ${used}/${limit} (${percent.toFixed(1)}%)${percent > 100 ? ' OVER' : ''}`;
+    });
+    return `transaction cost: ${parts.join('  ')}`;
+  } catch (err) {
+    return `transaction cost: could not be computed (${describeError(err)})`;
+  }
 }

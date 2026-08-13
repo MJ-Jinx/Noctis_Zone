@@ -38,6 +38,7 @@ import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config
 import { MemoryLevel } from 'memory-level';
 import type { MerkleProofEntry } from '../../contracts/midnight/witnesses.js';
 import { fromHex32, resolveEligibilityGateDeployArgs } from '../eligibility-gate-deploy-args.js';
+import { describeError, safeShow, unwrapForDiagnosis } from '../error-detail.js';
 import { NoctisMidnightClient } from '../midnight-client.js';
 import {
   buildServerWallet,
@@ -45,7 +46,9 @@ import {
   type MidnightNetwork,
   type SnapshotCliInput,
   snapshotOptionsFrom,
+  waitForWalletState,
 } from '../midnight-server-wallet.js';
+import { ephemeralPrivateStatePassword } from '../private-state-store.js';
 import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { jsonSafe, parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
@@ -82,6 +85,14 @@ interface Input extends SnapshotCliInput {
    * Omitted, the deploy carries every circuit.
    */
   deferCircuits?: string[];
+
+  /**
+   * How long to allow for the funding wallet to reach the chain head before
+   * giving up. Resuming from a recent snapshot this is minutes; from an old one
+   * or none at all it is much longer, and a bounded wait says so rather than
+   * hanging.
+   */
+  syncTimeoutMs?: number;
 
   totalSupply: string;
   maxWalletPercent: number;
@@ -169,13 +180,30 @@ async function main() {
   );
 
   try {
+    // A wallet is returned started, not synced. Proving a DUST spend against a
+    // view of the chain that has moved on produces a proof the node rejects as
+    // InvalidDustSpendProof (170) — the transaction is well-formed and the fee
+    // is affordable, so the failure names the proof rather than the staleness
+    // behind it. Resuming from a snapshot makes this a short catch-up rather
+    // than a full replay, but it is still a wait that has to happen before
+    // anything is built.
+    const readyBy = Date.now() + (input.syncTimeoutMs ?? 900_000);
+    process.stderr.write('waiting for the funding wallet to catch up to the chain head\n');
+    const ready = await waitForWalletState(
+      serverWallet.facade,
+      (state) => state.isSynced && state.dust.balance(new Date()) > 0n,
+      Math.max(readyBy - Date.now(), 1),
+      'the funding wallet to reach the chain head with spendable DUST',
+    );
+    process.stderr.write(`caught up; spendable DUST ${ready.dust.balance(new Date())}\n`);
+
     const zkConfigProvider = new NodeZkConfigProvider(input.zkConfigBasePath);
     const providers: ContractProviders = {
       privateStateProvider: levelPrivateStateProvider({
         privateStateStoreName: 'noctis-deploy-eligibility-gate',
         signingKeyStoreName: 'noctis-deploy-eligibility-gate-signing',
         // One-shot process: the private state never needs to outlive it.
-        privateStoragePasswordProvider: () => 'ephemeral-cli-process',
+        privateStoragePasswordProvider: ephemeralPrivateStatePassword,
         accountId: `deploy-eligibility-gate-${input.launchIdHex}`,
         levelFactory: (dbName: string) => new MemoryLevel(dbName as never) as never,
       }),
@@ -232,6 +260,17 @@ async function main() {
 }
 
 main().catch((err) => {
-  process.stdout.write(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+  process.stdout.write(JSON.stringify({ ok: false, error: describeError(err) }));
+  if (process.env.NP_STACK) {
+    process.stderr.write(`${err instanceof Error ? (err.stack ?? String(err)) : String(err)}\n`);
+    for (let e: unknown = unwrapForDiagnosis(err), depth = 0; e && depth < 6; depth++) {
+      const record = e as unknown as Record<string, unknown>;
+      const own = [...Object.getOwnPropertyNames(e as object), ...Object.getOwnPropertySymbols(e as object)]
+        .map((k) => `${String(k)}=${safeShow(record[k as string])}`)
+        .join('\n    ');
+      process.stderr.write(`  [${depth}] ${(e as object).constructor?.name}\n    ${own}\n`);
+      e = record.cause;
+    }
+  }
   process.exitCode = 1;
 });
