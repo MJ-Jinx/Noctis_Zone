@@ -91,6 +91,20 @@ export interface ServerWalletNetworkConfig {
   provingServerUrl: string;
   indexerHttpUrl: string;
   indexerWsUrl: string;
+  /**
+   * Fee safety margin. **This is an exponent, not a multiplier** — the ledger's
+   * own `feesWithMargin` warns that "it is very easy to get a completely
+   * unreasonable margin here".
+   *
+   * It buys headroom against the fee rate rising between building a transaction
+   * and it landing. Raising it costs more than it looks: a big transaction with
+   * a large margin computes a fee past what a block can hold, and the node
+   * rejects it as FeeCalculation.BlockLimitExceeded (232) — a failure that reads
+   * like the transaction is too big when it is the margin that is too generous.
+   *
+   * Defaults are set per network below; override only with a reason.
+   */
+  feeBlocksMargin?: number;
 }
 
 /**
@@ -379,10 +393,17 @@ export async function buildServerWallet(
     // zero-fee-rate local devnet needs a nonzero overhead to avoid a
     // NotNormalized (117) rejection; preprod/preview/mainnet have a real
     // fee rate and must NOT get an artificial overhead added.
+    //
+    // The margin is an EXPONENT (see ServerWalletNetworkConfig.feeBlocksMargin).
+    // A local devnet's fee rate is effectively zero, so a large margin there
+    // costs nothing and the overhead is what does the work. A real network is
+    // different: a deploy carrying a large circuit, priced with a generous
+    // margin, computes a fee no block can hold and is rejected as 232. Measured
+    // on Preprod, this contract's deploy fails at 5 and needs a small margin.
     costParameters:
       config.network === 'undeployed'
-        ? { feeBlocksMargin: 5, additionalFeeOverhead: 1_000_000n }
-        : { feeBlocksMargin: 5 },
+        ? { feeBlocksMargin: config.feeBlocksMargin ?? 5, additionalFeeOverhead: 1_000_000n }
+        : { feeBlocksMargin: config.feeBlocksMargin ?? 1 },
     relayURL: new URL(config.relayUrl),
     provingServerUrl: new URL(config.provingServerUrl),
     indexerClientConnection: {

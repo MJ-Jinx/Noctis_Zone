@@ -288,8 +288,26 @@ describe('buildServerWallet — happy path wiring', () => {
 
     await buildServerWallet(new Uint8Array(32), fakeConfig('preprod'));
     const preprodCall = walletFacadeInitFn.mock.calls[0][0];
+    // A real network gets a SMALL margin, because the margin is an exponent:
+    // the ledger's own feesWithMargin warns how easily it becomes unreasonable,
+    // and a generous one prices a large transaction past what a block can hold.
+    // The devnet keeps the larger value — its fee rate is effectively zero, so
+    // the margin costs nothing there and the overhead does the real work.
     expect(preprodCall.configuration.costParameters).toEqual({
-      feeBlocksMargin: 5,
+      feeBlocksMargin: 1,
+    });
+  });
+
+  it('lets a caller override the fee margin', async () => {
+    stubHdChain({
+      type: 'keysDerived',
+      keys: { ROLE_ZSWAP: 'a', ROLE_NIGHT_EXTERNAL: 'b', ROLE_DUST: 'c' },
+    });
+    walletFacadeInitFn.mockResolvedValue(makeFakeFacade());
+
+    await buildServerWallet(new Uint8Array(32), { ...fakeConfig('preprod'), feeBlocksMargin: 3 });
+    expect(walletFacadeInitFn.mock.calls[0][0].configuration.costParameters).toEqual({
+      feeBlocksMargin: 3,
     });
   });
 
