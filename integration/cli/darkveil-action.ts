@@ -7,10 +7,15 @@
 //
 // TWO KINDS OF CALLER, and the difference decides which secret is needed:
 //
-//   GOVERNOR actions move the phase — start-registration, start-buying, close,
-//   record-settlement, finalize-settlement, cancel, mark-failed. They are
-//   checked in-circuit against the governorKey sealed at deploy, so only the
-//   key that deployed the launch can make them.
+//   GOVERNOR actions move the phase — advance-phase, start-registration,
+//   start-buying, close, record-settlement, finalize-settlement, cancel,
+//   mark-failed. They are checked in-circuit against the governorKey sealed at
+//   deploy, so only the key that deployed the launch can make them.
+//
+//   OPENING A LAUNCH TAKES TWO OF THEM, not one. `phase` is the launch's
+//   lifecycle and `dvState` is DarkVeil's sub-phase within it; registration
+//   asserts both, so advance-phase(DarkVeil) AND start-registration are each
+//   required before anyone can register. Neither is sufficient alone.
 //
 //   REGISTRANT actions are made by a participant — register, buy-commit,
 //   reveal, claim-refund. Each is identified as
@@ -40,6 +45,7 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
+import { LaunchPhase } from '../../contracts/midnight/compiled/eligibility_gate/contract/index.js';
 import type { MerkleProofEntry } from '../../contracts/midnight/witnesses.js';
 import { computeBuyCommit } from '../../packages/zk-proofs/src/eligibility-gate.js';
 import { fromHex32 } from '../eligibility-gate-deploy-args.js';
@@ -60,6 +66,7 @@ import { assertZkConfigMatchesBuild } from '../zk-config-fingerprint.js';
 import { jsonSafe, parseJsonStdin, readStdin, requireFieldsFalsy } from './cli-io.js';
 
 type Action =
+  | 'advance-phase'
   | 'start-registration'
   | 'start-buying'
   | 'register'
@@ -75,6 +82,7 @@ type Action =
 
 /** Actions the governor's own key must make. */
 const GOVERNOR_ACTIONS = new Set<Action>([
+  'advance-phase',
   'start-registration',
   'start-buying',
   'close',
@@ -107,6 +115,13 @@ interface Input extends SnapshotCliInput {
   /** buy-commit / reveal: membership in the registrant tree published at start-buying. */
   registrantProof?: Array<{ siblingHex: string; goesLeft: boolean }>;
 
+  /**
+   * advance-phase: the target lifecycle phase, BY NAME ("DarkVeil", "Public",
+   * …). A name rather than the underlying number because the two adjacent
+   * phases either side of the one wanted are equally valid integers, and a
+   * transition is one-way — an off-by-one here cannot be walked back.
+   */
+  phase?: string;
   /** start-buying: the root over the frozen registrant set. */
   registrantRootHex?: string;
   /** buy-commit, reveal: how many tokens, and the flat DarkVeil price. */
@@ -260,6 +275,10 @@ async function main() {
       case 'read':
         break;
 
+      case 'advance-phase':
+        result = await manager.advancePhase(launchPhaseFrom(input.phase));
+        break;
+
       case 'start-registration':
         result = await manager.startRegistration();
         break;
@@ -377,6 +396,23 @@ async function main() {
 function requireHex(value: string | undefined, field: string): string {
   if (!value) throw new Error(`${field} is required for this action.`);
   return value;
+}
+
+/**
+ * Resolve a phase NAME to its enum value.
+ *
+ * Rejects numbers outright rather than accepting them alongside names: a
+ * numeric enum carries a reverse mapping, so `LaunchPhase["1"]` is a valid
+ * lookup that silently answers "DarkVeil" for a caller who meant to name a
+ * phase and typed its index. Only the declared names are accepted, and the
+ * error lists them.
+ */
+function launchPhaseFrom(name: string | undefined): LaunchPhase {
+  const names = Object.keys(LaunchPhase).filter((key) => Number.isNaN(Number(key)));
+  if (!name || !names.includes(name)) {
+    throw new Error(`phase must be one of ${names.join(', ')} — got ${name === undefined ? 'nothing' : `"${name}"`}.`);
+  }
+  return LaunchPhase[name as keyof typeof LaunchPhase];
 }
 
 main().catch((err) => {

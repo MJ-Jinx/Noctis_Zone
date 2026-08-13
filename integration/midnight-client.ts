@@ -53,6 +53,7 @@ import { Contract as CtoGovernanceContract } from '../contracts/midnight/compile
 import {
   Contract as EligibilityGateContract,
   type FairLaunchCert,
+  type LaunchPhase,
 } from '../contracts/midnight/compiled/eligibility_gate/contract/index.js';
 import { Contract as LpEscrowContract } from '../contracts/midnight/compiled/lp_escrow/contract/index.js';
 import { Contract as TreasuryContract } from '../contracts/midnight/compiled/treasury/contract/index.js';
@@ -363,8 +364,6 @@ export class NoctisMidnightClient {
       // deriveContractSigningKey.
       signingKey: deriveContractSigningKey(this.governorSecretKey.bytes, args.launchId),
       compiledContract: compiled,
-      privateStateId: 'eligibility_gate',
-      initialPrivateState: undefined,
       args: [
         args.launchId,
         args.allowlistRoot,
@@ -411,11 +410,18 @@ export class NoctisMidnightClient {
       registrantProof,
     );
     const compiled = compileEligibilityGate(witnesses);
+    // NO `privateStateId` HERE, DELIBERATELY. This contract's private state is
+    // `undefined` — every witness closes over its secret rather than
+    // accumulating state across calls (see witnesses.ts's `PrivateState`) — and
+    // the SDK branches on whether the KEY is present, not on its value. Given
+    // the key, it fetches the stored private state and asserts it is defined,
+    // which `undefined` can never satisfy: the call fails with "No private
+    // state found" no matter what was stored or how persistent the store is.
+    // Omitting it selects the SDK's own path for contracts that have no private
+    // state, which is what this one is.
     this.eligibilityGate = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
-      privateStateId: 'eligibility_gate',
-      initialPrivateState: undefined,
     });
   }
 
@@ -492,8 +498,6 @@ export class NoctisMidnightClient {
     const compiled = compileBondingCurve(witnesses);
     const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
-      privateStateId: 'bonding_curve',
-      initialPrivateState: undefined,
       args: [
         args.launchId,
         args.allowlistRoot,
@@ -531,11 +535,10 @@ export class NoctisMidnightClient {
   ): Promise<void> {
     const witnesses = bondingCurveWitnesses(this.userSecretKey, merkleProof, buyNonce, this.governorSecretKey);
     const compiled = compileBondingCurve(witnesses);
+    // No `privateStateId`, deliberately — see connectEligibilityGate.
     this.bondingCurve = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
-      privateStateId: 'bonding_curve',
-      initialPrivateState: undefined,
     });
   }
 
@@ -550,8 +553,6 @@ export class NoctisMidnightClient {
     const compiled = compileCreatorEscrow(witnesses);
     const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
-      privateStateId: 'creator_escrow',
-      initialPrivateState: undefined,
       args: [args.launchId, args.currency],
     });
     this.creatorEscrow = deployed;
@@ -565,11 +566,10 @@ export class NoctisMidnightClient {
   ): Promise<void> {
     const witnesses = creatorEscrowWitnesses(this.userSecretKey, this.governorSecretKey, communitySk);
     const compiled = compileCreatorEscrow(witnesses);
+    // No `privateStateId`, deliberately — see connectEligibilityGate.
     this.creatorEscrow = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
-      privateStateId: 'creator_escrow',
-      initialPrivateState: undefined,
     });
   }
 
@@ -591,8 +591,6 @@ export class NoctisMidnightClient {
     const compiled = compileVesting(witnesses);
     const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
-      privateStateId: 'vesting',
-      initialPrivateState: undefined,
       args: [args.launchId, args.tokenAllocation, args.vestDays, args.totalSupply, args.maxCreatorPercent],
     });
     this.vesting = deployed;
@@ -602,11 +600,10 @@ export class NoctisMidnightClient {
   async connectVesting(providers: ContractProviders, contractAddress: string): Promise<void> {
     const witnesses = vestingWitnesses(this.userSecretKey, this.governorSecretKey);
     const compiled = compileVesting(witnesses);
+    // No `privateStateId`, deliberately — see connectEligibilityGate.
     this.vesting = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
-      privateStateId: 'vesting',
-      initialPrivateState: undefined,
     });
   }
 
@@ -621,8 +618,6 @@ export class NoctisMidnightClient {
     const compiled = compileLpEscrow(witnesses);
     const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
-      privateStateId: 'lp_escrow',
-      initialPrivateState: undefined,
       args: [args.launchId, args.lockDuration],
     });
     this.lpEscrow = deployed;
@@ -636,11 +631,10 @@ export class NoctisMidnightClient {
   ): Promise<void> {
     const witnesses = lpEscrowWitnesses(this.governorSecretKey, communitySk);
     const compiled = compileLpEscrow(witnesses);
+    // No `privateStateId`, deliberately — see connectEligibilityGate.
     this.lpEscrow = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
-      privateStateId: 'lp_escrow',
-      initialPrivateState: undefined,
     });
   }
 
@@ -670,8 +664,6 @@ export class NoctisMidnightClient {
     const compiled = compileTreasury(witnesses);
     const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
-      privateStateId: 'treasury',
-      initialPrivateState: undefined,
       args: [
         args.launchId,
         args.floorLovelace ?? TREASURY_FLOOR_LOVELACE,
@@ -688,11 +680,10 @@ export class NoctisMidnightClient {
   async connectTreasury(providers: ContractProviders, contractAddress: string): Promise<void> {
     const witnesses = treasuryWitnesses(this.governorSecretKey);
     const compiled = compileTreasury(witnesses);
+    // No `privateStateId`, deliberately — see connectEligibilityGate.
     this.treasury = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
-      privateStateId: 'treasury',
-      initialPrivateState: undefined,
     });
   }
 
@@ -776,8 +767,6 @@ export class NoctisMidnightClient {
     const compiled = compileCtoGovernance(witnesses);
     const deployed = await deployContract(this.remembering(providers), {
       compiledContract: compiled,
-      privateStateId: 'cto_governance',
-      initialPrivateState: undefined,
       args: [
         args.launchId,
         args.totalSupply,
@@ -821,11 +810,10 @@ export class NoctisMidnightClient {
       balanceLeafHeldSince,
     );
     const compiled = compileCtoGovernance(witnesses);
+    // No `privateStateId`, deliberately — see connectEligibilityGate.
     this.ctoGovernance = await findDeployedContract(this.remembering(providers), {
       compiledContract: compiled,
       contractAddress,
-      privateStateId: 'cto_governance',
-      initialPrivateState: undefined,
     });
   }
 
@@ -983,30 +971,28 @@ export class NoctisLaunchManager {
   }
 
   /**
-   * Fix (2026-07-21): governor publishes the batch-computed allowlist
-   * Merkle root — registerForDarkVeil's verifyAllowlist circuit checks
-   * membership against whatever root is live here, so nothing can register
-   * until this has been called at least once. Same eligibilityGate-or-
-   * bondingCurve fallback as registerForDarkVeil above. Governor-only
-   * on-chain (checked via getGovernorSecret() in the circuit itself) — the
-   * providers this manager was connected with must carry the real governor
-   * witness secret, see integration/cli/publish-allowlist-root.ts.
-   */
-  /**
-   * One attestor's call. The root changes only once the threshold has been
-   * met by DISTINCT attestors within the expiry window, so a caller expecting
-   * this to publish on its own will not see the root move — that is the point.
+   * Moves the launch's overall phase. Governor-only, and one-way: the circuit
+   * refuses Pending as a target and holds every other transition to its one
+   * valid predecessor, so a launch cannot be walked backwards.
    *
-   * `currentTimestampSeconds` is bound to real chain time by the circuit and
-   * dates the attestation round.
+   * SEPARATE FROM `startRegistration`, and both are required before anyone can
+   * register. `phase` is the launch's lifecycle; `dvState` is DarkVeil's own
+   * sub-phase within it, and `registerForDarkVeil` asserts BOTH — Pending plus
+   * a started registration window is not enough on its own.
    */
+  async advancePhase(newPhase: LaunchPhase) {
+    const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
+    if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');
+    return handle.callTx.advancePhase(newPhase);
+  }
+
   /**
-   * Opens registration. Governor-only, and callable once — the phase moves out
-   * of Inactive and the circuit refuses to move it again, so a second call
+   * Opens registration. Governor-only, and callable once — the sub-phase moves
+   * out of Inactive and the circuit refuses to move it again, so a second call
    * cannot reopen a window that has already run.
    *
-   * Nothing else in the DarkVeil sequence can happen until this has been
-   * called: registerForDarkVeil requires the registration sub-phase.
+   * Registration also needs the launch phase itself to be DarkVeil; see
+   * `advancePhase` above.
    */
   async startRegistration() {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
@@ -1032,6 +1018,23 @@ export class NoctisLaunchManager {
     return handle.callTx.startBuying(registrantRoot);
   }
 
+  /**
+   * Fix (2026-07-21): governor publishes the batch-computed allowlist
+   * Merkle root — registerForDarkVeil's verifyAllowlist circuit checks
+   * membership against whatever root is live here, so nothing can register
+   * until this has been called at least once. Same eligibilityGate-or-
+   * bondingCurve fallback as registerForDarkVeil above. Governor-only
+   * on-chain (checked via getGovernorSecret() in the circuit itself) — the
+   * providers this manager was connected with must carry the real governor
+   * witness secret, see integration/cli/publish-allowlist-root.ts.
+   *
+   * One attestor's call. The root changes only once the threshold has been
+   * met by DISTINCT attestors within the expiry window, so a caller expecting
+   * this to publish on its own will not see the root move — that is the point.
+   *
+   * `currentTimestampSeconds` is bound to real chain time by the circuit and
+   * dates the attestation round.
+   */
   async updateAllowlistRoot(newRoot: Uint8Array, currentTimestampSeconds: bigint) {
     const handle = this.client.eligibilityGate ?? this.client.bondingCurve;
     if (!handle) throw new Error('eligibility_gate not connected (checked both eligibilityGate and bondingCurve)');

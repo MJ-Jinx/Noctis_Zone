@@ -297,8 +297,8 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
 
     expect(deployContract).toHaveBeenCalledTimes(1);
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
-    expect(call.privateStateId).toBe('eligibility_gate');
-    expect(call.initialPrivateState).toBeUndefined();
+    expect('privateStateId' in call).toBe(false);
+    expect('initialPrivateState' in call).toBe(false);
     expect(call.args).toEqual([
       args.launchId,
       args.allowlistRoot,
@@ -343,15 +343,24 @@ describe('NoctisMidnightClient.deployEligibilityGate / connectEligibilityGate', 
     expect(w.getBuyNonce(undefined)[1]).toEqual(BUY_NONCE);
   });
 
-  it('connectEligibilityGate calls findDeployedContract with the given contractAddress and privateStateId', async () => {
+  it('connectEligibilityGate omits privateStateId entirely, so circuit calls can fetch state', async () => {
     const client = new NoctisMidnightClient(USER_SK);
     await client.connectEligibilityGate(FAKE_PROVIDERS, 'addr-eg-1', MERKLE_PROOF, BUY_NONCE);
 
     expect(findDeployedContract).toHaveBeenCalledTimes(1);
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.contractAddress).toBe('addr-eg-1');
-    expect(call.privateStateId).toBe('eligibility_gate');
-    expect(call.initialPrivateState).toBeUndefined();
+
+    // KEY PRESENCE, not value. The SDK branches on `'privateStateId' in
+    // options`: given the key it fetches the stored private state and asserts
+    // it is defined, and this contract's private state is genuinely `undefined`
+    // (witnesses close over their secrets — see witnesses.ts's `PrivateState`),
+    // so every circuit call fails with "No private state found" regardless of
+    // what was stored. `toBeUndefined()` cannot catch that, because it passes
+    // identically whether the key is absent or present-and-undefined — which is
+    // how the broken shape passed its own test.
+    expect('privateStateId' in call).toBe(false);
+    expect('initialPrivateState' in call).toBe(false);
     expect(client.eligibilityGate).not.toBeNull();
   });
 
@@ -415,7 +424,7 @@ describe('NoctisMidnightClient.deployBondingCurve / connectBondingCurve', () => 
     await client.deployBondingCurve(FAKE_PROVIDERS, args, MERKLE_PROOF, BUY_NONCE);
 
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
-    expect(call.privateStateId).toBe('bonding_curve');
+    expect('privateStateId' in call).toBe(false);
     expect(call.args).toEqual([
       args.launchId,
       args.allowlistRoot,
@@ -443,12 +452,12 @@ describe('NoctisMidnightClient.deployBondingCurve / connectBondingCurve', () => 
     expect(client.bondingCurve).not.toBeNull();
   });
 
-  it('connectBondingCurve calls findDeployedContract with the given contractAddress and privateStateId', async () => {
+  it('connectBondingCurve calls findDeployedContract with the given contractAddress, and no privateStateId', async () => {
     const client = new NoctisMidnightClient(USER_SK);
     await client.connectBondingCurve(FAKE_PROVIDERS, 'addr-bc-1', MERKLE_PROOF, BUY_NONCE);
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.contractAddress).toBe('addr-bc-1');
-    expect(call.privateStateId).toBe('bonding_curve');
+    expect('privateStateId' in call).toBe(false);
     expect(client.bondingCurve).not.toBeNull();
   });
 });
@@ -463,12 +472,11 @@ describe('NoctisMidnightClient.deployCreatorEscrow / connectCreatorEscrow', () =
 
     const call = recorded<{
       args: unknown[];
-      privateStateId: string;
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
     }>(vi.mocked(deployContract).mock.calls[0][1]);
-    expect(call.privateStateId).toBe('creator_escrow');
+    expect('privateStateId' in call).toBe(false);
     expect(call.args).toEqual([fakeBytes32(40), 0]);
     const w = call.compiledContract.witnesses;
     expect(w.getCreatorSecret(undefined)[1]).toEqual(USER_SK);
@@ -495,7 +503,7 @@ describe('NoctisMidnightClient.deployCreatorEscrow / connectCreatorEscrow', () =
     await client.connectCreatorEscrow(FAKE_PROVIDERS, 'addr-ce-1');
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.contractAddress).toBe('addr-ce-1');
-    expect(call.privateStateId).toBe('creator_escrow');
+    expect('privateStateId' in call).toBe(false);
   });
 });
 
@@ -510,7 +518,7 @@ describe('NoctisMidnightClient.deployVesting / connectVesting', () => {
       maxCreatorPercent: 10n,
     });
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
-    expect(call.privateStateId).toBe('vesting');
+    expect('privateStateId' in call).toBe(false);
     expect(call.args).toEqual([fakeBytes32(50), 50_000_000n, 180n, 1_000_000_000n, 10n]);
   });
 
@@ -519,7 +527,7 @@ describe('NoctisMidnightClient.deployVesting / connectVesting', () => {
     await client.connectVesting(FAKE_PROVIDERS, 'addr-v-1');
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.contractAddress).toBe('addr-v-1');
-    expect(call.privateStateId).toBe('vesting');
+    expect('privateStateId' in call).toBe(false);
   });
 });
 
@@ -532,12 +540,11 @@ describe('NoctisMidnightClient.deployLpEscrow / connectLpEscrow', () => {
     });
     const call = recorded<{
       args: unknown[];
-      privateStateId: string;
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
     }>(vi.mocked(deployContract).mock.calls[0][1]);
-    expect(call.privateStateId).toBe('lp_escrow');
+    expect('privateStateId' in call).toBe(false);
     expect(call.args).toEqual([fakeBytes32(60), 31_536_000n]);
     // No communitySk was passed. Substituting the governor's secret here
     // would have let the platform hold the community's authority over a
@@ -550,7 +557,7 @@ describe('NoctisMidnightClient.deployLpEscrow / connectLpEscrow', () => {
     await client.connectLpEscrow(FAKE_PROVIDERS, 'addr-lp-1');
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.contractAddress).toBe('addr-lp-1');
-    expect(call.privateStateId).toBe('lp_escrow');
+    expect('privateStateId' in call).toBe(false);
   });
 });
 
@@ -559,7 +566,7 @@ describe('NoctisMidnightClient.deployTreasury / connectTreasury', () => {
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployTreasury(FAKE_PROVIDERS, { launchId: fakeBytes32(70) });
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
-    expect(call.privateStateId).toBe('treasury');
+    expect('privateStateId' in call).toBe(false);
     expect(call.args).toEqual([
       fakeBytes32(70),
       TREASURY_FLOOR_LOVELACE,
@@ -589,7 +596,7 @@ describe('NoctisMidnightClient.deployTreasury / connectTreasury', () => {
     await client.connectTreasury(FAKE_PROVIDERS, 'addr-t-1');
     const call = vi.mocked(findDeployedContract).mock.calls[0][1] as Record<string, unknown>;
     expect(call.contractAddress).toBe('addr-t-1');
-    expect(call.privateStateId).toBe('treasury');
+    expect('privateStateId' in call).toBe(false);
   });
 });
 
@@ -614,7 +621,7 @@ describe('NoctisMidnightClient.deployCtoGovernance / connectCtoGovernance', () =
     const client = new NoctisMidnightClient(USER_SK, GOVERNOR_SK);
     await client.deployCtoGovernance(FAKE_PROVIDERS, args);
     const call = vi.mocked(deployContract).mock.calls[0][1] as Record<string, unknown>;
-    expect(call.privateStateId).toBe('cto_governance');
+    expect('privateStateId' in call).toBe(false);
     expect(call.args).toEqual([
       args.launchId,
       args.totalSupply,
@@ -653,13 +660,12 @@ describe('NoctisMidnightClient.deployCtoGovernance / connectCtoGovernance', () =
     expect(findDeployedContract).toHaveBeenCalledTimes(1);
     const call = recorded<{
       contractAddress: string;
-      privateStateId: string;
       compiledContract: {
         witnesses: Record<string, (ctx: undefined) => [undefined, unknown]>;
       };
     }>(vi.mocked(findDeployedContract).mock.calls[0][1]);
     expect(call.contractAddress).toBe('addr-cto-1');
-    expect(call.privateStateId).toBe('cto_governance');
+    expect('privateStateId' in (call as object)).toBe(false);
     const w = call.compiledContract.witnesses;
     expect(w.getBalanceLeafAmount(undefined)[1]).toBe(12_345n);
     expect(w.getBalanceProof(undefined)[1]).toEqual(MERKLE_PROOF);
@@ -728,6 +734,10 @@ const FALLBACK_METHODS: Array<{
   circuit: string;
   args: unknown[];
 }> = [
+  // LaunchPhase.DarkVeil. The lifecycle phase, which registration asserts
+  // ALONGSIDE the DarkVeil sub-phase startRegistration opens — two separate
+  // calls, both required.
+  { method: 'advancePhase', circuit: 'advancePhase', args: [1] },
   { method: 'startRegistration', circuit: 'startRegistration', args: [] },
   { method: 'startBuying', circuit: 'startBuying', args: [fakeBytes32(100)] },
   { method: 'registerForDarkVeil', circuit: 'registerForDarkVeil', args: [] },

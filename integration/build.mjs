@@ -675,6 +675,22 @@ const buildDvAllowlistBundleCliConfig = {
 	logLevel: "info",
 };
 
+// Freezes the registrant set into the root startBuying publishes, plus one
+// membership proof each. Reads the set off the chain rather than from a list,
+// so it pulls in the indexer provider and needs packages:external like the
+// other SDK-touching CLIs.
+const buildDvRegistrantBundleCliConfig = {
+	entryPoints: [join(__dirname, "cli/build-dv-registrant-bundle.ts")],
+	outfile: join(__dirname, "cli/dist/build-dv-registrant-bundle.mjs"),
+	bundle: true,
+	platform: "node",
+	packages: "external",
+	format: "esm",
+	target: "node20",
+	sourcemap: true,
+	logLevel: "info",
+};
+
 const publishAllowlistRootCliConfig = {
 	entryPoints: [join(__dirname, "cli/publish-allowlist-root.ts")],
 	outfile: join(__dirname, "cli/dist/publish-allowlist-root.mjs"),
@@ -994,6 +1010,7 @@ async function run() {
 		midnightRegisterDustCliConfig,
 		midnightSyncWalletsCliConfig,
 		buildDvAllowlistBundleCliConfig,
+		buildDvRegistrantBundleCliConfig,
 		tierBCurveActionCliConfig,
 		resolveAddressVkhCliConfig,
 		stakeActionCliConfig,
