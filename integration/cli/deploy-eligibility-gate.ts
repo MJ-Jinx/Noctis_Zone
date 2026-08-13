@@ -206,7 +206,7 @@ async function main() {
         privateStateStoreName: 'noctis-deploy-eligibility-gate',
         signingKeyStoreName: 'noctis-deploy-eligibility-gate-signing',
         // One-shot process: the private state never needs to outlive it.
-        privateStoragePasswordProvider: ephemeralPrivateStatePassword,
+        privateStoragePasswordProvider: ephemeralPrivateStatePassword(),
         accountId: `deploy-eligibility-gate-${input.launchIdHex}`,
         levelFactory: inMemoryLevelFactory(),
       }),

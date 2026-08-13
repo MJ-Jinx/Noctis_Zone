@@ -364,19 +364,25 @@ export function createDarkVeilPrivateStore(config: CreateDarkVeilPrivateStoreCon
 }
 
 /**
- * A password for a private-state store that lives only as long as the process.
+ * A password provider for a store that lives only as long as the process.
  *
- * The store these CLIs use is in memory and is thrown away on exit, so nothing
- * ever reads it back and there is no value in a fixed string — while a fixed
- * string is exactly what gets copied into the next CLI and eventually into one
- * whose store is NOT ephemeral. Generated per process, it cannot be.
+ * Returns a PROVIDER, not a password, and the distinction is the whole point:
+ * the store encrypts with whatever the provider returns and decrypts the same
+ * way, so a provider that generates a fresh password each time it is called
+ * encrypts under one key and then cannot read its own writes back. Generating
+ * once and returning that same value is what makes the store usable.
+ *
+ * Per process rather than a fixed constant, because a fixed string is what ends
+ * up copied into the next CLI and eventually into one whose store is not
+ * ephemeral.
  *
  * The SDK requires characters from at least three of uppercase, lowercase,
  * digits and symbols, so one of each is included rather than left to chance in
  * the random part.
  */
-export function ephemeralPrivateStatePassword(): string {
-  return `Aa1!${randomBytes(24).toString('base64url')}`;
+export function ephemeralPrivateStatePassword(): () => string {
+  const password = `Aa1!${randomBytes(24).toString('base64url')}`;
+  return () => password;
 }
 
 /**

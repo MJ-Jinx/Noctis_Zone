@@ -1,5 +1,12 @@
+import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
+import { asContractAddress } from '@midnight-ntwrk/midnight-js-types';
+import { validatePassword } from '@midnight-ntwrk/midnight-js-utils';
 import { describe, expect, it, vi } from 'vitest';
-import { createDarkVeilPrivateStore, inMemoryLevelFactory } from '../private-state-store.js';
+import {
+  createDarkVeilPrivateStore,
+  ephemeralPrivateStatePassword,
+  inMemoryLevelFactory,
+} from '../private-state-store.js';
 
 // Real password meeting the SDK's actual strength policy (validatePassword:
 // 16+ chars, 3+ character classes, no 4+-char runs/sequences, no more than
@@ -230,5 +237,42 @@ describe('inMemoryLevelFactory', () => {
     // Two stores in the same process are meant to be two stores, so this must
     // not become a module-level cache shared between them.
     expect(inMemoryLevelFactory()('shared-name')).not.toBe(inMemoryLevelFactory()('shared-name'));
+  });
+});
+
+describe('ephemeralPrivateStatePassword', () => {
+  it('returns the same password every time it is asked, so the store can read its own writes', () => {
+    // The store encrypts with whatever the provider returns and decrypts the
+    // same way. A provider handing out a fresh password per call encrypts under
+    // one key and then cannot decrypt — which surfaces as a cipher failure far
+    // from here, not as anything resembling a password problem.
+    const provider = ephemeralPrivateStatePassword();
+
+    expect(provider()).toBe(provider());
+  });
+
+  it('gives a different password to each process, so no fixed string is baked in', () => {
+    expect(ephemeralPrivateStatePassword()()).not.toBe(ephemeralPrivateStatePassword()());
+  });
+
+  it('meets the SDK strength policy the store really enforces', () => {
+    // Checked against the real validatePassword rather than a restatement of
+    // its rules, which is what a hand-written regex here would be.
+    expect(() => validatePassword(ephemeralPrivateStatePassword()())).not.toThrow();
+  });
+
+  it('really does round-trip a signing key through the store', async () => {
+    const provider = levelPrivateStateProvider({
+      privateStateStoreName: 'ephemeral-password-state',
+      signingKeyStoreName: 'ephemeral-password-signing',
+      privateStoragePasswordProvider: ephemeralPrivateStatePassword(),
+      accountId: 'ephemeral-password-test',
+      levelFactory: inMemoryLevelFactory(),
+    });
+    const address = asContractAddress(`${'00'.repeat(31)}ee`);
+
+    await provider.setSigningKey(address, 'ab'.repeat(32));
+
+    expect(await provider.getSigningKey(address)).toBe('ab'.repeat(32));
   });
 });

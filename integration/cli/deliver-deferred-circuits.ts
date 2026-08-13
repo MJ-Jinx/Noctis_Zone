@@ -193,7 +193,7 @@ async function main() {
     const privateStateProvider = levelPrivateStateProvider({
       privateStateStoreName: 'noctis-deliver-deferred-circuits',
       signingKeyStoreName: 'noctis-deliver-deferred-circuits-signing',
-      privateStoragePasswordProvider: ephemeralPrivateStatePassword,
+      privateStoragePasswordProvider: ephemeralPrivateStatePassword(),
       accountId: `governor-deliver-${input.contractAddress}`,
       levelFactory: inMemoryLevelFactory(),
     });
