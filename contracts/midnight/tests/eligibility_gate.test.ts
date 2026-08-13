@@ -1160,16 +1160,15 @@ describe('eligibility_gate.compact — merged DarkVeil private buy (Phase 2)', (
     const r3 = d.contract.circuits.revealBuyCommit(pinnedCtx2, commitment, tokenAmount, DV_PRICE, 3n);
     const ctx3 = nextContext(d.contractAddress, r3.context);
 
-    const capAfter = d.contract.circuits.checkCap(ctx3, buyerKey);
-    expect(capAfter.result).toBe(tokenAmount);
+    const capAfter = ledger(ctx3.currentQueryContext.state).cumulativePurchases;
+    expect(capAfter.lookup(buyerKey)).toBe(tokenAmount);
   });
 
-  it('getFairLaunchCert reads back the certificate after close', () => {
+  it('publishes the certificate in public state after close', () => {
     const d = deployAndStartDvBuying();
     const r = d.contract.circuits.closeDarkVeil(d.ctx, 999n, 100n);
     const ctx = nextContext(d.contractAddress, r.context);
-    const result = d.contract.circuits.getFairLaunchCert(ctx);
-    expect(result.result.closeTimestamp).toBe(999n);
+    expect(ledger(ctx.currentQueryContext.state).fairLaunchCert.closeTimestamp).toBe(999n);
   });
 });
 

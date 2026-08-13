@@ -361,12 +361,17 @@ export ledger dvTotalParticipants: Counter;
 export ledger totalTokensCommitted: Uint<128>;
 export ledger totalRaisedCommitted: Uint<128>;
 
-// DarkVeil allocation (how many tokens are available in this phase)
-sealed ledger dvAllocation: Uint<128>;
+// DarkVeil allocation (how many tokens are available in this phase).
+// Exported so anyone can read it straight from the contract's public state,
+// which is what a registrant needs to check their own slot against the
+// published allocation without taking the platform's word for it.
+export sealed ledger dvAllocation: Uint<128>;
 
 // Price per token during DarkVeil (fixed price, not bonding curve;
-// ADA-denominated for Tier B)
-sealed ledger dvPrice: Uint<128>;
+// ADA-denominated for Tier B). Exported for the same reason: the price a
+// buyer is charged is verifiable from chain state alone. Same shape as
+// bonding_curve.compact's basePrice/maxPrice.
+export sealed ledger dvPrice: Uint<128>;
 
 // Allowlist size (for participation rate calculation)
 sealed ledger allowlistSize: Uint<64>;
@@ -964,13 +969,10 @@ export circuit registerForDarkVeil(): [] {
 // directly — see eligibility_gate.test.ts's "wallet cap enforcement via
 // revealBuyCommit" describe block.
 
-// Check cap without updating (read-only, for UI queries)
-export circuit checkCap(callerKey: Bytes<32>): Uint<128> {
-  const current = cumulativePurchases.member(disclose(callerKey))
-    ? cumulativePurchases.lookup(disclose(callerKey))
-    : 0;
-  return disclose(current);
-}
+// A wallet's cumulative purchases are read from `cumulativePurchases` in the
+// contract's public state directly. An exported circuit for that read would
+// cost a verifier key on chain and a proven transaction per lookup to return
+// a number the indexer already serves for free.
 
 // ============================================================================
 // CIRCUITS — BOND REFUND (DarkVeil failure path)
@@ -1339,10 +1341,9 @@ export circuit closeDarkVeil(closeTimestamp: Uint<64>, baseSlot_: Uint<128>): []
   });
 }
 
-// Get the ZK Fair Launch Certificate (public, for display and verification)
-export circuit getFairLaunchCert(): FairLaunchCert {
-  return disclose(fairLaunchCert);
-}
+// The ZK Fair Launch Certificate is `fairLaunchCert` in this contract's
+// public state, read straight from chain. That is what makes it verifiable
+// by anyone rather than only by whoever can afford to call a circuit.
 
 // Fix (2026-07-30, security audit): governor-only — records that
 // `buyerKey` really settled `settledAmount` tokens for real ADA, observed
@@ -1611,33 +1612,20 @@ export circuit claimDisputedBond(
 }
 
 // ============================================================================
-// CIRCUITS — VIEW / READ
+// VIEW / READ — served by the public ledger, not by circuits
 // ============================================================================
-
-// Get DarkVeil state
-export circuit getDvState(): DarkVeilState {
-  return dvState;
-}
-
-// Get total committed tokens (only meaningful after reveals)
-export circuit getTotalCommitted(): Uint<128> {
-  return totalTokensCommitted;
-}
-
-// Get total raised (only meaningful after reveals)
-export circuit getTotalRaisedCommitted(): Uint<128> {
-  return totalRaisedCommitted;
-}
-
-// Get DarkVeil allocation
-export circuit getDvAllocation(): Uint<128> {
-  return dvAllocation;
-}
-
-// Get DarkVeil price
-export circuit getDvPrice(): Uint<128> {
-  return dvPrice;
-}
+//
+// `dvState`, `totalTokensCommitted`, `totalRaisedCommitted`, `dvAllocation`,
+// `dvPrice`, `fairLaunchCert` and `cumulativePurchases` are all exported
+// ledger fields, so the indexer serves them to any reader at no cost and with
+// no transaction. Every exported circuit, by contrast, carries its verifier
+// key in this contract's on-chain state, and a deploy writes that state within
+// one block's write budget. Keeping reads out of the circuit set spends that
+// budget only on the circuits that need it.
+//
+// Read these off-chain through the generated `ledger()` accessor. Add an
+// exported circuit only for something that changes state or proves something
+// in zero knowledge.
 
 // ============================================================================
 // CIRCUITS — ADMIN / GOVERNOR
