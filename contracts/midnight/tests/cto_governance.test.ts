@@ -1961,20 +1961,20 @@ describe('cto_governance.compact — threshold attestation on the balance snapsh
     return nextContext(d.contractAddress, r.context);
   }
 
-  const rootOf = (d: ReturnType<typeof deploy>, ctx: unknown) =>
+  const rootOf = (ctx: unknown) =>
     ledger((ctx as { currentQueryContext: { state: unknown } }).currentQueryContext.state as never).balanceSnapshotRoot;
 
   it('does not write the root on one attestation', () => {
     const d = deploy();
     const ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
-    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+    expect(rootOf(ctx)).toEqual(new Uint8Array(32));
   });
 
   it('writes it on the second, from a DIFFERENT attestor', () => {
     const d = deploy();
     let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
     ctx = attest(d, ctx, ATTESTOR_2_FILL, ROOT);
-    expect(rootOf(d, ctx)).toEqual(ROOT);
+    expect(rootOf(ctx)).toEqual(ROOT);
   });
 
   it('refuses to count one attestor twice as two', () => {
@@ -1983,14 +1983,14 @@ describe('cto_governance.compact — threshold attestation on the balance snapsh
     const d = deploy();
     let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
     ctx = attest(d, ctx, ATTESTOR_1_FILL, ROOT);
-    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+    expect(rootOf(ctx)).toEqual(new Uint8Array(32));
   });
 
   it('accepts any two of the three, not one privileged pair', () => {
     const d = deploy();
     let ctx = attest(d, d.ctx, ATTESTOR_2_FILL, ROOT);
     ctx = attest(d, ctx, ATTESTOR_3_FILL, ROOT);
-    expect(rootOf(d, ctx)).toEqual(ROOT);
+    expect(rootOf(ctx)).toEqual(ROOT);
   });
 
   it('refuses a caller who is not an attestor at all', () => {
@@ -2005,7 +2005,7 @@ describe('cto_governance.compact — threshold attestation on the balance snapsh
     const d = deploy();
     let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT);
     ctx = attest(d, ctx, ATTESTOR_2_FILL, OTHER_ROOT);
-    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+    expect(rootOf(ctx)).toEqual(new Uint8Array(32));
   });
 
   it('lets a stale approval expire rather than completing a root a day later', () => {
@@ -2015,7 +2015,7 @@ describe('cto_governance.compact — threshold attestation on the balance snapsh
     // so this call opens a fresh round instead of completing the old one.
     const late = AT + ATTEST_EXPIRY_SECONDS + 1n;
     ctx = attest(d, ctx, ATTESTOR_2_FILL, ROOT, late);
-    expect(rootOf(d, ctx)).toEqual(new Uint8Array(32));
+    expect(rootOf(ctx)).toEqual(new Uint8Array(32));
   });
 
   it('still completes inside the window', () => {
@@ -2024,7 +2024,7 @@ describe('cto_governance.compact — threshold attestation on the balance snapsh
     const d = deploy();
     let ctx = attest(d, d.ctx, ATTESTOR_1_FILL, ROOT, AT);
     ctx = attest(d, ctx, ATTESTOR_2_FILL, ROOT, AT + ATTEST_EXPIRY_SECONDS - 1n);
-    expect(rootOf(d, ctx)).toEqual(ROOT);
+    expect(rootOf(ctx)).toEqual(ROOT);
   });
 });
 
