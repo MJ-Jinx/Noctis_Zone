@@ -54,6 +54,7 @@ import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config
 import { MemoryLevel } from 'memory-level';
 import { NoctisLaunchManager, NoctisMidnightClient } from '../midnight-client.js';
 import {
+  assertProofServerReachable,
   buildServerWallet,
   defaultNetworkConfig,
   type MidnightNetwork,
@@ -115,6 +116,9 @@ async function main() {
   // every other check passes. Failing here names the artifacts; failing later
   // names a proof.
   assertZkConfigMatchesBuild(input.zkConfigBasePath);
+
+  // Same principle: cheap checks before expensive ones.
+  await assertProofServerReachable(input.proofServerUrl);
 
   setNetworkId(input.network);
 

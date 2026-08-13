@@ -13,7 +13,7 @@
 // this pass targets. The real SDK packages are mocked; production code is
 // untouched.
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const selectAccountFn = vi.fn();
 const selectRolesFn = vi.fn();
@@ -82,6 +82,7 @@ vi.mock('@midnight-ntwrk/ledger-v8', () => ({
 }));
 
 import {
+  assertProofServerReachable,
   buildServerWallet,
   defaultNetworkConfig,
   type ServerWalletNetworkConfig,
@@ -538,5 +539,43 @@ describe('submitWithReconnect', () => {
     (err as { cause?: unknown }).cause = new Error('disconnected from wss://rpc: 1000:: Normal Closure');
     const submit = vi.fn().mockRejectedValueOnce(err).mockResolvedValue('0x2');
     await expect(submitWithReconnect(submit, 'tx', { sleep: noSleep })).resolves.toBe('0x2');
+  });
+});
+
+describe('assertProofServerReachable', () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('passes when the proof server answers', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 }) as never;
+    await expect(assertProofServerReachable('http://localhost:6310')).resolves.toBeUndefined();
+  });
+
+  it('asks the health endpoint, not the root', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    globalThis.fetch = fetchMock as never;
+    await assertProofServerReachable('http://localhost:6310');
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://localhost:6310/health');
+  });
+
+  it('names the server and the cause when it cannot be reached', async () => {
+    // The whole point is that this failure is legible. Unreached, it surfaces
+    // minutes later as a proving error naming neither.
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('fetch failed')) as never;
+    await expect(assertProofServerReachable('http://localhost:6310')).rejects.toThrow(
+      /localhost:6310[\s\S]*fetch failed/,
+    );
+  });
+
+  it('treats a non-OK status as unreachable', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 503 }) as never;
+    await expect(assertProofServerReachable('http://localhost:6310')).rejects.toThrow(/503/);
+  });
+
+  it('points at the keep-alive, since that is the usual remedy here', async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED')) as never;
+    await expect(assertProofServerReachable('http://localhost:6310')).rejects.toThrow(/wsl-keepalive/);
   });
 });

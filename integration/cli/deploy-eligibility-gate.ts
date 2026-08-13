@@ -41,6 +41,7 @@ import { fromHex32, resolveEligibilityGateDeployArgs } from '../eligibility-gate
 import { describeError, safeShow, unwrapForDiagnosis } from '../error-detail.js';
 import { NoctisMidnightClient } from '../midnight-client.js';
 import {
+  assertProofServerReachable,
   buildServerWallet,
   defaultNetworkConfig,
   type MidnightNetwork,
@@ -138,6 +139,9 @@ async function main() {
 
   // Before the wallet, the network, or anything that costs time or money.
   assertZkConfigMatchesBuild(input.zkConfigBasePath);
+
+  // Same principle: cheap checks before expensive ones.
+  await assertProofServerReachable(input.proofServerUrl);
 
   setNetworkId(input.network);
 

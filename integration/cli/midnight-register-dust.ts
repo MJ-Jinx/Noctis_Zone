@@ -40,6 +40,8 @@ import {
   defaultNetworkConfig,
   hasUnshieldedNight,
   type MidnightNetwork,
+  type SnapshotCliInput,
+  snapshotOptionsFrom,
   waitForWalletState,
 } from '../midnight-server-wallet.js';
 
@@ -48,7 +50,7 @@ interface WalletInput {
   seedHex: string;
 }
 
-interface Input {
+interface Input extends SnapshotCliInput {
   network: MidnightNetwork;
   proofServerUrl: string;
   wallets: WalletInput[];
@@ -120,7 +122,15 @@ function isNodeRejection(err: unknown): boolean {
 async function registerOne(input: Input, wallet: WalletInput): Promise<Record<string, unknown>> {
   const config = defaultNetworkConfig(input.network, input.proofServerUrl);
   log(wallet.role, 'building wallet');
-  const built = await buildServerWallet(Buffer.from(wallet.seedHex, 'hex'), config);
+  // Registration pays its fee in DUST — the node reports 173,
+  // InsufficientDustForRegistrationFee, when it cannot. So this wallet has to
+  // reach the chain head like any other fee-payer, and resuming from a snapshot
+  // is what keeps that a catch-up rather than a replay of all history.
+  const built = await buildServerWallet(
+    Buffer.from(wallet.seedHex, 'hex'),
+    config,
+    snapshotOptionsFrom(input, wallet.role, (message) => log(wallet.role, message)),
+  );
 
   try {
     const nightTokenType = ledger.nativeToken().raw;
@@ -151,9 +161,9 @@ async function registerOne(input: Input, wallet: WalletInput): Promise<Record<st
     // instead is what put earlier runs into an OOM without ever registering.
     const state = await waitForWalletState(
       built.facade,
-      hasUnshieldedNight,
+      (state) => state.isSynced && hasUnshieldedNight(state),
       COIN_WAIT_TIMEOUT_MS,
-      "this wallet's NIGHT UTXOs to appear (is it funded?)",
+      'this wallet to reach the chain head with NIGHT UTXOs visible (is it funded?)',
     );
 
     // Only NIGHT, and only what is not already generating. Resubmitting an

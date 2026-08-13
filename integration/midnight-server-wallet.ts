@@ -575,3 +575,44 @@ export function describeTransactionCost(tx: unknown): string {
     return `transaction cost: could not be computed (${describeError(err)})`;
   }
 }
+
+/**
+ * Refuse to start if the proof server cannot be reached.
+ *
+ * Everything expensive happens before a proof is requested: the wallet resumes,
+ * catches up to the chain head, and the transaction is balanced. Only then does
+ * the proof server get its first request, so an unreachable one is discovered a
+ * minute or two in, as a proving failure that names neither the server nor the
+ * reason.
+ *
+ * This is worth a check rather than a comment because the failure is real and
+ * intermittent here: the proof server runs inside WSL and is reached over
+ * mirrored networking, and that mapping has been observed to stop forwarding
+ * while the VM itself stays up — /health answers, then minutes later the same
+ * URL refuses a connection, then answers again once any wsl.exe command runs.
+ * `local/preprod-harness/wsl-keepalive.ps1` holds it open; this makes its
+ * absence obvious immediately instead of expensively.
+ *
+ * A request also warms the connection, which is the state the later proof wants.
+ */
+export async function assertProofServerReachable(provingServerUrl: string, timeoutMs = 10_000): Promise<void> {
+  const health = new URL('/health', provingServerUrl).toString();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(health, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`${health} answered ${response.status}.`);
+    }
+  } catch (err) {
+    throw new Error(
+      `The proof server at ${provingServerUrl} is not reachable, so this would fail after ` +
+        'several minutes of work rather than now.\n' +
+        `  cause: ${describeError(err)}\n` +
+        '  If it runs under WSL, any wsl.exe command wakes the mapping, and ' +
+        'local/preprod-harness/wsl-keepalive.ps1 holds it open for the length of an operation.',
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
