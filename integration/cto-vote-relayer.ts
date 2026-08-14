@@ -19,7 +19,7 @@
 // DexMigration/WhitelistUpdate CREDENTIAL ENCODING (decided with Jinx,
 // 2026-07-19): `target_dex_credential` — meaningful only for these two
 // proposal types — is always encoded as a ScriptCredential. Every real
-// Cardano DEX pool (Minswap/Splash/CSwap) is a script-controlled
+// Cardano DEX pool (Minswap/Splash/WingRiders/CSwap) is a script-controlled
 // AMM pool, never a plain payment-key wallet, and lp_escrow.ak's own
 // whitelist mechanism already models every real target DEX as a script
 // credential exclusively (every `dex_whitelist` test entry in that file
