@@ -1046,10 +1046,17 @@ async function run() {
 			define: {
 				...c.define,
 				__BLUEPRINT_FINGERPRINT__: JSON.stringify(fingerprint),
-				// `undefined` rather than a string when the artifacts are absent:
-				// the runtime side treats a non-string as "no build to disagree
-				// with" and stays silent, the same way it does under tsx/vitest.
-				__ZK_CONFIG_FINGERPRINT__: JSON.stringify(zkFingerprint),
+				// The literal token `undefined` when the artifacts are absent: the
+				// runtime side treats a non-string as "no build to disagree with"
+				// and stays silent, the same way it does under tsx/vitest.
+				//
+				// The `??` is load-bearing rather than defensive. Every esbuild
+				// define value must be a STRING of JavaScript to substitute, and
+				// JSON.stringify(undefined) returns the value `undefined`, not the
+				// text "undefined" — so without this the build throws outright on
+				// any checkout that does not carry the hand-shipped ZK artifacts,
+				// which is every CI run.
+				__ZK_CONFIG_FINGERPRINT__: JSON.stringify(zkFingerprint) ?? "undefined",
 			},
 		}));
 
