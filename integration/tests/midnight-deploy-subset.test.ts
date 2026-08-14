@@ -244,6 +244,24 @@ describe('deriveContractSigningKey', () => {
     expect(deriveContractSigningKey(governor, launch)).toBe(deriveContractSigningKey(governor, launch));
   });
 
+  it('still derives the key already-deployed contracts were deployed under', () => {
+    // Every other test here would pass just as happily if the digest under
+    // this function changed — they check that it is deterministic, distinct
+    // per launch and per governor, and a valid curve point, all of which a
+    // DIFFERENT hash satisfies too. Nothing pinned the actual value.
+    //
+    // A contract's maintenance authority is fixed at deploy. If this key
+    // moves, the deferred circuits can no longer be added to any contract
+    // already on chain, and the failure surfaces as a rejected maintenance
+    // update rather than as anything pointing back here.
+    //
+    // Derived independently with node:crypto's createHmac, the implementation
+    // in place before this moved to @noble/hashes.
+    expect(deriveContractSigningKey(new Uint8Array(32).fill(7), new Uint8Array(32).fill(11))).toBe(
+      'ada4d8e231269cbb27abfb4dc12e897699fa183ddd6238a4ec9cf11098584309',
+    );
+  });
+
   it('differs per launch', () => {
     // One launch's maintenance authority must not be another's.
     expect(deriveContractSigningKey(governor, launch)).not.toBe(

@@ -48,7 +48,6 @@
 // reconnect their wallet), not the primary recovery mechanism anymore.
 // ============================================================================
 
-import { randomBytes } from 'node:crypto';
 import {
   type LevelPrivateStateProviderConfig,
   levelPrivateStateProvider,
@@ -381,7 +380,14 @@ export function createDarkVeilPrivateStore(config: CreateDarkVeilPrivateStoreCon
  * the random part.
  */
 export function ephemeralPrivateStatePassword(): () => string {
-  const password = `Aa1!${randomBytes(24).toString('base64url')}`;
+  // getRandomValues rather than node:crypto's randomBytes: this module is
+  // reached from the browser widget as well as the CLIs, and a `node:` import
+  // is not something a bundler can resolve for the browser at all. Both
+  // runtimes have offered this same Web Crypto call as a global for years, and
+  // it is a CSPRNG in both.
+  const bytes = new Uint8Array(24);
+  globalThis.crypto.getRandomValues(bytes);
+  const password = `Aa1!${bytesToHex(bytes)}`;
   return () => password;
 }
 

@@ -100,6 +100,23 @@ module.exports = [
 					__dirname,
 					"widget/isomorphic-ws-shim.js",
 				),
+				// Mesh signs with a mnemonic or a stored private key, which is a
+				// server-side path by definition — the curve submitter refuses a
+				// browser wallet for it explicitly, and only ever loads these
+				// behind a `referenceScript` pointer no browser caller sets.
+				//
+				// Saying so here as well is what keeps it out of the bundle. A
+				// dynamic import defers WHEN a module loads; it does not remove
+				// it from the build, so webpack still had to resolve Mesh's own
+				// node:crypto and node:stream dependencies for the async chunk,
+				// and for a `target: "web"` build it cannot.
+				//
+				// `false` resolves to an empty module. If this path were ever
+				// reached from the browser it would throw on the first
+				// constructor rather than misbehave quietly.
+				"@meshsdk/core": false,
+				[path.resolve(__dirname, "key-curve-spend-wallet.ts")]: false,
+				[path.resolve(__dirname, "mesh-curve-spend.ts")]: false,
 			},
 		},
 		plugins: [providePlugin],

@@ -32,9 +32,26 @@
 // the deferred circuits are unreachable through it.
 // ============================================================================
 
-import { createHmac } from 'node:crypto';
 import { ContractState } from '@midnight-ntwrk/compact-runtime';
 import { type SigningKey, signingKeyFromBip340 } from '@midnight-ntwrk/midnight-js-protocol/compact-runtime';
+// @noble/hashes rather than node:crypto's createHmac: this module is reached
+// from the browser widget as well as the CLIs, and a `node:` import is not
+// something a bundler can resolve for the browser at all.
+//
+// The two agree byte for byte on the call shape below — checked against
+// node:crypto over 200 random (secret, launchId, counter) triples before the
+// swap, because this derives the maintenance authority of contracts that are
+// already deployed. A different digest here would not fail loudly; it would
+// quietly derive a key that no longer matches the deployed contract's.
+import { hmac } from '@noble/hashes/hmac.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+
+/**
+ * The HMAC key, as the same UTF-8 bytes node:crypto derived from the string
+ * form. Spelled out rather than left implicit, since the derived key depends
+ * on these exact bytes.
+ */
+const CONTRACT_AUTHORITY_HMAC_KEY = new TextEncoder().encode('noctis:midnight:contract-authority:v1');
 
 /**
  * The key that may add the deferred circuits to a deployed contract.
@@ -61,7 +78,8 @@ export function deriveContractSigningKey(governorSecret: Uint8Array, launchId: U
     throw new Error(`launchId must be 32 bytes, got ${launchId.length}.`);
   }
   for (let counter = 0; counter < 256; counter++) {
-    const candidate = createHmac('sha256', 'noctis:midnight:contract-authority:v1')
+    const candidate = hmac
+      .create(sha256, CONTRACT_AUTHORITY_HMAC_KEY)
       .update(governorSecret)
       .update(launchId)
       .update(Uint8Array.of(counter))

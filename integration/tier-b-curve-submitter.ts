@@ -49,6 +49,19 @@ import type {
   WalletApi,
 } from '@lucid-evolution/lucid';
 import { Blockfrost, Constr, Data, getAddressDetails, Lucid, toUnit, validatorToAddress } from '@lucid-evolution/lucid';
+// Mesh, and the two modules below that build on it, belong to referenced
+// mode: signing with a mnemonic or a stored private key, which is a
+// server-side path by definition — refuseBrowserWalletWhenReferenced() turns
+// a browser wallet away from it explicitly, and referencedParts() returns
+// early unless a `referenceScript` pointer is configured, which no browser
+// caller sets.
+//
+// The browser widget reaches this file through the DarkVeil claim flow, so
+// the widget build resolves these three specifiers to an empty module rather
+// than pulling Mesh's own node:crypto and node:stream into a bundle that
+// cannot have them. See webpack.widgets.config.cjs's darkveil-widget alias
+// block. Keep any new server-only dependency in that block too, or the
+// widget build stops resolving.
 import { BlockfrostProvider, MeshWallet } from '@meshsdk/core';
 import { buildCapTradeFields, type CapAccumulator } from './cap-accumulator-tree.js';
 import { setBit, testBit } from './claim-bitmap.js';
