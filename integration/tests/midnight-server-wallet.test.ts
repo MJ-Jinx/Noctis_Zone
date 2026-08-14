@@ -619,9 +619,7 @@ describe('snapshotOptionsFrom', () => {
     // it kept printing the default it would read as a successful resume of the
     // wrong wallet, which is the confusion this whole override exists to end.
     const lines: string[] = [];
-    const options = snapshotOptionsFrom({ ...BOTH, snapshotAccountId: 'buyer_2' }, 'wallet_seed', (m) =>
-      lines.push(m),
-    );
+    const options = snapshotOptionsFrom({ ...BOTH, snapshotAccountId: 'buyer_2' }, 'wallet_seed', (m) => lines.push(m));
     options?.onRestore?.(['dust']);
     expect(lines).toEqual(['buyer_2: resumed dust from snapshot']);
   });
