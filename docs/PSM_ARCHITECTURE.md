@@ -737,7 +737,7 @@ For Tier B and C launches, the certificate is anchored to Cardano via an Aiken Z
 ### DEX Graduation
 
 - **Default DEX:** CSwap
-- **Whitelist:** Minswap, Splash, WingRiders
+- **Whitelist:** Minswap, Splash, WingRiders, SundaeSwap
 - **Selection:** Creator chooses at launch wizard
 - **LP Pair:** Token/ADA (Tier A/B) or Token/NIGHT (Tier C, when available)
 

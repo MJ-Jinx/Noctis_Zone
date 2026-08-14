@@ -55,7 +55,7 @@ System overview and Midnight PSM flow diagrams, plus a full contract-to-tier ref
 - **Language:** Aiken
 - **Indexer:** Blockfrost (primary), Koios (fallback for account reads)
 - **ADA/USD price:** median of three independent public APIs (CoinGecko, Kraken, Coinbase) with a 5% divergence guard, falling back to Minswap's on-chain ADA/USDM pool. Throws rather than guessing when too few agree
-- **Graduation DEX:** CSwap (default), Minswap / Splash / WingRiders (whitelist)
+- **Graduation DEX:** CSwap (default), Minswap / Splash / WingRiders / SundaeSwap (whitelist)
 
 ### Midnight Network (PSM contracts)
 - **Language:** Compact
