@@ -29,6 +29,13 @@
 const path = require("node:path");
 const webpack = require("webpack");
 
+// Same opt-in as integration/build.mjs: `NOCTIS_SOURCEMAPS=1 npm run
+// build:widgets` when a stack trace needs to point at a real line, off
+// otherwise. These four bundles are the ones that ship inside the theme, so
+// their maps are the ones that get deployed to the host and read on backup.
+const devtool =
+	process.env.NOCTIS_SOURCEMAPS === "1" ? "source-map" : false;
+
 // Active Local site. `Local Sites/noctis` is ARCHIVED as of 2026-08-03 — it
 // sits on the theme commit that went live on 2026-07-30, several commits
 // behind. Building into it is silent: the bundle is produced successfully and
@@ -115,7 +122,7 @@ module.exports = [
 				},
 			],
 		},
-		devtool: "source-map",
+		devtool,
 	},
 	{
 		name: "tier-a-buy-widget",
@@ -153,7 +160,7 @@ module.exports = [
 				},
 			],
 		},
-		devtool: "source-map",
+		devtool,
 	},
 	{
 		name: "tier-a-dashboard-widget",
@@ -191,7 +198,7 @@ module.exports = [
 				},
 			],
 		},
-		devtool: "source-map",
+		devtool,
 	},
 	{
 		// Staking UI (2026-07-22) — same webpack requirement as the other
@@ -231,6 +238,6 @@ module.exports = [
 				},
 			],
 		},
-		devtool: "source-map",
+		devtool,
 	},
 ];

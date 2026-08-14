@@ -19,6 +19,16 @@ import * as esbuild from "esbuild";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const watch = process.argv.includes("--watch");
 
+// Source maps are a debugging aid, so they are built on request rather than
+// by default: `NOCTIS_SOURCEMAPS=1 node build.mjs`. A watch build turns them
+// on regardless — that is someone sitting at the code, which is exactly when
+// a stack trace needs to point at a real line.
+//
+// They are the single largest thing this repo produces. Left on, the maps
+// outweigh the code they describe several times over and every byte of that
+// is deployed to a host that charges for the space and reads it on backup.
+const sourcemap = watch || process.env.NOCTIS_SOURCEMAPS === "1";
+
 const cliConfig = {
 	entryPoints: [join(__dirname, "cli/check-night-balance.ts")],
 	outfile: join(__dirname, "cli/dist/check-night-balance.mjs"),
@@ -42,7 +52,7 @@ const cliConfig = {
 	external: ["cbor"],
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	// A transitive dep does a dynamic require('assert'/'events'). esbuild's
 	// ESM output can't convert that; shim a real require() from
@@ -77,7 +87,7 @@ const allowlistTreeCliConfig = {
 	platform: "node",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	banner: {
 		js: "import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);",
@@ -94,7 +104,7 @@ const buildDvAllocationTreeCliConfig = {
 	platform: "node",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	banner: {
 		js: "import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);",
@@ -108,7 +118,7 @@ const getDvAllocationProofCliConfig = {
 	platform: "node",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	banner: {
 		js: "import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);",
@@ -158,7 +168,7 @@ const verifyCtoVoterRegistrationCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -173,7 +183,7 @@ const checkCtoBadgeStatusCliConfig = {
 	external: ["cbor"],
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	// Same missing-banner gap as cliConfig above, found and fixed in the same
 	// pass (2026-07-30) — see that config's comment for the full story.
@@ -197,7 +207,7 @@ const readTierALaunchStateCliConfig = {
 	// bundled (not external) dependencies. CJS format provides it natively.
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -210,7 +220,7 @@ const buildGenesisDatumsCliConfig = {
 	// Evolution transitive dep needs a real bare __dirname).
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -222,7 +232,7 @@ const mintLaunchCliConfig = {
 	// CJS for the same reason as buildGenesisDatumsCliConfig above.
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -233,7 +243,7 @@ const usdToAdaCliConfig = {
 	platform: "node",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -244,7 +254,7 @@ const activateCurveCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -260,7 +270,7 @@ const tierBCurveActionCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -273,7 +283,7 @@ const tokenMetadataActionCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -288,7 +298,7 @@ const stakeActionCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -299,7 +309,7 @@ const anchorDvAllocationRootCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -310,7 +320,7 @@ const buyCurveCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -321,7 +331,7 @@ const sellCurveCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -332,7 +342,7 @@ const expireCurveCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -343,7 +353,7 @@ const claimBuybackCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -354,7 +364,7 @@ const graduateLaunchCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -365,7 +375,7 @@ const graduateTierBLaunchCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -379,7 +389,7 @@ const executeCtoProposalCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -390,7 +400,7 @@ const voidCtoProposalCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -401,7 +411,7 @@ const reclaimCtoRelayerBondCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -412,7 +422,7 @@ const reclaimReferenceScriptsCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -423,7 +433,7 @@ const rebuildCapStateCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -434,7 +444,7 @@ const batchActionCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -447,7 +457,7 @@ const orderActionCliConfig = {
 	// dependency reads a bare `__dirname` to find its own WASM.
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -460,7 +470,7 @@ const publishReferenceScriptCliConfig = {
 	// dependency reads a bare `__dirname` to find its own WASM.
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -471,7 +481,7 @@ const startVestingCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -482,7 +492,7 @@ const proposeDexChangeCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -493,7 +503,7 @@ const executeDexChangeCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -504,7 +514,7 @@ const migrateLpToMinswapCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -515,7 +525,7 @@ const claimVestedCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -526,7 +536,7 @@ const claimCreatorFeesCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -537,7 +547,7 @@ const readTradeHistoryCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -548,7 +558,7 @@ const checkCtoCreatorActivityCliConfig = {
 	platform: "node",
 	format: "cjs", // same __dirname/CML-WASM reasoning as readTierALaunchStateCliConfig
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -564,7 +574,7 @@ const readDvPurchasesCliConfig = {
 	external: ["cbor"],
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	// Confirmed broken without this (2026-07-30): a transitive dep
 	// (@subsquid/util-internal-hex, pulled in via the Midnight indexer chain)
@@ -599,7 +609,7 @@ const darkVeilActionCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -611,7 +621,7 @@ const deliverDeferredCircuitsCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -623,7 +633,7 @@ const deployEligibilityGateCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -639,7 +649,7 @@ const midnightRegisterDustCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -657,7 +667,7 @@ const midnightSyncWalletsCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -671,7 +681,7 @@ const buildDvAllowlistBundleCliConfig = {
 	platform: "node",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -687,7 +697,7 @@ const buildDvRegistrantBundleCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -714,7 +724,7 @@ const publishAllowlistRootCliConfig = {
 	packages: "external",
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -727,7 +737,7 @@ const resolveAddressVkhCliConfig = {
 	platform: "node",
 	format: "cjs",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 };
 
@@ -742,7 +752,7 @@ const deriveMidnightAddressCliConfig = {
 	external: ["cbor"],
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	// A transitive dep does a dynamic require('assert'). esbuild's ESM output
 	// can't convert that; shim a real require() from import.meta.url so the
@@ -765,7 +775,7 @@ const midnightWalletBalancesCliConfig = {
 	external: ["cbor"],
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	banner: {
 		js: "import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);",
@@ -780,7 +790,7 @@ const midnightWalletBalanceCliConfig = {
 	external: ["cbor"],
 	format: "esm",
 	target: "node20",
-	sourcemap: true,
+	sourcemap,
 	logLevel: "info",
 	banner: {
 		js: "import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);",
