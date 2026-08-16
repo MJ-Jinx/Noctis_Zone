@@ -478,21 +478,35 @@ export async function buildServerWallet(
 
   const walletConfiguration: DefaultConfiguration = {
     networkId: config.network,
-    // Matches managing-test-wallets' documented rationale: only the
-    // zero-fee-rate local devnet needs a nonzero overhead to avoid a
-    // NotNormalized (117) rejection; preprod/preview/mainnet have a real
-    // fee rate and must NOT get an artificial overhead added.
+    // Two independent knobs, and an earlier version of this comment ran them
+    // together. Keeping the correction visible because the failure it caused
+    // was expensive to diagnose.
     //
-    // The margin is an EXPONENT (see ServerWalletNetworkConfig.feeBlocksMargin).
-    // A local devnet's fee rate is effectively zero, so a large margin there
-    // costs nothing and the overhead is what does the work. A real network is
-    // different: a deploy carrying a large circuit, priced with a generous
-    // margin, computes a fee no block can hold and is rejected as 232. Measured
-    // on Preprod, this contract's deploy fails at 5 and needs a small margin.
-    costParameters:
-      config.network === 'undeployed'
-        ? { feeBlocksMargin: config.feeBlocksMargin ?? 5, additionalFeeOverhead: 1_000_000n }
-        : { feeBlocksMargin: config.feeBlocksMargin ?? 1 },
+    // feeBlocksMargin is an EXPONENT (see ServerWalletNetworkConfig), so it
+    // scales the computed fee steeply. A deploy carrying a large circuit,
+    // priced with a generous margin, computes a fee no block can hold and is
+    // rejected as 232. Measured on Preprod: this contract's deploy fails at 5
+    // and needs a small margin. That is why the margin is 1 off devnet.
+    //
+    // additionalFeeOverhead is a small ADDITIVE floor, and it does a different
+    // job: it guarantees the fee is not zero. A zero fee gives the balancer no
+    // imbalance to cover, so it selects no DUST inputs and builds an empty
+    // DustActions, which the ledger rejects as NotNormalized (117).
+    //
+    // The old comment asserted that only a local devnet needs the floor,
+    // because a real network "has a real fee rate". That does not hold: a
+    // testnet's fee rate is demand-driven and an idle Preprod computes zero
+    // just as a fresh devnet does. Observed directly — the same reveal circuit
+    // that submitted successfully earlier in the day was rejected with 117 once
+    // the chain went quiet, with nothing about the call changed.
+    //
+    // So the floor applies everywhere. It cannot reintroduce 232: it is a
+    // fixed addend of 1e6 atomic units against a wallet holding ~1.1e18, and
+    // the exponent is what drives a fee toward the block limit, not this.
+    costParameters: {
+      feeBlocksMargin: config.feeBlocksMargin ?? (config.network === 'undeployed' ? 5 : 1),
+      additionalFeeOverhead: 1_000_000n,
+    },
     relayURL: new URL(config.relayUrl),
     provingServerUrl: new URL(config.provingServerUrl),
     indexerClientConnection: {

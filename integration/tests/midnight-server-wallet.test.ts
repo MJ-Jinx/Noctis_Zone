@@ -264,7 +264,7 @@ describe('buildServerWallet — happy path wiring', () => {
     expect(createKeystoreFn).toHaveBeenCalledWith('night-seed', 'preprod');
   });
 
-  it('uses undeployed-only fee overhead (feeBlocksMargin + additionalFeeOverhead) only for the undeployed network', async () => {
+  it('scales the fee margin by network but floors the fee on every network', async () => {
     stubHdChain({
       type: 'keysDerived',
       keys: { ROLE_ZSWAP: 'a', ROLE_NIGHT_EXTERNAL: 'b', ROLE_DUST: 'c' },
@@ -299,9 +299,16 @@ describe('buildServerWallet — happy path wiring', () => {
     // the ledger's own feesWithMargin warns how easily it becomes unreasonable,
     // and a generous one prices a large transaction past what a block can hold.
     // The devnet keeps the larger value — its fee rate is effectively zero, so
-    // the margin costs nothing there and the overhead does the real work.
+    // the margin costs nothing there.
+    //
+    // The overhead is NOT devnet-only, and this assertion is the guard on that.
+    // It is an additive floor keeping the computed fee off zero, and a fee of
+    // zero builds an empty DustActions that the ledger rejects as 117. An idle
+    // testnet computes zero exactly as a fresh devnet does — observed on
+    // Preprod, mid-run, on a circuit that had submitted fine hours earlier.
     expect(preprodCall.configuration.costParameters).toEqual({
       feeBlocksMargin: 1,
+      additionalFeeOverhead: 1_000_000n,
     });
   });
 
@@ -313,8 +320,11 @@ describe('buildServerWallet — happy path wiring', () => {
     walletFacadeInitFn.mockResolvedValue(makeFakeFacade());
 
     await buildServerWallet(new Uint8Array(32), { ...fakeConfig('preprod'), feeBlocksMargin: 3 });
+    // The override moves the margin only. The fee floor is not a tuning knob —
+    // a caller lowering the margin must not be able to reintroduce a zero fee.
     expect(walletFacadeInitFn.mock.calls[0][0].configuration.costParameters).toEqual({
       feeBlocksMargin: 3,
+      additionalFeeOverhead: 1_000_000n,
     });
   });
 

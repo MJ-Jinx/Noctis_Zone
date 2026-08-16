@@ -385,10 +385,36 @@ export function ephemeralPrivateStatePassword(): () => string {
   // is not something a bundler can resolve for the browser at all. Both
   // runtimes have offered this same Web Crypto call as a global for years, and
   // it is a CSPRNG in both.
-  const bytes = new Uint8Array(24);
-  globalThis.crypto.getRandomValues(bytes);
-  const password = `Aa1!${bytesToHex(bytes)}`;
-  return () => password;
+  // VALIDATED WITH THE SDK'S OWN CHECKER, not against a guess at its rules.
+  //
+  // `Aa1!` + 48 random hex characters satisfies the obvious requirements, and
+  // usually passes — but random hex sometimes contains four identical
+  // characters in a row, or a run like "1234"/"abcd", and the strength policy
+  // rejects both. That makes this fail a few percent of the time, at a
+  // different operation each run, with a different message each time, which
+  // reads as anything except a bad password. It cost two misdiagnoses: once
+  // blamed on a concurrent-runner race, once on network flakiness.
+  //
+  // Rather than encode the policy here — a second copy to drift from the real
+  // one — generate and ASK. If the policy gains a rule, this keeps working.
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const bytes = new Uint8Array(24);
+    globalThis.crypto.getRandomValues(bytes);
+    const candidate = `Aa1!${bytesToHex(bytes)}`;
+    try {
+      validatePassword(candidate);
+      return () => candidate;
+    } catch {
+      // Rejected on strength alone; draw again.
+    }
+  }
+  // 32 consecutive rejections is not bad luck at these odds — it means the
+  // policy now refuses this shape entirely, and silently returning an
+  // unusable password would surface far from here.
+  throw new Error(
+    'could not generate a private-state password the SDK accepts after 32 attempts — ' +
+      'the password policy has probably changed and this generator needs updating',
+  );
 }
 
 /**
