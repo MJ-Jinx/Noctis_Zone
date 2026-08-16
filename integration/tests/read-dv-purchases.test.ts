@@ -18,7 +18,12 @@ vi.mock('../../contracts/midnight/compiled/eligibility_gate/contract/index.js', 
 }));
 
 import { ledger } from '../../contracts/midnight/compiled/eligibility_gate/contract/index.js';
-import { type DecodedEligibilityGateLedger, extractDvPurchases, readDvPurchases } from '../read-dv-purchases.js';
+import {
+  type DecodedEligibilityGateLedger,
+  extractDvPurchases,
+  extractFairLaunchCert,
+  readDvPurchases,
+} from '../read-dv-purchases.js';
 
 /** A 32-byte Midnight user public key whose first byte is the one given. */
 function key(firstByte: number): Uint8Array {
@@ -116,7 +121,9 @@ describe('readDvPurchases', () => {
     // error — but decoding null would be.
     mockedLedger.mockClear();
     const result = await readDvPurchases(provider(null), 'addr_contract');
-    expect(result).toEqual({ deployed: false, purchases: [] });
+    // certificate is null rather than absent: a caller checking for one must
+    // get the same answer shape whether or not the contract exists.
+    expect(result).toEqual({ deployed: false, purchases: [], certificate: null });
     expect(mockedLedger).not.toHaveBeenCalled();
   });
 
@@ -143,5 +150,54 @@ describe('readDvPurchases', () => {
     const p = provider({ data: {} });
     await readDvPurchases(p, 'addr_specific_contract');
     expect(vi.mocked(p.queryContractState)).toHaveBeenCalledWith('addr_specific_contract');
+  });
+});
+
+describe('extractFairLaunchCert', () => {
+  const cert = (closeTimestamp: bigint) => ({
+    dvTokensPurchased: [] as [Uint8Array, bigint][],
+    baseSlot: 16_666_666n,
+    fairLaunchCert: {
+      launchId: new Uint8Array([0xab, 0xcd]),
+      totalParticipants: 9n,
+      totalTokensAllocated: 94_666_664n,
+      totalRaised: 283_999_992n,
+      participationRate: 63n,
+      closeTimestamp,
+      certHash: new Uint8Array([0x01, 0x02]),
+    },
+  });
+
+  it('returns null when the contract publishes no certificate', () => {
+    expect(extractFairLaunchCert({ dvTokensPurchased: [] })).toBeNull();
+  });
+
+  // A zero close timestamp is the contract's "DarkVeil has not closed" state.
+  // Reporting that as a real certificate would put unfinished figures on a
+  // page that presents them as cryptographically settled.
+  it('reports a certificate as not closed while closeTimestamp is zero', () => {
+    expect(extractFairLaunchCert(cert(0n))?.closed).toBe(false);
+  });
+
+  it('reports closed once the contract stamps a close timestamp', () => {
+    expect(extractFairLaunchCert(cert(1_786_000_000n))?.closed).toBe(true);
+  });
+
+  // Every figure crosses a JSON boundary, where a bigint does not survive.
+  it('stringifies every numeric field so none is lost crossing to PHP', () => {
+    const out = extractFairLaunchCert(cert(1_786_000_000n));
+    expect(out).toMatchObject({
+      totalParticipants: '9',
+      totalTokensAllocated: '94666664',
+      totalRaised: '283999992',
+      participationRate: '63',
+      closeTimestamp: '1786000000',
+      baseSlot: '16666666',
+      launchIdHex: 'abcd',
+      certHashHex: '0102',
+    });
+    for (const [key, value] of Object.entries(out ?? {})) {
+      if (key !== 'closed') expect(typeof value, key).toBe('string');
+    }
   });
 });

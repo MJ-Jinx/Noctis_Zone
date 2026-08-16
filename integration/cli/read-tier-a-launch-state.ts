@@ -38,7 +38,13 @@
 // ============================================================================
 
 import { Blockfrost, Data, Lucid, validatorToAddress } from '@lucid-evolution/lucid';
-import { BondingCurveDatumSchema, LpEscrowDatumSchema, loadValidator, VestingDatumSchema } from '../tier-a-schemas.js';
+import {
+  BondingCurveDatumSchema,
+  BondingCurveTierBDatumSchema,
+  LpEscrowDatumSchema,
+  loadValidator,
+  VestingDatumSchema,
+} from '../tier-a-schemas.js';
 import {
   CARDANO_NETWORK_MAP,
   jsonSafe,
@@ -67,6 +73,18 @@ interface ReadLaunchStateInput {
   network: 'preview' | 'preprod' | 'mainnet';
   blockfrostProjectId: string;
   blockfrostUrl: string;
+  /**
+   * Which curve validator to look at. Tier B's curve is a DIFFERENT script at
+   * a different address, so a Tier B launch read against Tier A's address
+   * simply finds nothing and reports `bondingCurve: null` — which reads as "no
+   * curve exists" rather than "looked in the wrong place". Vesting and LP
+   * escrow need no tier because those two validators are shared.
+   *
+   * Optional, defaulting to 'A', so existing Tier A callers are unchanged.
+   * Same field and same values as read-tier-a-trade-history.ts, which has been
+   * tier-aware all along — this reader is the one that was left behind.
+   */
+  tier?: 'A' | 'B';
 }
 
 async function main() {
@@ -80,7 +98,18 @@ async function main() {
   // extra '..' to compensate for that (found via a real run, not assumed).
   const blueprint = loadPlutusBlueprint(__dirname);
 
-  const bondingCurveValidator = loadValidator(blueprint, 'bonding_curve.bonding_curve.spend');
+  const tier = input.tier ?? 'A';
+  if (tier !== 'A' && tier !== 'B') {
+    throw new Error(`tier must be "A" or "B", got ${JSON.stringify(input.tier)}`);
+  }
+  // The datum has to travel with the address: decoding a Tier B curve against
+  // Tier A's schema fails the Data.from and is skipped as "not our UTxO",
+  // producing the same silent null the wrong address does.
+  const bondingCurveValidator = loadValidator(
+    blueprint,
+    tier === 'B' ? 'bonding_curve_tier_b.bonding_curve_tier_b.spend' : 'bonding_curve.bonding_curve.spend',
+  );
+  const bondingCurveSchema = tier === 'B' ? BondingCurveTierBDatumSchema : BondingCurveDatumSchema;
   const vestingValidator = loadValidator(blueprint, 'vesting.vesting.spend');
   const lpEscrowValidator = loadValidator(blueprint, 'lp_escrow.lp_escrow.spend');
 
@@ -117,7 +146,7 @@ async function main() {
   }
 
   const [bondingCurve, vesting, lpEscrow] = await Promise.all([
-    findLaunchUtxo(bondingCurveAddress, BondingCurveDatumSchema),
+    findLaunchUtxo(bondingCurveAddress, bondingCurveSchema),
     findLaunchUtxo(vestingAddress, VestingDatumSchema),
     findLaunchUtxo(lpEscrowAddress, LpEscrowDatumSchema),
   ]);
