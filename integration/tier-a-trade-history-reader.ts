@@ -72,6 +72,20 @@ export interface TradeEvent {
   raw?: Constr<unknown>;
 }
 
+/**
+ * What `unit_price` is multiplied by before its integer divide.
+ *
+ * A per-token price is a ratio of two bigints and is almost never a whole
+ * number of lovelace, so dividing them directly throws the fraction away.
+ * Scaling first keeps the result an integer — which is what the storage column
+ * and the candle aggregation both want — while preserving six decimal places
+ * of the real price.
+ *
+ * Anything reading `unit_price` MUST divide by this. It is exported so no
+ * consumer has to hard-code the factor and quietly disagree with this file.
+ */
+export const UNIT_PRICE_SCALE = 1_000_000n;
+
 interface BlockfrostConfig {
   blockfrostProjectId: string;
   blockfrostUrl: string;
@@ -106,9 +120,10 @@ interface BfTxUtxos {
  * pre-trade datum — the same inputs the contract had, giving the same answer,
  * to the lovelace.
  *
- * Returns lovelace figures for the whole trade and per token. `unit_price` is
- * an AVERAGE: every token in a batch is priced where it sits on the curve, so
- * a large buy has no single price.
+ * Returns lovelace figures for the whole trade, and a per-token price in
+ * MICRO-lovelace (see UNIT_PRICE_SCALE). `unit_price` is an AVERAGE: every
+ * token in a batch is priced where it sits on the curve, so a large buy has
+ * no single price.
  */
 function pricedFields(
   shape: CurveShape,
@@ -133,7 +148,21 @@ function pricedFields(
   }
   return {
     gross_lovelace: gross.toString(),
-    unit_price: (gross / tokenAmount).toString(),
+    // MICRO-lovelace per token, not lovelace. Both operands are bigint, so a
+    // plain `gross / tokenAmount` is INTEGER division: a real price of 4.1849
+    // lovelace/token came back as `4`, and every consumer downstream — the
+    // stored column, the candles, the chart — faithfully carried that 4.
+    //
+    // On a curve whose whole public phase moves between roughly 4 and 75
+    // lovelace, one-lovelace resolution is not a rounding detail: early
+    // trading collapses to two or three distinct values and the chart draws a
+    // staircase instead of a curve.
+    //
+    // Scaling before the divide keeps this an integer (so the column stays
+    // BIGINT and the candle aggregation keeps working on plain integers) while
+    // carrying six more decimal places. Every reader divides by
+    // UNIT_PRICE_SCALE to get lovelace, or by UNIT_PRICE_SCALE * 1e6 for ADA.
+    unit_price: ((gross * UNIT_PRICE_SCALE) / tokenAmount).toString(),
   };
 }
 
