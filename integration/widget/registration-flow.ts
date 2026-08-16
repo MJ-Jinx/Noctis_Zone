@@ -162,7 +162,9 @@ export async function submitRegistrationIntent(
   // for the private buy anyway.
   const midnightAddress = session.midnight?.unshieldedAddress;
   if (!midnightAddress) {
-    throw new Error('Connect your Midnight wallet before registering — DarkVeil checks your NIGHT balance on Midnight.');
+    throw new Error(
+      'Connect your Midnight wallet before registering — DarkVeil checks your NIGHT balance on Midnight.',
+    );
   }
 
   const auth = await buildDarkVeilAuthProof(
