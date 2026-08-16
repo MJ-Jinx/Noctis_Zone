@@ -149,15 +149,35 @@ export async function submitRegistrationIntent(
 ): Promise<{ ok: boolean; queued: boolean }> {
   const pubKey = await session.getIdentityPublicKey(hexToBytes(launchId));
   const pubKeyHex = bytesToHex(pubKey.bytes);
+
+  // The NIGHT-balance eligibility check runs against MIDNIGHT, so registration
+  // has to carry a Midnight address. It cannot come from pubKeyHex above —
+  // that is a one-way hash of (domain, secret, launchId), deliberately scoped
+  // per launch so registrations cannot be linked to one person. The connected
+  // wallet's unshielded address is the real thing, and unshielded is the right
+  // one: it is where NIGHT is held.
+  //
+  // Refused here rather than server-side so the person sees it while they can
+  // still act on it — connecting the Midnight wallet they were going to need
+  // for the private buy anyway.
+  const midnightAddress = session.midnight?.unshieldedAddress;
+  if (!midnightAddress) {
+    throw new Error('Connect your Midnight wallet before registering — DarkVeil checks your NIGHT balance on Midnight.');
+  }
+
   const auth = await buildDarkVeilAuthProof(
     apiBase,
     session.cardano,
-    buildBinds('darkveil:register-intent', [launchId, pubKeyHex]),
+    // The Midnight address is inside the signed bytes, so it cannot be swapped
+    // for someone else's after signing — it is what the balance is measured
+    // against. Must stay in step with NP_CIP8::build_binds server-side.
+    buildBinds('darkveil:register-intent', [launchId, pubKeyHex, midnightAddress]),
   );
   return postJson(`${apiBase}/darkveil/register-intent`, {
     launch_id: launchId,
     cardano_address: session.cardano.address,
     midnight_pub_key_hex: pubKeyHex,
+    midnight_address: midnightAddress,
     stake_address: auth.stake_address,
     signature: auth.signature,
     key: auth.key,
