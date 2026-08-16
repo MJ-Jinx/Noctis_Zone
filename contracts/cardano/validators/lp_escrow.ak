@@ -601,6 +601,16 @@ validator lp_escrow {
           datum.lock_duration >= min_lock_duration,
           datum.lock_timestamp == 0,
           interval.contains(self.validity_range, timestamp),
+          // The sealed `timestamp` is the origin the whole 365-day lock is
+          // measured from (`is_lock_expired` adds `lock_duration` to it), and
+          // sealing is permissionless — it rides the graduation transaction,
+          // authorised by the LP value really arriving rather than by a
+          // signature. So the two checks have to work together: containment
+          // alone lets the caller declare a range wide enough to hold both
+          // real chain time and a `timestamp` far from it, and the width
+          // bound is what pins the declared value to now. Any redeemer that
+          // accepts a caller-declared timestamp needs both halves.
+          validity_range_is_narrow(self.validity_range, max_validity_range_width),
           seeded_ada > 0,
           lp_value_received(self, own_ref, datum, seeded_ada),
           // The sealed LP position can't be padded with junk assets.
@@ -1064,6 +1074,10 @@ test seal_lock_succeeds_with_real_value_received() {
       ..transaction.placeholder,
       inputs: [own_input],
       outputs: [continuing_output],
+      // A real, narrow range around the declared seal time. The placeholder's
+      // own range is unbounded, which satisfies containment without saying
+      // anything about when this transaction actually happened.
+      validity_range: interval.between(400, 600),
     }
 
   lp_escrow.spend(
@@ -1165,6 +1179,62 @@ test seal_lock_rejects_timestamp_outside_validity_range() {
     own_ref,
     self,
   )
+}
+
+// `seal_lock_succeeds_with_real_value_received` with the declared seal time
+// moved back by the whole lock duration, and the validity range widened to
+// keep containing it. The range still contains real chain time, so the ledger
+// would carry this transaction; containment alone is satisfied. The width
+// bound is what refuses it, and the second half of the test says why that
+// matters: the lock this transaction tried to write would have been over at
+// the instant it was sealed.
+test seal_lock_rejects_a_seal_time_far_from_real_chain_time() {
+  let now = 1_800_000_000_000
+  let back = now - min_lock_duration - 1
+  let datum = mock_datum(Cancelled, 0)
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: assets.merge(mock_thread_nft(), assets.from_lovelace(2_000_000)),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum =
+    LpEscrowDatum { ..datum, lock_timestamp: back, lp_state: Locked }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: assets.merge(mock_thread_nft(), assets.merge(
+        assets.from_lovelace(2_000_000 + 98_000),
+        assets.from_asset(#"33", "lp", 1000),
+      )),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      validity_range: interval.between(back - 1000, now + 1000),
+    }
+
+  and {
+    !lp_escrow.spend(
+      Some(datum),
+      SealLock { timestamp: back, seeded_ada: 98_000 },
+      own_ref,
+      self,
+    ),
+    // What the refusal is worth: this seal would have produced a position
+    // whose 365 days had already elapsed.
+    is_lock_expired(new_datum, now),
+  }
 }
 
 test seal_lock_fails_if_already_sealed() {

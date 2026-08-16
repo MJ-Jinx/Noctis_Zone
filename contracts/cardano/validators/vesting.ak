@@ -435,13 +435,20 @@ validator vesting {
         and {
           list.has(self.extra_signatories, datum.governor_pub_key_hash),
           datum.vesting_state == NotStarted,
-          // Fix: bind start_timestamp to the tx's real validity
-          // range — same idiom as bonding_curve.ak's ActivateCurve. No
-          // narrow-width bound here (matches ActivateCurve exactly) since
-          // the governor is a trusted signer and legitimate backdating
-          // (e.g. to test a long vesting schedule) is an accepted
-          // pattern already established elsewhere in this codebase.
+          // `start_timestamp` is the origin the entire release schedule is
+          // measured from, so it is bound to real chain time the same way
+          // bonding_curve.ak's ActivateCurve binds `phase_started_at`: the
+          // declared value must sit inside the transaction's validity range,
+          // AND that range must be narrow. Containment on its own is not the
+          // binding it looks like — a range wide enough to hold both real
+          // chain time and a distant `start_timestamp` satisfies it — so the
+          // width bound is the half that makes the declared value mean now.
+          //
+          // A test that wants a schedule already part-elapsed sets
+          // `vest_start_timestamp` in the datum it starts from rather than
+          // declaring a start time the chain would not agree with.
           interval.contains(self.validity_range, start_timestamp),
+          validity_range_is_narrow(self.validity_range, max_validity_range_width),
           new_datum == VestingDatum {
             ..datum,
             vesting_state: Vesting,
@@ -794,6 +801,55 @@ fn mock_cto_ref_input(
   }
 }
 
+// `start_vesting_succeeds_with_governor_signature` with the declared start
+// moved a year into the past and the validity range widened to keep containing
+// it — the governor's own signature is still present, so this is the trusted
+// signer asking for it. The range still contains real chain time, so the
+// ledger would carry the transaction and containment is satisfied; the width
+// bound is what refuses it. That keeps the release schedule measured from when
+// vesting really started, whoever builds the transaction.
+test start_vesting_rejects_a_start_far_from_real_chain_time() {
+  let now = 1_800_000_000_000
+  let back = now - 31_536_000_000
+  let datum = mock_datum(NotStarted, 0)
+  let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
+  let own_address = from_verification_key(#"cc")
+  let own_input =
+    Input {
+      output_reference: own_ref,
+      output: Output {
+        address: own_address,
+        value: mock_thread_nft(),
+        datum: InlineDatum(datum),
+        reference_script: None,
+      },
+    }
+  let new_datum =
+    VestingDatum { ..datum, vesting_state: Vesting, vest_start_timestamp: back }
+  let continuing_output =
+    Output {
+      address: own_address,
+      value: mock_thread_nft(),
+      datum: InlineDatum(new_datum),
+      reference_script: None,
+    }
+  let self =
+    Transaction {
+      ..transaction.placeholder,
+      inputs: [own_input],
+      outputs: [continuing_output],
+      extra_signatories: [#"22"],
+      validity_range: interval.between(back - 1000, now + 1000),
+    }
+
+  !vesting.spend(
+    Some(datum),
+    StartVesting { start_timestamp: back },
+    own_ref,
+    self,
+  )
+}
+
 test start_vesting_succeeds_with_governor_signature() {
   let datum = mock_datum(NotStarted, 0)
   let own_ref = OutputReference { transaction_id: #"00", output_index: 0 }
@@ -823,6 +879,10 @@ test start_vesting_succeeds_with_governor_signature() {
       inputs: [own_input],
       outputs: [continuing_output],
       extra_signatories: [#"22"],
+      // A real, narrow range around the declared start. The placeholder's own
+      // range is unbounded, which satisfies containment without saying
+      // anything about when this transaction actually happened.
+      validity_range: interval.between(400, 600),
     }
 
   vesting.spend(Some(datum), StartVesting { start_timestamp: 500 }, own_ref, self)
