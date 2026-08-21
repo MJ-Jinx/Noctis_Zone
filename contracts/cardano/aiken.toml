@@ -2,12 +2,12 @@ name = "noctis/cardano-contracts"
 version = "0.1.0"
 compiler = "v1.1.23"
 plutus = "v3"
-license = "MIT"
+license = "Apache-2.0"
 description = "Noctis Protocol — Cardano L1 smart contracts (Aiken)"
 
 [repository]
-user = "MJ-Jinx"
-project = "Noctis_Zone"
+user = "NoctisZone"
+project = "Noctis"
 platform = "github"
 
 [[dependencies]]
