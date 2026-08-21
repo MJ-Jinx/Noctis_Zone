@@ -4,6 +4,8 @@
 
 A three-tier token launchpad built on Cardano L1 and Midnight Network. Private buying phases powered by zero-knowledge proofs, identity-verified whale caps, permanent LP lock, and community rescue mechanics.
 
+This project is built on the Midnight Network.
+
 ---
 
 ## Table of Contents
@@ -117,7 +119,7 @@ Full constants in [CLAUDE.md](CLAUDE.md).
 ## Domain + social
 
 - **Website:** [noctis.zone](https://noctis.zone) 
-- **GitHub:** [github.com/MJ-Jinx/Noctis_Zone](https://github.com/MJ-Jinx/Noctis_Zone)
+- **GitHub:** [github.com/NoctisZone/Noctis](https://github.com/NoctisZone/Noctis)
 - **Twitter/X:** [@Noctis_Zone](https://x.com/Noctis_Zone)
 - **Discord:** [discord.gg/FkFwHFN6Aq](https://discord.gg/FkFwHFN6Aq)
 
@@ -125,7 +127,7 @@ Full constants in [CLAUDE.md](CLAUDE.md).
 
 ## License
 
-Private. Internal use only.
+[Apache License 2.0](LICENSE).
 
 ---
 
