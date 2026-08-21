@@ -1,8 +1,8 @@
 // ============================================================================
-// Noctis Protocol — TypeScript Witness Definitions for All 8 Midnight PSMs
+// Noctis Zone — TypeScript Witness Definitions for All 8 Midnight PSMs
 // ============================================================================
 // This file provides the TypeScript witness providers for every PSM contract
-// in the Noctis Protocol. Each PSM requires specific witnesses that supply
+// in the Noctis Zone. Each PSM requires specific witnesses that supply
 // private data (secret keys, nonces, Merkle proofs) to the circuit without
 // revealing them on-chain.
 //

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — curve spends against a published reference script
+// Noctis Zone — curve spends against a published reference script
 // ============================================================================
 // Every Lucid submitter in this codebase EMBEDS the validator it spends:
 // `collectFrom` builds its witness with `PlutusScriptWitness.new_script`, and

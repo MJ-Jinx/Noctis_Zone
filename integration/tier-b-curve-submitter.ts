@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier B public bonding curve, real Lucid submitter
+// Noctis Zone — Tier B public bonding curve, real Lucid submitter
 // ============================================================================
 // bonding_curve_tier_b.ak's BuyTokens (and every other post-mint redeemer)
 // is a custom-Plutus-redeemer spend — Anvil's REST API can't do this (this

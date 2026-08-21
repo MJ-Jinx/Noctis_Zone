@@ -3,7 +3,7 @@ pragma language_version >= 0.16 && <= 0.23;
 import CompactStandardLibrary;
 
 // ============================================================================
-// CREATOR ESCROW PSM — Noctis Protocol (v3 — vesting split out)
+// CREATOR ESCROW PSM — Noctis Zone (v3 — vesting split out)
 // ============================================================================
 //
 // Holds "Stream A" — the creator's bonding curve fee escrow (1.0% of trade

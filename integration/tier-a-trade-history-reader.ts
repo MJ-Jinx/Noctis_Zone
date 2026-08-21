@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A/B Trade History Reader
+// Noctis Zone — Tier A/B Trade History Reader
 // ============================================================================
 // Reconstructs a launch's full real transaction history — every action ever
 // taken against its bonding_curve (and vesting) script UTxOs — by walking

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A/B genesis mint, built with Lucid Evolution
+// Noctis Zone — Tier A/B genesis mint, built with Lucid Evolution
 // ============================================================================
 // Builds the launch's genesis transaction: mints the launch token and its
 // CIP-68 reference NFT under a per-launch one-shot Plutus policy, mints this

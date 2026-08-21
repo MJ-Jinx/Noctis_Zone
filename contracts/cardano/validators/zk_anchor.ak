@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 ZK Anchor Contract (Aiken)
+// Noctis Zone — Cardano L1 ZK Anchor Contract (Aiken)
 // Used by Tier B and Tier C (CLAUDE.md Contract Architecture table)
 // ============================================================================
 // This contract receives and stores ZK proof bundles from Midnight PSMs.

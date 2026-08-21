@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — reading a DarkVeil launch's published state
+// Noctis Zone — reading a DarkVeil launch's published state
 // ============================================================================
 // Everything a launch page needs to render — the phase, the DarkVeil price and
 // allocation, how much has been committed, the Fair Launch Certificate — is

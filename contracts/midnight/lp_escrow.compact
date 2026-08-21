@@ -3,7 +3,7 @@ pragma language_version >= 0.16 && <= 0.23;
 import CompactStandardLibrary;
 
 // ============================================================================
-// LP ESCROW PSM — Noctis Protocol (v2 with CTO support, Midnight Tier C)
+// LP ESCROW PSM — Noctis Zone (v2 with CTO support, Midnight Tier C)
 // ============================================================================
 //
 // Holds LP tokens after graduation with a 365-day lock.

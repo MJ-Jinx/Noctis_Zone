@@ -3,7 +3,7 @@ pragma language_version >= 0.16 && <= 0.23;
 import CompactStandardLibrary;
 
 // ============================================================================
-// TREASURY PSM — Noctis Protocol
+// TREASURY PSM — Noctis Zone
 // ============================================================================
 //
 // Accumulates platform fees (0.6% of each trade) and manages conversion

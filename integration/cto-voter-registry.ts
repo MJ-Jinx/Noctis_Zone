@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: Voter Registry Interface
+// Noctis Zone — CTO Governance: Voter Registry Interface
 // ============================================================================
 // The final piece item #12 (balance-snapshot builder) needs: a queryable
 // store of (cardanoAddress -> CTO voter pubkey) bindings, populated by

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — reading what actually failed
+// Noctis Zone — reading what actually failed
 // ============================================================================
 // The Midnight SDK is built on Effect, and a failure arrives wrapped: a fiber
 // failure holding a tagged error holding the transport error that is the real

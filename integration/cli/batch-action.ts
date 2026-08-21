@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — plan and submit one batch
+// Noctis Zone — plan and submit one batch
 // ============================================================================
 // Reads a launch's curve and its open orders, decides what can be filled, and
 // either reports the plan or submits it.

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — ADA/USD -> Lovelace Conversion
+// Noctis Zone — ADA/USD -> Lovelace Conversion
 // ============================================================================
 //
 // Converts a USD amount into minimum lovelace, using Orcfax's real ADA/USD

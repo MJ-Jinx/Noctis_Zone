@@ -2,7 +2,7 @@
 	"name": "@noctis/integration",
 	"version": "0.1.0",
 	"private": true,
-	"description": "Noctis Protocol integration layer \u00e2\u20ac\u201d Midnight SDK wrapper, Blockfrost client, wallet connections",
+	"description": "Noctis Zone integration layer \u00e2\u20ac\u201d Midnight SDK wrapper, Blockfrost client, wallet connections",
 	"type": "module",
 	"scripts": {
 		"typecheck": "tsc --noEmit -p tsconfig.json",

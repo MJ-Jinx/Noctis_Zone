@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — ZK Fair Launch Certificate Relayer
+// Noctis Zone — ZK Fair Launch Certificate Relayer
 // ============================================================================
 // CLAUDE.md's design: after DarkVeil closes on Midnight, the resulting ZK Fair
 // Launch Certificate needs to be anchored on Cardano L1

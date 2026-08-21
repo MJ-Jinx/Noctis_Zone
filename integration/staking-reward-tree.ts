@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Staking Rewards Pool Merkle reward tree
+// Noctis Zone — Staking Rewards Pool Merkle reward tree
 // ============================================================================
 // Mirrors contracts/cardano/validators/staking_pool.ak's hash_reward_leaf/
 // hash_reward_node/verify_reward_merkle_proof EXACTLY — this is the tree

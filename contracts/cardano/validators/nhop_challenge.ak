@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 N-Hop Challenge Contract (Aiken)
+// Noctis Zone — Cardano L1 N-Hop Challenge Contract (Aiken)
 // Tier B only (CLAUDE.md, 2026-07-12)
 // ============================================================================
 // Implements CLAUDE.md's N-Hop Challenge Window (constants NHOP_CHALLENGE_BOND,

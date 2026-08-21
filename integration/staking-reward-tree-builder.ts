@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Staking Rewards Pool governor reward accountant
+// Noctis Zone — Staking Rewards Pool governor reward accountant
 // ============================================================================
 // The off-chain half staking_pool.ak's whole reward model depends on (see
 // that file's own header): computes each staker's cumulative accrued

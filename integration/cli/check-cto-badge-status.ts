@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: "Completed Successfully" Badge CLI
+// Noctis Zone — CTO Governance: "Completed Successfully" Badge CLI
 // ============================================================================
 // PHP<->Node bridge, same convention as check-night-balance.ts and every
 // other CLI in this directory: real logic lives in cto-badge.ts (tested

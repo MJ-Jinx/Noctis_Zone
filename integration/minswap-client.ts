@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Minswap NIGHT/ADA TWAP Client (eligibility check #2 / Oracle Strategy)
+// Noctis Zone — Minswap NIGHT/ADA TWAP Client (eligibility check #2 / Oracle Strategy)
 // ============================================================================
 //
 // Minswap has a real, live NIGHT-ADA pool (confirmed 2026-07-13, ~$3.1M

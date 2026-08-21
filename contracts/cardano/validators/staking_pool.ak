@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Staking Rewards Pool (2026-07-14)
+// Noctis Zone — Staking Rewards Pool (2026-07-14)
 // ============================================================================
 // Optional per-launch feature, Tier A + B. A creator may allocate a fixed
 // 25% of total supply into this pool at launch (contracts/cardano/

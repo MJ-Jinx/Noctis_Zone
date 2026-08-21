@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Midnight SDK Wrapper
+// Noctis Zone — Midnight SDK Wrapper
 // ============================================================================
 // Wraps @midnight-ntwrk/midnight-js-contracts to provide a typed API for:
 //   1. Deploying / reconnecting to all 8 Noctis PSM contracts

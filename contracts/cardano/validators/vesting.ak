@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 Vesting Contract (Aiken)
+// Noctis Zone — Cardano L1 Vesting Contract (Aiken)
 // Tier A only
 // ============================================================================
 // Tier A's counterpart to contracts/midnight/vesting.compact (Tier B/C).

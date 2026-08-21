@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — cto_governance.ak ExecuteProposal CLI
+// Noctis Zone — cto_governance.ak ExecuteProposal CLI
 // Permissionless — the caller's key here is only used as this CLI's
 // fee-paying/signing wallet, not for authorization. See
 // cardano-cto-execute-proposal-submitter.ts's own header for why this

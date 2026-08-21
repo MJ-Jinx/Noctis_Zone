@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil allocation anchor follow-up
+// Noctis Zone — DarkVeil allocation anchor follow-up
 // AnchorDvAllocationRoot — governor-signed, single-phase (same pattern as
 // activate-tier-a-curve.ts's ActivateCurve; see that file's own header for
 // why single-phase build->sign->submit was chosen over a build(Lucid)/

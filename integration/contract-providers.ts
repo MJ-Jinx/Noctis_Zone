@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — ContractProviders Assembly
+// Noctis Zone — ContractProviders Assembly
 // ============================================================================
 // Nothing in this codebase builds a real MidnightProviders/ContractProviders
 // object today -- integration/midnight-client.ts's every deployContract/

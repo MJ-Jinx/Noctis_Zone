@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — USD → lovelace at the live ADA/USD rate
+// Noctis Zone — USD → lovelace at the live ADA/USD rate
 // ============================================================================
 // The launch fee is denominated in USD and paid in ADA, so something has to
 // convert it. This is that something.

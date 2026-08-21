@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 Token Metadata Contract (Aiken)
+// Noctis Zone — Cardano L1 Token Metadata Contract (Aiken)
 // CIP-68 reference NFT — mutable on-chain token metadata, Tier A
 // ============================================================================
 // This validator guards the CIP-68 reference NFT's UTXO: the datum it holds

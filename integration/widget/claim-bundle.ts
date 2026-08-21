@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — a DarkVeil buyer's own claim bundle, fetched and saveable
+// Noctis Zone — a DarkVeil buyer's own claim bundle, fetched and saveable
 // ============================================================================
 //
 // WHY A BUYER SHOULD HOLD A COPY

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A Preprod Milestone, Phase 6
+// Noctis Zone — Tier A Preprod Milestone, Phase 6
 // Real Cardano transaction submitter: vesting.ak's ClaimVested and
 // bonding_curve.ak's ClaimCreatorFees — the two Stream A/creator-facing
 // claims (CLAUDE.md: "Bonding Curve Escrow" fees vs. token vesting, never

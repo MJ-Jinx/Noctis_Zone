@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Real Cardano transaction submitter for
+// Noctis Zone — Real Cardano transaction submitter for
 // contracts/cardano/validators/cto_sybil_challenge.ak
 // ============================================================================
 // The submission/resolution half of item #16's off-chain evidence pipeline

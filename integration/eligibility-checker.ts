@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil Registration Eligibility Checker
+// Noctis Zone — DarkVeil Registration Eligibility Checker
 // ============================================================================
 //
 // Implements the off-chain half of CLAUDE.md's Registration Eligibility list

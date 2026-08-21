@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — sync Midnight wallets to a usable DUST balance
+// Noctis Zone — sync Midnight wallets to a usable DUST balance
 // ============================================================================
 // A wallet becomes able to pay fees only once its dust sub-wallet has replayed
 // enough chain history to see the DUST its registered NIGHT has generated. That

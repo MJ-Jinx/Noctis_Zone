@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Lucid Evolution submitter for token_metadata.ak
+// Noctis Zone — Lucid Evolution submitter for token_metadata.ak
 // ============================================================================
 // Builds real transactions for revising a launch's CIP-68 metadata. The
 // reference NFT itself is minted at genesis, by the launch token's own

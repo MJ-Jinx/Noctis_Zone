@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CIP-33 reference scripts for the curve spend paths
+// Noctis Zone — CIP-33 reference scripts for the curve spend paths
 // ============================================================================
 // A spending transaction can either EMBED the validator in its witness set or
 // REFERENCE one already sitting in someone else's UTXO. Embedding charges the

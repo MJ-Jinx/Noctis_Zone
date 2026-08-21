@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Blockfrost API Client
+// Noctis Zone — Blockfrost API Client
 // ============================================================================
 // Replaces mock launch data with live Cardano blockchain data via Blockfrost.
 // Used by the WordPress frontend and the Noctis API server to display:

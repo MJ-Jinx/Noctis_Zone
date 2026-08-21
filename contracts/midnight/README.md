@@ -1,4 +1,4 @@
-# Noctis Protocol — Midnight PSM Contracts
+# Noctis Zone — Midnight PSM Contracts
 
 Compact contracts for the Midnight Network PSMs that power Noctis's DarkVeil privacy layer and Tier C fully-private launches.
 

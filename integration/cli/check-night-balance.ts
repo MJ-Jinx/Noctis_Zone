@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — one-shot CLI wrapper around checkNightBalance
+// Noctis Zone — one-shot CLI wrapper around checkNightBalance
 // ============================================================================
 // DarkVeil eligibility check #2 (NIGHT balance >= $50 USD) is the one check
 // PHP genuinely cannot perform itself: Blockfrost's Midnight Indexer only

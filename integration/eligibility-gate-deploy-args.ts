@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — resolve and check the eligibility gate's constructor args
+// Noctis Zone — resolve and check the eligibility gate's constructor args
 // ============================================================================
 // Lifted out of cli/deploy-eligibility-gate.ts so a test can reach it. A CLI
 // runs main() on import and cannot be exercised directly, and this is the part

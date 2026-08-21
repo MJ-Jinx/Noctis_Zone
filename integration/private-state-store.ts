@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Witness-Secret Persistence (reworked 2026-07-15)
+// Noctis Zone — Witness-Secret Persistence (reworked 2026-07-15)
 // ============================================================================
 // ORIGINAL DESIGN (first pass): identity secret key + per-launch buy
 // nonces were RANDOMLY generated once, then stored in the browser's

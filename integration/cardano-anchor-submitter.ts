@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Real Cardano transaction submitter for zk_anchor.ak
+// Noctis Zone — Real Cardano transaction submitter for zk_anchor.ak
 // ============================================================================
 // (2026-07-10): implements `CardanoTxSubmitter` (zk-cert-relayer.ts),
 // previously left as an honestly-unimplemented interface because this repo

@@ -1,4 +1,4 @@
-# Pre-Launch Checklist — Noctis Protocol
+# Pre-Launch Checklist — Noctis Zone
 
 Human sign-off gate. Three stages: website live, preprod contracts, mainnet.
 

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: Balance Snapshot Builder (item #12)
+// Noctis Zone — CTO Governance: Balance Snapshot Builder (item #12)
 // ============================================================================
 // Builds cto_governance.compact's balanceSnapshotRoot Merkle tree for a real
 // launch: enumerate every real Cardano holder of the launch token, exclude

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — fix: serves ONE buyer's own DarkVeil allocation
+// Noctis Zone — fix: serves ONE buyer's own DarkVeil allocation
 // proof, never anyone else's
 // ============================================================================
 // Closes the gap ("no endpoint serves a Tier B buyer's private DarkVeil

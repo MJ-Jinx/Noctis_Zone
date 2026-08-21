@@ -2,7 +2,7 @@
   "name": "@noctis/midnight-contracts",
   "version": "0.1.0",
   "private": true,
-  "description": "Noctis Protocol Midnight PSM contracts and simulation tests",
+  "description": "Noctis Zone Midnight PSM contracts and simulation tests",
   "type": "module",
   "scripts": {
     "compile": "node scripts/run-compile.mjs",

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — NIGHT/USD Price Oracle (eligibility check #2)
+// Noctis Zone — NIGHT/USD Price Oracle (eligibility check #2)
 // ============================================================================
 //
 // Combines Minswap's real NIGHT/ADA TWAP with Orcfax's real ADA/USD datum

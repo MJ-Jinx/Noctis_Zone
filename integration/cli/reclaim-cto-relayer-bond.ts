@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — cto_governance.ak ReclaimRelayerBond CLI
+// Noctis Zone — cto_governance.ak ReclaimRelayerBond CLI
 // Permissionless — the payout destination is fixed by the datum's own
 // pending_relayer_key_hash, same "the invariant is the authorization" idiom
 // as ExecuteProposal. In practice the relayer themselves calls this, but

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: Midnight-to-Cardano Vote Result Relayer
+// Noctis Zone — CTO Governance: Midnight-to-Cardano Vote Result Relayer
 // ============================================================================
 // Item #15. Once a proposal finalizes on Midnight's cto_governance.compact
 // (finalizeProposal has set state to Passed/Failed, and for the types that

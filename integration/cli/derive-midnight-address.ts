@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — derive the fundable Midnight (unshielded) address from a
+// Noctis Zone — derive the fundable Midnight (unshielded) address from a
 // 32-byte wallet seed. Pure key derivation — NO facade, NO providers, NO sync
 // (so it works offline, without the proof-server/indexer being reachable).
 //

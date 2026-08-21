@@ -1,7 +1,7 @@
 {
   "preamble": {
     "title": "noctis/cardano-contracts",
-    "description": "Noctis Protocol — Cardano L1 smart contracts (Aiken)",
+    "description": "Noctis Zone — Cardano L1 smart contracts (Aiken)",
     "version": "0.1.0",
     "plutusVersion": "v3",
     "compiler": {

@@ -1,4 +1,4 @@
-// Noctis Protocol — esbuild build script.
+// Noctis Zone — esbuild build script.
 // Node-platform CLI bundles only (for PHP's proc_open-invoked one-shot
 // checks). Run: node build.mjs [--watch]
 //

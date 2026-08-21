@@ -3,7 +3,7 @@ pragma language_version >= 0.16 && <= 0.23;
 import CompactStandardLibrary;
 
 // ============================================================================
-// CTO GOVERNANCE PSM — Noctis Protocol
+// CTO GOVERNANCE PSM — Noctis Zone
 // ============================================================================
 //
 // Community Takeover Opportunity (CTO) governance system.

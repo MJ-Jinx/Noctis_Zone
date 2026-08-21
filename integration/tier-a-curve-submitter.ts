@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A Preprod Milestone, Phase 4
+// Noctis Zone — Tier A Preprod Milestone, Phase 4
 // Real Cardano transaction submitter for bonding_curve.ak's ActivateCurve
 // and BuyTokens redeemers.
 // ============================================================================

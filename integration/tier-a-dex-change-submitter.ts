@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A Preprod Milestone, Phase 5b
+// Noctis Zone — Tier A Preprod Milestone, Phase 5b
 // Real Cardano transaction submitter for lp_escrow.ak's DEX-whitelist
 // mechanism: ProposeDexChange (multisig-gated, starts the 72h public notice
 // clock) and ExecuteDexChange (permissionless, applies the change once the

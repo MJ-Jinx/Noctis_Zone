@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — turning a plan into a batch transaction
+// Noctis Zone — turning a plan into a batch transaction
 // ============================================================================
 // One transaction spends the curve once and N order UTXOs alongside it. That
 // is the whole reason orders exist: a launch's curve is a single UTXO, so

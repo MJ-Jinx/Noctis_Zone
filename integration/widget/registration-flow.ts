@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil widget: registration flow
+// Noctis Zone — DarkVeil widget: registration flow
 // ============================================================================
 // Registration is the 3-stage pipeline discovered while building this
 // widget (see architecture.html's 2026-07-15 callout): submit an intent →

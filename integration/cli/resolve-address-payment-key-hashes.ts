@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — batch Cardano address -> payment key hash resolver
+// Noctis Zone — batch Cardano address -> payment key hash resolver
 // ============================================================================
 // bonding_curve_tier_b.ak's hash_dv_leaf needs each DarkVeil buyer's real
 // VerificationKeyHash, not their bech32 address — darkveil-registration.php's

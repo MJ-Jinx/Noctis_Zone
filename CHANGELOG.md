@@ -1,6 +1,6 @@
-# Changelog — Noctis Protocol
+# Changelog — Noctis Zone
 
-Notable changes to the Noctis Protocol, by release. Internal development history predating this file lives in a local, non-public record.
+Notable changes to the Noctis Zone, by release. Internal development history predating this file lives in a local, non-public record.
 
 ---
 
@@ -46,7 +46,7 @@ Notable changes to the Noctis Protocol, by release. Internal development history
 
 ## [1.0.0] - 2026-07-31
 
-Initial public release of the consolidated Noctis Protocol codebase.
+Initial public release of the consolidated Noctis Zone codebase.
 
 - Cardano L1 contracts (Tier A, Tier B) — bonding curve, LP escrow, CTO governance, vesting, staking, ZK anchor, N-hop challenge
 - Midnight Network contracts (Tier C, design-complete, build-blocked pending ecosystem dependencies) — bonding curve, eligibility gate, creator escrow, treasury, vesting, LP escrow, CTO governance, staking

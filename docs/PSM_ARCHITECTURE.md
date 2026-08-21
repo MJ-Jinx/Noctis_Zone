@@ -1,4 +1,4 @@
-# Noctis Protocol — System Architecture
+# Noctis Zone — System Architecture
 
 > **Version:** 1.0 (original) + 2026-07-10 accuracy pass 
 > **Last Updated:** July 8, 2026 (original) — sections 2, 3, 4, 5, 10, 12, 17, 18, 19 corrected 2026-07-10 
@@ -972,4 +972,4 @@ This subsection didn't exist in the original document — it covers a real gap f
 
 ---
 
-*This document is the authoritative architecture reference for the Noctis Protocol. For protocol constants and design principles, see [CLAUDE.md](../CLAUDE.md). For open issues and build blockers, see internal tracking.*
+*This document is the authoritative architecture reference for the Noctis Zone. For protocol constants and design principles, see [CLAUDE.md](../CLAUDE.md). For open issues and build blockers, see internal tracking.*

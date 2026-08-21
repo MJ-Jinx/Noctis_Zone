@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — shared CLI I/O helpers
+// Noctis Zone — shared CLI I/O helpers
 // ============================================================================
 // Extracted from ~20 near-identical inline copies across integration/cli/
 // *.ts (each a standalone stdin-JSON-in/stdout-JSON-out script invoked

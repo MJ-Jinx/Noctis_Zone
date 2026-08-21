@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Stage 3: publish a governor-computed allowlist root
+// Noctis Zone — Stage 3: publish a governor-computed allowlist root
 // ============================================================================
 // Stage 1 (intake) and Stage 2 (batch tree-building) are built in the
 // WordPress plugin's darkveil-registration.php. This CLI is Stage 3: takes

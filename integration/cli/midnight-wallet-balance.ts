@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — read a Midnight wallet seed's live NIGHT balance (and a
+// Noctis Zone — read a Midnight wallet seed's live NIGHT balance (and a
 // DUST-capacity figure derived from it). Lightweight: derives the address
 // offline, then queries the public indexer for the unshielded NIGHT balance
 // (getUnshieldedNightBalance — the SAME reliable path check-night-balance

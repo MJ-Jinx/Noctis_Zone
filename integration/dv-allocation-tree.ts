@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier B DarkVeil Allocation Merkle Tree
+// Noctis Zone — Tier B DarkVeil Allocation Merkle Tree
 // ============================================================================
 // Mirrors contracts/cardano/validators/bonding_curve_tier_b.ak's
 // hash_dv_leaf/hash_dv_node/verify_dv_merkle_proof EXACTLY — this is the

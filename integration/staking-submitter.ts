@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Staking Rewards Pool real Cardano submitter
+// Noctis Zone — Staking Rewards Pool real Cardano submitter
 // ============================================================================
 // contracts/cardano/validators/staking_pool.ak — one shared validator
 // address for Tier A AND Tier B (not tier-specific like bonding_curve vs

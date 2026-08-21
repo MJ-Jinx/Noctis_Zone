@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — cross-contract settlement tests
+// Noctis Zone — cross-contract settlement tests
 // ============================================================================
 // This module declares no validator. It exists because a validator module may
 // not import another validator module, so no single contract's own test suite

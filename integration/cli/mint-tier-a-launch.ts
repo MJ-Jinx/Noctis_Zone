@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A/B genesis mint
+// Noctis Zone — Tier A/B genesis mint
 // ============================================================================
 // Builds the launch's genesis transaction and returns it UNSIGNED, for the
 // creator's own browser wallet to sign. Same two-step build → sign → submit

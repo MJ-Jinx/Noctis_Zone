@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil widget: session bootstrap
+// Noctis Zone — DarkVeil widget: session bootstrap
 // ============================================================================
 // The foundation every other widget flow builds on: connects the Cardano
 // wallet (required for every tier — DV eligibility proof, fee payment, and

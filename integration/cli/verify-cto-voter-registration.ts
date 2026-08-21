@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: Voter Registration Verification CLI
+// Noctis Zone — CTO Governance: Voter Registration Verification CLI
 // ============================================================================
 // PHP<->Node bridge, same convention as every other CLI in this directory.
 // A voter's browser submits {cardanoAddress, cip8SignatureHex, cip8KeyHex}

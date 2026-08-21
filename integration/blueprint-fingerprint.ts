@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — is the blueprint on disk the one this bundle was built for?
+// Noctis Zone — is the blueprint on disk the one this bundle was built for?
 // ============================================================================
 // WHY THIS EXISTS
 // The CLI bundles read `contracts/cardano/plutus.json` at RUNTIME, from a path

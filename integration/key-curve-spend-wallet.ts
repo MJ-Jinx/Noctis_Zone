@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — a curve-spend wallet backed by a raw extended key
+// Noctis Zone — a curve-spend wallet backed by a raw extended key
 // ============================================================================
 // Every Tier B curve action has to reference its validator rather than embed
 // it, and the referenced path builds with Mesh. Mesh's own `MeshWallet` covers

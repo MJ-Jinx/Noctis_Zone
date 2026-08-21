@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — placing and cancelling a curve order
+// Noctis Zone — placing and cancelling a curve order
 // ============================================================================
 // A launch's curve is ONE UTXO, so trades against it serialise at one per
 // block. An order is its own UTXO holding the funds to be spent, which any

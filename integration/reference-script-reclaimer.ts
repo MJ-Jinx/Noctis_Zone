@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — reclaiming superseded reference scripts
+// Noctis Zone — reclaiming superseded reference scripts
 // ============================================================================
 // A published reference script locks a deposit — 56 ada for the Tier A curve,
 // 73 for Tier B — and every change to a validator strands the one published

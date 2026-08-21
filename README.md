@@ -1,4 +1,4 @@
-# Noctis Protocol
+# Noctis Zone
 
 **They can't front-run what they can't see.**
 

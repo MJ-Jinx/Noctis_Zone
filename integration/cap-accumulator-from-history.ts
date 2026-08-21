@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — rebuilding the cap accumulator from a launch's history
+// Noctis Zone — rebuilding the cap accumulator from a launch's history
 // ============================================================================
 // The cumulative wallet cap keeps per-wallet totals OFF chain, behind a single
 // 32-byte root in the curve datum. That is what lets the datum stay one size

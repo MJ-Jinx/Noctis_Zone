@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — cumulative wallet-cap accumulator (off-chain half)
+// Noctis Zone — cumulative wallet-cap accumulator (off-chain half)
 // ============================================================================
 // Mirrors contracts/cardano/lib/noctis/cap_accumulator.ak EXACTLY. That module
 // is shared by BOTH curve validators, so this one file serves Tier A and

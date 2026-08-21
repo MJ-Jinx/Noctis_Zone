@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — fixed-size claim nullifiers
+// Noctis Zone — fixed-size claim nullifiers
 // ============================================================================
 // A "has this already been claimed?" record kept as a list of who claimed
 // grows one entry per claimant, forever. It is traversed on every spend and

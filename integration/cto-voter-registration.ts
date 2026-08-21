@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: Governor-Side Voter Registration
+// Noctis Zone — CTO Governance: Governor-Side Voter Registration
 // ============================================================================
 // The other half of item #13 — cto-private-state-store.ts /
 // widget/cto-session.ts (built earlier this session) give a voter a real,

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A Creator Dashboard Widget: browser entry point
+// Noctis Zone — Tier A Creator Dashboard Widget: browser entry point
 // ============================================================================
 // Webpack browser target (integration/webpack.widgets.config.cjs) — bundled
 // to assets/js/tier-a-dashboard-widget.bundle.js in the theme, enqueued only

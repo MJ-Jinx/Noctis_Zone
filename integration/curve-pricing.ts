@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — bonding curve pricing
+// Noctis Zone — bonding curve pricing
 // ============================================================================
 // The single TypeScript copy of what the two Cardano curve validators charge.
 // `bonding_curve.ak` (Tier A, linear) and `bonding_curve_tier_b.ak` (Tier B,

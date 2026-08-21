@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — deploying a contract's circuits across two transactions
+// Noctis Zone — deploying a contract's circuits across two transactions
 // ============================================================================
 // WHAT A DEPLOY WRITES
 // Creating a Midnight contract writes its whole on-chain state in one go: the

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A Preprod Milestone, Phase 2
+// Noctis Zone — Tier A Preprod Milestone, Phase 2
 // Live chain-state reader: bonding_curve / vesting / lp_escrow, by launch_id
 // ============================================================================
 // None of Tier A's 3 relevant validators (bonding_curve.ak, vesting.ak,

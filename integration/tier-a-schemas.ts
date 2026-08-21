@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A shared Lucid Evolution Data schemas
+// Noctis Zone — Tier A shared Lucid Evolution Data schemas
 // ============================================================================
 // Single source of truth for bonding_curve/vesting/lp_escrow's real datum
 // shapes, shared by read-tier-a-launch-state.ts (Phase 2, decode) and

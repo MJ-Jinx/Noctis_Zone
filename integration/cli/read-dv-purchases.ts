@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier B: read-dv-purchases CLI
+// Noctis Zone — Tier B: read-dv-purchases CLI
 // ============================================================================
 // PHP<->Node bridge, same convention as check-cto-badge-status.ts and every
 // other CLI in this directory: real logic lives in read-dv-purchases.ts;

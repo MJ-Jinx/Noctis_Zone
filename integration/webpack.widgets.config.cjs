@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Webpack config for browser widget bundles ONLY.
+// Noctis Zone — Webpack config for browser widget bundles ONLY.
 // ============================================================================
 // (found 2026-07-16, re-confirmed + root-caused 2026-07-17): esbuild's
 // `loader: {'.wasm':'file'}` cannot correctly link wasm-bindgen's

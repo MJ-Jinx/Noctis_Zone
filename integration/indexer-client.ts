@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Midnight Indexer Client (eligibility check #2)
+// Noctis Zone — Midnight Indexer Client (eligibility check #2)
 // ============================================================================
 //
 // Computes a Midnight address's real, current NIGHT balance by querying the

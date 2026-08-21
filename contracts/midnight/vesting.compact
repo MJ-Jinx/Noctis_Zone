@@ -3,7 +3,7 @@ pragma language_version >= 0.16 && <= 0.23;
 import CompactStandardLibrary;
 
 // ============================================================================
-// VESTING PSM — Noctis Protocol
+// VESTING PSM — Noctis Zone
 // ============================================================================
 //
 // Controls the release schedule of the creator's TOKEN allocation (5-10% of

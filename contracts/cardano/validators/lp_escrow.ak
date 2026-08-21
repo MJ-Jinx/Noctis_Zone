@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 LP Escrow Contract (Aiken)
+// Noctis Zone — Cardano L1 LP Escrow Contract (Aiken)
 // Used by Tier A and Tier B (CLAUDE.md Contract Architecture table)
 // ============================================================================
 // This is the Cardano L1 counterpart to the Midnight lp_escrow.compact PSM

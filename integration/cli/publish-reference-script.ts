@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — publish a validator as a CIP-33 reference script
+// Noctis Zone — publish a validator as a CIP-33 reference script
 // ============================================================================
 // A one-time deposit per validator, not per launch: every Noctis validator is
 // unparameterized, so one published output serves every launch of that tier

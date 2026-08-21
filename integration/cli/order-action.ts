@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — the order lifecycle, from the command line
+// Noctis Zone — the order lifecycle, from the command line
 // ============================================================================
 // place   create an order UTXO holding the funds to be traded
 // list    read a launch's open orders

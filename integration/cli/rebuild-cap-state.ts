@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — rebuild a launch's per-wallet cap totals from chain
+// Noctis Zone — rebuild a launch's per-wallet cap totals from chain
 // ============================================================================
 // The cumulative wallet cap keeps its totals off chain behind a 32-byte root,
 // so every trade must arrive already knowing its own total and a proof of it.

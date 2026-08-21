@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — registrant bundle for a DarkVeil launch
+// Noctis Zone — registrant bundle for a DarkVeil launch
 // ============================================================================
 // Produces the two things the buying window needs: the `registrantRoot_` that
 // `startBuying` publishes, and one membership proof per registrant for

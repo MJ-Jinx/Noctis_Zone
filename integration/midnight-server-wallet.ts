@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — server-side (headless) Midnight wallet + provider bridge
+// Noctis Zone — server-side (headless) Midnight wallet + provider bridge
 // ============================================================================
 // (2026-07-21): registerForDarkVeil needs a governor-published allowlist
 // root (updateAllowlistRoot, a governor-only Compact circuit) — but every

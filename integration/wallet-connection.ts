@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Wallet Connection Layer
+// Noctis Zone — Wallet Connection Layer
 // ============================================================================
 // Unified wallet abstraction for both Cardano (CIP-30) and Midnight wallets.
 // Provides a single interface for the frontend to connect users to either

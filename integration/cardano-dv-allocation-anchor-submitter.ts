@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — bonding_curve_tier_b.ak's AnchorDvAllocationRoot
+// Noctis Zone — bonding_curve_tier_b.ak's AnchorDvAllocationRoot
 // ============================================================================
 // Fixes the Merkle root every DarkVeil claim is later proved against.
 // Governor-signed, and accepted only while the curve is still Inactive — so a

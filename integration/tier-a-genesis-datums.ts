@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A Preprod Milestone, Phase 3
+// Noctis Zone — Tier A Preprod Milestone, Phase 3
 // Genesis-datum encoder: BondingCurveDatum / VestingDatum / LpEscrowDatum
 // ============================================================================
 // Produces the 3 CBOR-encoded inline datums a Tier A mint+seed transaction

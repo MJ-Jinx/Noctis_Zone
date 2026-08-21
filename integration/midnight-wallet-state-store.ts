@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Midnight wallet sync-state snapshots
+// Noctis Zone — Midnight wallet sync-state snapshots
 // ============================================================================
 // A Midnight wallet reaches usable state by replaying chain history. On preprod
 // the dust sub-wallet's replay is expensive enough that a single process may not

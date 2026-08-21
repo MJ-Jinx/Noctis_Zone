@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Real Cardano transaction submitter for
+// Noctis Zone — Real Cardano transaction submitter for
 // contracts/cardano/validators/cto_governance.ak's ExecuteProposal
 // ============================================================================
 // Applies a passed, anchored proposal's real consequences (cto_state /

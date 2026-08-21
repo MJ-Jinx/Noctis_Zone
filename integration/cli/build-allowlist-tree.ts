@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — one-shot CLI wrapper around buildAllowlistTree
+// Noctis Zone — one-shot CLI wrapper around buildAllowlistTree
 // ============================================================================
 // Part of the governor batch pipeline this session added: registerForDarkVeil
 // needs a Merkle proof of membership in a governor-published allowlist tree

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Real Cardano transaction submitter for
+// Noctis Zone — Real Cardano transaction submitter for
 // contracts/cardano/validators/cto_governance.ak's ReclaimRelayerBond
 // ============================================================================
 // Permissionless — the payout destination is fixed by the datum's own

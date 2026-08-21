@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: Creator Activity Check (Tier A/B)
+// Noctis Zone — CTO Governance: Creator Activity Check (Tier A/B)
 // ============================================================================
 // Computes the two facts cto_governance.compact's updateCreatorActivity
 // circuit needs from off-chain observation of the real Cardano curve/

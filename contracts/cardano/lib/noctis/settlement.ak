@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — settlement tagging
+// Noctis Zone — settlement tagging
 // ============================================================================
 // A payout check written as "some output pays R at least N" is a question
 // about the whole transaction, not about the spend being validated. Two

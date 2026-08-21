@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Curve order (Tier A + Tier B)
+// Noctis Zone — Curve order (Tier A + Tier B)
 // ============================================================================
 // One UTXO per order. This is what removes contention from the bonding curve:
 // a launch's curve is a single UTXO, so trades against it serialise at one per

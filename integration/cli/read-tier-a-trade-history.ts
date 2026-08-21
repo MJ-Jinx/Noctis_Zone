@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A/B Trade History CLI
+// Noctis Zone — Tier A/B Trade History CLI
 // ============================================================================
 // Thin stdin/stdout wrapper around tier-a-trade-history-reader.ts's
 // getCurveTradeHistory(), same proc_open calling convention as

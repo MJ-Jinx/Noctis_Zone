@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: witness-secret persistence
+// Noctis Zone — CTO Governance: witness-secret persistence
 // ============================================================================
 // Same design and reasoning as private-state-store.ts (reworked
 // 2026-07-15) — a Midnight secret key derived deterministically from a

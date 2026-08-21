@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — redeemer constructor indices, by name
+// Noctis Zone — redeemer constructor indices, by name
 // ============================================================================
 // A redeemer is carried on chain as a constructor INDEX, not a name. Aiken
 // assigns those indices by declaration order, so inserting a variant anywhere

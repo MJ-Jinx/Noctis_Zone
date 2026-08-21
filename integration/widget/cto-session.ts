@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: session bootstrap
+// Noctis Zone — CTO Governance: session bootstrap
 // ============================================================================
 // Client-side entry point for CTO voting/proposing — mirrors
 // widget/wallet-session.ts's shape closely (same wallet-connect +

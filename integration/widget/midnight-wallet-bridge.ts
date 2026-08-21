@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil widget: real Midnight wallet → ContractProviders bridge
+// Noctis Zone — DarkVeil widget: real Midnight wallet → ContractProviders bridge
 // ============================================================================
 // Closes a real gap: no code anywhere in this codebase built a
 // working WalletProvider/MidnightProvider from a connected Midnight wallet,

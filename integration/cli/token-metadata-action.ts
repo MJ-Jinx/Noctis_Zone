@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — token_metadata.ak real Cardano actions
+// Noctis Zone — token_metadata.ak real Cardano actions
 // ============================================================================
 // One consolidated CLI (action-dispatched), matching this repo's own
 // established convention (tier-b-curve-action.ts, staking_action_cli_path).

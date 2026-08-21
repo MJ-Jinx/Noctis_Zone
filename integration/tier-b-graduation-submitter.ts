@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier B Preprod, graduation submitter
+// Noctis Zone — Tier B Preprod, graduation submitter
 // Real Cardano transaction submitter for a TIER B launch's graduation:
 // bonding_curve_tier_b.ak's Graduate + lp_escrow.ak's SealLock +
 // vesting.ak's StartVesting.

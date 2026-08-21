@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — deciding what goes in a batch
+// Noctis Zone — deciding what goes in a batch
 // ============================================================================
 // The batcher's whole job is to propose a set of orders and the outputs that
 // fill them. The curve validator then re-derives all of it and refuses

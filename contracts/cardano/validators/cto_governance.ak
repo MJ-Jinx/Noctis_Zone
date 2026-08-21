@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 CTO Governance Contract (Aiken)
+// Noctis Zone — Cardano L1 CTO Governance Contract (Aiken)
 // Used by Tier A, Tier B, and Tier C (CLAUDE.md Contract Architecture table)
 // ============================================================================
 // This contract is the Cardano L1 anchor for the Midnight CTO Governance PSM.

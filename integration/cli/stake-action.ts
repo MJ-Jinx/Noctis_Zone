@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Staking Rewards Pool real Cardano actions
+// Noctis Zone — Staking Rewards Pool real Cardano actions
 // ============================================================================
 // One consolidated CLI (action-dispatched), matching tier-b-curve-
 // action.ts's established pattern rather than one file per action.

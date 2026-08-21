@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil widget: local-storage password derivation
+// Noctis Zone — DarkVeil widget: local-storage password derivation
 // ============================================================================
 // private-state-store.ts's DarkVeilPrivateStore needs a real password
 // meeting @midnight-ntwrk/midnight-js-utils's validatePassword policy

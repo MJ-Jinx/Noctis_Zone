@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: "Completed Successfully" Badge
+// Noctis Zone — CTO Governance: "Completed Successfully" Badge
 // ============================================================================
 // Determines whether a launch has earned the "CTO Completed Successfully"
 // badge — decided criteria (2026-07-19): at least one FundAllocation /

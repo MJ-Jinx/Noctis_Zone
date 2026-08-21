@@ -1,4 +1,4 @@
-# Noctis Protocol — Security Model
+# Noctis Zone — Security Model
 
 > **Version:** 2.0
 > **Last Updated:** July 12, 2026

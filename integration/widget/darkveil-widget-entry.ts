@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil Private Buy Widget: browser entry point
+// Noctis Zone — DarkVeil Private Buy Widget: browser entry point
 // ============================================================================
 // esbuild browser target (see ../build.mjs's widgetConfig) — bundled to
 // assets/js/darkveil-widget.bundle.js in the theme, enqueued only on

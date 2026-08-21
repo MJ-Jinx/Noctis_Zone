@@ -2,7 +2,7 @@
   "name": "@noctis/zk-proofs",
   "version": "0.1.0",
   "private": true,
-  "description": "Client-side helpers for the domain-separated key derivation and commitment/nullifier hashes used by Noctis Protocol's Compact PSMs",
+  "description": "Client-side helpers for the domain-separated key derivation and commitment/nullifier hashes used by Noctis Zone's Compact PSMs",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",

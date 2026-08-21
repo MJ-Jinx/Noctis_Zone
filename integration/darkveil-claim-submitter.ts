@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier B's ClaimDarkVeilTokens
+// Noctis Zone — Tier B's ClaimDarkVeilTokens
 // ============================================================================
 // Settles one registrant's private DarkVeil allocation on Cardano: they pay
 // the flat DarkVeil price in real ADA and receive their tokens, revealing

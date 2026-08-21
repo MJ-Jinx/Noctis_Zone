@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — register NIGHT UTXOs for DUST generation
+// Noctis Zone — register NIGHT UTXOs for DUST generation
 // ============================================================================
 // Holding NIGHT does not pay for anything. A NIGHT UTXO generates the DUST
 // that fees are denominated in only once it has been REGISTERED for

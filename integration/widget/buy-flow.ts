@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — DarkVeil widget: buy-commit + reveal flow
+// Noctis Zone — DarkVeil widget: buy-commit + reveal flow
 // ============================================================================
 // The exact scenario (GitHub #70) started from: commit and reveal
 // are two separate transactions, potentially across browser sessions. The

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Staking Rewards Pool Widget: browser entry point
+// Noctis Zone — Staking Rewards Pool Widget: browser entry point
 // ============================================================================
 // Webpack browser target (see ../webpack.widgets.config.cjs) — bundled to
 // assets/js/staking-widget.bundle.js in the theme, enqueued on any launch

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — publishing a validator as a reference script
+// Noctis Zone — publishing a validator as a reference script
 // ============================================================================
 // Putting a validator on chain once, so every later spend can name it instead
 // of carrying it. Three things about this are worth stating plainly, because

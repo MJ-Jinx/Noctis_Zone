@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — read SEVERAL Midnight wallet seeds' balances in one pass
+// Noctis Zone — read SEVERAL Midnight wallet seeds' balances in one pass
 // ============================================================================
 // The singular `midnight-wallet-balance.mjs` reads one seed per process. The
 // settings page shows eleven wallets, so it was spawning eleven processes, each

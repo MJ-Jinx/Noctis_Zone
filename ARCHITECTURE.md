@@ -1,4 +1,4 @@
-# Architecture — Noctis Protocol
+# Architecture — Noctis Zone
 
 High-level structural diagrams for the protocol. For full contract specs, constants, and open design questions, see [CLAUDE.md](CLAUDE.md), internal tracking — this file is a visual reference, not the source of truth for any individual decision.
 
@@ -27,7 +27,7 @@ High-level structural diagrams for the protocol. For full contract specs, consta
 Tier A never touches Midnight — it's Aiken-only. Tier B is dual-chain: one merged Midnight PSM handles DarkVeil registration/private-buying only; the public bonding curve, LP Escrow, CTO Governance, and the ZK Anchor all live on Cardano L1 (moved off Midnight entirely once DarkVeil closes, since the public phase needs no privacy and Cardano can enforce real payment natively — 2026-07-09). Tier C moves everything onto Midnight — including the bonding curve, merged into one contract with Eligibility Gate and DarkVeil — except the ZK Fair Launch Certificate anchor and CTO Governance, which are relayed to Cardano L1 for public verifiability even though the launch itself is Midnight-native.
 
 ```
-NOCTIS PROTOCOL
+NOCTIS ZONE
 
 ┌───────────────────┐ ┌──────────────────────────┐ ┌──────────────────────────┐
 │ TIER A            │ │ TIER B                   │ │ TIER C                   │

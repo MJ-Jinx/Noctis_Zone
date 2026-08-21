@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Raw compactc Output -> compact-js Effect Adapter
+// Noctis Zone — Raw compactc Output -> compact-js Effect Adapter
 // ============================================================================
 // Every `compactc`-generated contract class (see any
 // contracts/midnight/compiled/<psm>/contract/index.d.ts) declares a fourth

@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO Governance: Bonded Sybil Challenge, Evidence Half
+// Noctis Zone — CTO Governance: Bonded Sybil Challenge, Evidence Half
 // (item #16's remaining piece)
 // ============================================================================
 // contracts/cardano/validators/cto_sybil_challenge.ak is a bonded,

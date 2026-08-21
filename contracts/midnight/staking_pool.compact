@@ -3,7 +3,7 @@ pragma language_version >= 0.16 && <= 0.23;
 import CompactStandardLibrary;
 
 // ============================================================================
-// STAKING REWARDS POOL PSM — Noctis Protocol (Tier C only) — 2026-07-14
+// STAKING REWARDS POOL PSM — Noctis Zone (Tier C only) — 2026-07-14
 // ============================================================================
 //
 // Optional per-launch feature: a creator allocates STAKING_ALLOC_PCT (25%,

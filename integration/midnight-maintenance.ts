@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — completing a contract deployed in phases
+// Noctis Zone — completing a contract deployed in phases
 // ============================================================================
 // A deploy writes the whole contract state at once: the constructor's ledger
 // plus one verifier key per exported circuit. A contract with many circuits is

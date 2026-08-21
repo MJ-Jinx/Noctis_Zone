@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Real Cardano transaction submitter for
+// Noctis Zone — Real Cardano transaction submitter for
 // contracts/cardano/validators/cto_governance.ak's AnchorVoteResult
 // ============================================================================
 // The Midnight-to-Cardano half of CTO governance's relay (item #15): once a

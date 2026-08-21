@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — allowlist bundle for a DarkVeil launch
+// Noctis Zone — allowlist bundle for a DarkVeil launch
 // ============================================================================
 // Turns a set of server-held wallets into the two things a DarkVeil launch
 // needs: the `allowlistRoot_` sealed at deploy, and one membership proof per

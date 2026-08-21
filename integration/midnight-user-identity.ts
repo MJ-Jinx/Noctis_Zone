@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — a server-held wallet's Midnight user identity
+// Noctis Zone — a server-held wallet's Midnight user identity
 // ============================================================================
 // `registerForDarkVeil` identifies its caller as
 // `deriveUserPublicKey(getUserSecret(), launchId)` — a hash of a witness secret

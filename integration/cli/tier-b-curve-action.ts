@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier B public bonding curve, real Cardano actions
+// Noctis Zone — Tier B public bonding curve, real Cardano actions
 // ============================================================================
 // One consolidated CLI (action-dispatched) rather than 7 near-identical
 // per-redeemer files, matching the class this session's own fix

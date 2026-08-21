@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 Bonding Curve Contract (Aiken)
+// Noctis Zone — Cardano L1 Bonding Curve Contract (Aiken)
 // Tier A only
 // ============================================================================
 // Tier A never touches Midnight — this is the entire public sale mechanism

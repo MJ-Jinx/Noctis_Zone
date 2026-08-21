@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — CTO anchor: the bundle reference, derived
+// Noctis Zone — CTO anchor: the bundle reference, derived
 // ============================================================================
 // The TypeScript twin of `derive_proof_bundle_hash` in
 // `contracts/cardano/validators/cto_governance.ak`.

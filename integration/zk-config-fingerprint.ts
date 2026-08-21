@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — are these the ZK artifacts this bundle was built for?
+// Noctis Zone — are these the ZK artifacts this bundle was built for?
 // ============================================================================
 // WHY THIS EXISTS
 // `contracts/midnight/compiled_realzk/` holds the compiled Compact artifacts a

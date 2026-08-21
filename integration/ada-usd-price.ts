@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — ADA/USD price
+// Noctis Zone — ADA/USD price
 // ============================================================================
 // Replaces the Orcfax on-chain feed, which was withdrawn on 2026-08-04: its
 // preprod address had been dormant since June 2024 and no mainnet address was

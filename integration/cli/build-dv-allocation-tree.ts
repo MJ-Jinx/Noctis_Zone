@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — one-shot CLI wrapper around buildDvAllocationTree
+// Noctis Zone — one-shot CLI wrapper around buildDvAllocationTree
 // ============================================================================
 // Governor-side: after DarkVeil closes, computes the Merkle root
 // AnchorDvAllocationRoot anchors on bonding_curve_tier_b.ak — pure

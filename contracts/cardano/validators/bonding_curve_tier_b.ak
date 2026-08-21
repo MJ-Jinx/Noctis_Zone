@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 Bonding Curve Contract (Aiken)
+// Noctis Zone — Cardano L1 Bonding Curve Contract (Aiken)
 // Tier B — public phase only
 // ============================================================================
 // Resolution (2026-07-09): Tier B's public bonding curve moved from a

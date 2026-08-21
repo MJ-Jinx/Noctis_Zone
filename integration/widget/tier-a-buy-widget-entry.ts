@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Tier A Buy Widget: browser entry point
+// Noctis Zone — Tier A Buy Widget: browser entry point
 // ============================================================================
 // esbuild browser target (see ../build.mjs's tierABuyWidgetConfig) — bundled
 // to assets/js/tier-a-buy-widget.bundle.js in the theme, enqueued only on

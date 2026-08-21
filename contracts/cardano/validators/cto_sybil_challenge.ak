@@ -1,5 +1,5 @@
 // ============================================================================
-// Noctis Protocol — Cardano L1 CTO Vote Sybil Challenge Contract (Aiken)
+// Noctis Zone — Cardano L1 CTO Vote Sybil Challenge Contract (Aiken)
 // Tier A, B, and C (CLAUDE.md's CTO Governance runs on Midnight for all
 // three tiers — see cto_governance.compact/cto_governance.ak)
 // ============================================================================
